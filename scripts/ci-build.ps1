@@ -43,10 +43,12 @@ $opensslRoot = @($env:OPENSSL_ROOT_DIR, 'C:\Program Files\OpenSSL', 'C:\Program 
     Where-Object { $_ -and (Test-Path -LiteralPath (Join-Path $_ 'include\openssl\opensslv.h')) } |
     Select-Object -First 1
 if (-not $opensslRoot) { throw 'Windows runner 上未找到 OpenSSL 开发文件。' }
+if (Test-Path -LiteralPath 'C:\openssl') { Remove-Item -LiteralPath 'C:\openssl' -Force }
+New-Item -ItemType Junction -Path 'C:\openssl' -Target $opensslRoot | Out-Null
 
 $configDir = Join-Path $sourceRoot 'conf'
 New-Item -ItemType Directory -Path $configDir -Force | Out-Null
-$cmakeOptions = "-DBOOST_ROOT=C:/local/boost_1_87_0 -DOPENSSL_ROOT_DIR=$($opensslRoot.Replace('\','/')) -DOPENSSL_USE_STATIC_LIBS=FALSE -DCMAKE_RC_COMPILER=rc -DCMAKE_NINJA_FORCE_RESPONSE_FILE=ON -DCMAKE_NINJA_CMCLDEPS_RC=OFF -DCMAKE_C_USE_RESPONSE_FILE_FOR_OBJECTS=ON -DCMAKE_CXX_USE_RESPONSE_FILE_FOR_OBJECTS=ON -DCMAKE_C_USE_RESPONSE_FILE_FOR_INCLUDES=ON -DCMAKE_CXX_USE_RESPONSE_FILE_FOR_INCLUDES=ON -DCMAKE_C_USE_RESPONSE_FILE_FOR_LIBRARIES=ON -DCMAKE_CXX_USE_RESPONSE_FILE_FOR_LIBRARIES=ON"
+$cmakeOptions = "-DBOOST_ROOT=C:/local/boost_1_87_0 -DOPENSSL_ROOT_DIR=C:/openssl -DOPENSSL_USE_STATIC_LIBS=FALSE -DCMAKE_RC_COMPILER=rc -DCMAKE_NINJA_FORCE_RESPONSE_FILE=ON -DCMAKE_NINJA_CMCLDEPS_RC=OFF -DCMAKE_C_USE_RESPONSE_FILE_FOR_OBJECTS=ON -DCMAKE_CXX_USE_RESPONSE_FILE_FOR_OBJECTS=ON -DCMAKE_C_USE_RESPONSE_FILE_FOR_INCLUDES=ON -DCMAKE_CXX_USE_RESPONSE_FILE_FOR_INCLUDES=ON -DCMAKE_C_USE_RESPONSE_FILE_FOR_LIBRARIES=ON -DCMAKE_CXX_USE_RESPONSE_FILE_FOR_LIBRARIES=ON"
 $config = @"
 CCOMPILERC="cl"
 CCOMPILERCXX="cl"
@@ -59,6 +61,7 @@ CCUSTOMOPTIONS="$cmakeOptions"
 [IO.File]::WriteAllText((Join-Path $configDir 'config.sh'), $config, [Text.UTF8Encoding]::new($false))
 
 $env:BOOST_ROOT = $boostRoot
+$env:OPENSSL_ROOT_DIR = 'C:\openssl'
 $env:CTOOLS_BUILD = 'all'
 $env:CMAKE_GENERATOR = 'Ninja'
 $env:CC = 'cl'
