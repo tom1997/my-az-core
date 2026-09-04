@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-09-04T00:00:00Z",
+  "core": {
+    "name": "playerbot-core",
+    "repository": "https://github.com/mod-playerbots/azerothcore-wotlk.git",
+    "branch": "Playerbot",
+    "commit": "47960183bb03b83e8943eb2f0f39c16df9710c9d"
+  },
+  "modules": [
+    {
+      "name": "mod-playerbots",
+      "repository": "https://github.com/mod-playerbots/mod-playerbots.git",
+      "branch": "master",
+      "commit": "2f7d9f774987d0157c6a0d0cc08c40bec3db3945",
+      "profiles": ["stable", "enhanced"]
+    },
+    {
+      "name": "mod-autobalance",
+      "repository": "https://github.com/azerothcore/mod-autobalance.git",
+      "branch": "master",
+      "commit": "73d4ad3c379fbfc35c63b5b9b44fba1f7d9e213d",
+      "profiles": ["stable", "enhanced"]
+    },
+    {
+      "name": "mod-rdf-expansion",
+      "repository": "https://github.com/azerothcore/mod-rdf-expansion.git",
+      "branch": "master",
+      "commit": "c7a91c5973cda4529495b52b89375913f98726d6",
+      "profiles": ["stable", "enhanced"]
+    },
+    {
+      "name": "mod-aoe-loot",
+      "repository": "https://github.com/azerothcore/mod-aoe-loot.git",
+      "branch": "master",
+      "commit": "b5c663572d936985c19dc8b499ecea60e1da570d",
+      "profiles": ["stable", "enhanced"]
+    },
+    {
+      "name": "mod-transmog",
+      "repository": "https://github.com/azerothcore/mod-transmog.git",
+      "branch": "master",
+      "commit": "0d85cbc53d63ce2df8527169ce6ae47f5f6f6ba8",
+      "profiles": ["stable", "enhanced"]
+    },
+    {
+      "name": "mod-random-enchants",
+      "repository": "https://github.com/azerothcore/mod-random-enchants.git",
+      "branch": "master",
+      "commit": "02a2e0d83b3cfad039bf1967177326aef8dd71f5",
+      "profiles": ["enhanced"]
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+.idea/
+.vscode/*.log
+.cache/
+build/
+dist/
+artifacts/
+*.zip
+*.7z
+*.pdb
+*.log
+*.pid
+*.local.json
+runtime.settings.json
+secrets.json
+modules/custom/*/.git/
+!modules/custom/.gitkeep

@@ -1,0 +1,44 @@
+name: dev-build
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dev-build-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-build:
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [stable, enhanced]
+    runs-on: windows-2022
+    name: ${{ matrix.profile }} / Windows x64
+    env:
+      BOOST_ROOT: C:\local\boost_1_87_0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            C:\local\boost_1_87_0
+            C:\tools\mysql\current
+          key: windows-build-deps-boost-1.87.0-mysql-8.4.9
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Build and package
+        shell: pwsh
+        run: ./scripts/ci-build.ps1 -Profile '${{ matrix.profile }}' -BuildType RelWithDebInfo
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.profile }}-windows
+          path: artifacts/${{ matrix.profile }}-*
+          retention-days: 14
+          if-no-files-found: error

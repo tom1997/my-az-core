@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "installRoot": "D:\\AzerothCore",
+  "clientPath": "D:\\AzerothCore\\client-zhCN",
+  "mysqlPort": 3307,
+  "realmName": "My AzerothCore",
+  "realmAddress": "127.0.0.1",
+  "realmLocalAddress": "127.0.0.1",
+  "authPort": 3724,
+  "worldPort": 8085,
+  "mapUpdateThreads": 6,
+  "randomBots": 2000,
+  "botActiveAlonePercent": 10,
+  "disableBotsWithoutPlayers": true,
+  "rdfExpansion": 0,
+  "randomEnchantsEnabled": false,
+  "randomEnchantChance1": 10.0,
+  "randomEnchantChance2": 10.0,
+  "randomEnchantChance3": 0.0,
+  "backupDailyRetention": 7,
+  "backupWeeklyRetention": 4
+}
