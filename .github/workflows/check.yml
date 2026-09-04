@@ -13,7 +13,7 @@ jobs:
   repository-checks:
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Validate repository, configuration and SQL
         shell: pwsh
         run: ./scripts/check.ps1

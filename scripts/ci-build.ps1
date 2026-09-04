@@ -22,7 +22,7 @@ if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) {
 $boostRoot = 'C:\local\boost_1_87_0'
 if (-not (Test-Path -LiteralPath (Join-Path $boostRoot 'boost\version.hpp'))) {
     $boostExe = Join-Path $env:RUNNER_TEMP 'boost_1_87_0.exe'
-    Invoke-WebRequest -Uri 'https://master.dl.sourceforge.net/project/boost/boost-binaries/1.87.0/boost_1_87_0-msvc-14.3-64.exe?viasf=1' -OutFile $boostExe
+    Invoke-WebRequest -Uri 'https://archives.boost.io/release/1.87.0/binaries/boost_1_87_0-msvc-14.3-64.exe' -OutFile $boostExe
     if ((Get-Item -LiteralPath $boostExe).Length -lt 50MB) { throw 'Boost 下载文件异常。' }
     $process = Start-Process -FilePath $boostExe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',"/DIR=$boostRoot" -Wait -PassThru
     if ($process.ExitCode -ne 0) { throw "Boost 安装失败：$($process.ExitCode)" }
