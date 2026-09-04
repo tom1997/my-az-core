@@ -46,14 +46,24 @@ $symbolsStage = Join-Path $WorkingRoot "symbols-$Profile"
 if (Test-Path -LiteralPath $symbolsStage) { Remove-Item -LiteralPath $symbolsStage -Recurse -Force }
 New-Item -ItemType Directory -Path $symbolsStage | Out-Null
 $runtimeDist = Join-Path $stage 'dist'
-foreach ($pdb in Get-ChildItem -LiteralPath $runtimeDist -Filter '*.pdb' -File -Recurse) {
-    $relative = [IO.Path]::GetRelativePath($runtimeDist, $pdb.FullName)
-    $destination = Join-Path $symbolsStage $relative
-    New-Item -ItemType Directory -Path (Split-Path $destination -Parent) -Force | Out-Null
-    Copy-Item -LiteralPath $pdb.FullName -Destination $destination
-    Remove-Item -LiteralPath $pdb.FullName -Force
+$symbolSources = @(
+    [pscustomobject]@{ Root = $runtimeDist; Prefix = 'dist'; RemoveFromRuntime = $true },
+    [pscustomobject]@{ Root = (Join-Path $sourceRoot 'var\build\obj'); Prefix = 'build'; RemoveFromRuntime = $false }
+)
+$symbolCount = 0
+foreach ($symbolSource in $symbolSources) {
+    foreach ($pdb in Get-ChildItem -LiteralPath $symbolSource.Root -Filter '*.pdb' -File -Recurse -ErrorAction SilentlyContinue) {
+        $relative = [IO.Path]::GetRelativePath($symbolSource.Root, $pdb.FullName)
+        $destination = Join-Path $symbolsStage (Join-Path $symbolSource.Prefix $relative)
+        New-Item -ItemType Directory -Path (Split-Path $destination -Parent) -Force | Out-Null
+        Copy-Item -LiteralPath $pdb.FullName -Destination $destination -Force
+        $symbolCount++
+        if ($symbolSource.RemoveFromRuntime) { Remove-Item -LiteralPath $pdb.FullName -Force }
+    }
 }
+if ($symbolCount -eq 0) { throw '构建成功，但没有找到任何 PDB 调试符号。' }
 Copy-Item -LiteralPath (Join-Path $stage 'source-manifest.json') -Destination $symbolsStage
+Copy-Item -LiteralPath (Join-Path $stage 'source-manifest.json') -Destination (Join-Path $ArtifactRoot "$Profile-source-manifest.json") -Force
 
 $runtimeZip = Join-Path $ArtifactRoot "$Profile-runtime.zip"
 $symbolsZip = Join-Path $ArtifactRoot "$Profile-debug-symbols.zip"
