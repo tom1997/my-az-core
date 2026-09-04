@@ -72,4 +72,8 @@ if (-not (Test-Path -LiteralPath $bash)) { throw "找不到 Git Bash：$bash" }
 & $bash -lc "cd /c/azbuild/source && ./acore.sh compiler build"
 if ($LASTEXITCODE -ne 0) { throw "AzerothCore $Profile 构建失败。" }
 
+$buildRoot = Join-Path $sourceRoot 'var\build\obj'
+& cmake --install $buildRoot --config $BuildType
+if ($LASTEXITCODE -ne 0) { throw "AzerothCore $Profile 安装到发布目录失败。" }
+
 & (Join-Path $PSScriptRoot 'package-build.ps1') -Profile $Profile -WorkingRoot $WorkingRoot -ArtifactRoot $ArtifactRoot
