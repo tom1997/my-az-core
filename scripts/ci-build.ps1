@@ -83,7 +83,11 @@ if (-not $runtimeBin) { throw '安装后找不到 authserver.exe。' }
 $runtimeDependencies = @(
     (Join-Path $mysqlRoot 'lib\libmysql.dll')
 ) + @(Get-ChildItem -LiteralPath $opensslRoot -Filter 'libcrypto-3*.dll' -File -Recurse | Select-Object -ExpandProperty FullName) +
-    @(Get-ChildItem -LiteralPath $opensslRoot -Filter 'libssl-3*.dll' -File -Recurse | Select-Object -ExpandProperty FullName)
+    @(Get-ChildItem -LiteralPath $opensslRoot -Filter 'libssl-3*.dll' -File -Recurse | Select-Object -ExpandProperty FullName) +
+    @(Get-ChildItem -LiteralPath $opensslRoot -Filter 'legacy.dll' -File -Recurse | Select-Object -ExpandProperty FullName)
+if (-not ($runtimeDependencies | Where-Object { [IO.Path]::GetFileName($_) -ieq 'legacy.dll' })) {
+    throw "OpenSSL 运行时中找不到 legacy.dll：$opensslRoot"
+}
 foreach ($dependency in $runtimeDependencies | Select-Object -Unique) {
     if (-not (Test-Path -LiteralPath $dependency)) { throw "缺少运行时依赖：$dependency" }
     Copy-Item -LiteralPath $dependency -Destination $runtimeBin -Force

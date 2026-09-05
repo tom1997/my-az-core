@@ -40,6 +40,20 @@ function Get-AzPaths {
     }
 }
 
+function Get-ReleaseBinPath {
+    param([Parameter(Mandatory)][string]$ReleasePath)
+
+    foreach ($candidate in @(
+        (Join-Path $ReleasePath 'dist\bin'),
+        (Join-Path $ReleasePath 'dist')
+    )) {
+        if (Test-Path -LiteralPath (Join-Path $candidate 'worldserver.exe')) {
+            return $candidate
+        }
+    }
+    throw "当前 release 中找不到 worldserver.exe：$ReleasePath"
+}
+
 function Assert-SafeInstallRoot {
     param([string]$Path)
 

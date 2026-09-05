@@ -13,6 +13,11 @@ if (-not (Test-Path -LiteralPath $distRoot)) { throw "找不到构建输出：$d
 $auth = Get-ChildItem -LiteralPath $distRoot -Filter 'authserver.exe' -File -Recurse | Select-Object -First 1
 $world = Get-ChildItem -LiteralPath $distRoot -Filter 'worldserver.exe' -File -Recurse | Select-Object -First 1
 if (-not $auth -or -not $world) { throw '构建输出缺少 authserver.exe 或 worldserver.exe。' }
+foreach ($runtimeDependency in @('libmysql.dll', 'legacy.dll')) {
+    if (-not (Get-ChildItem -LiteralPath $distRoot -Filter $runtimeDependency -File -Recurse | Select-Object -First 1)) {
+        throw "构建输出缺少运行时依赖：$runtimeDependency"
+    }
+}
 
 New-Item -ItemType Directory -Path $ArtifactRoot -Force | Out-Null
 $stage = Join-Path $WorkingRoot "package-$Profile"

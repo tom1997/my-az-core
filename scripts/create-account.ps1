@@ -16,7 +16,7 @@ try { $password = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) } fin
 if ($password.Length -lt 3 -or $password.Length -gt 16 -or $password -match '\s') { throw '密码必须为 3-16 位且不能包含空白字符。' }
 
 $releasePath = (Get-Content -LiteralPath (Join-Path $paths.State 'current-release.txt') -Raw).Trim()
-$bin = Join-Path $releasePath 'dist\bin'
+$bin = Get-ReleaseBinPath -ReleasePath $releasePath
 $world = Join-Path $bin 'worldserver.exe'
 $commands = @("account create $Username $password", "account set gmlevel $Username $GmLevel -1", 'server shutdown 1')
 Push-Location $bin
