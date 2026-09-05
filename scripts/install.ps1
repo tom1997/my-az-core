@@ -184,6 +184,16 @@ if ($autoBalance) {
 }
 $rdf = Find-ModuleConfig 'mod-rdf-expansion.conf'
 if ($rdf) { Set-ConfigValue $rdf 'RDF.Expansion' ([string]$settings.rdfExpansion) }
+$dungeonClear = Find-ModuleConfig 'mod_dungeon_clear.conf'
+if ($dungeonClear) {
+    Set-ConfigValue $dungeonClear 'DungeonClear.Enable' $(if ($settings.dungeonClearEnabled) {'1'} else {'0'})
+    Set-ConfigValue $dungeonClear 'DungeonClear.LootMinQuality' ([string]$settings.dungeonClearLootMinQuality)
+    Set-ConfigValue $dungeonClear 'DungeonClear.BetterLootRolling' $(if ($settings.dungeonClearBetterLootRolling) {'1'} else {'0'})
+    Set-ConfigValue $dungeonClear 'DungeonClear.SmartRest' $(if ($settings.dungeonClearSmartRest) {'1'} else {'0'})
+    Set-ConfigValue $dungeonClear 'DungeonClear.PullDynamicMaxLeeroyMobs' ([string]$settings.dungeonClearPullDynamicMaxLeeroyMobs)
+    Set-ConfigValue $dungeonClear 'DungeonClear.DungeonQueueFill.Enable' $(if ($settings.dungeonClearQueueFillEnabled) {'1'} else {'0'})
+    Set-ConfigValue $dungeonClear 'DungeonClear.DungeonQueueFill.AutoClear' '0'
+}
 $randomEnchants = Find-ModuleConfig 'random_enchants.conf'
 if ($randomEnchants) {
     Set-ConfigValue $randomEnchants 'RandomEnchants.Enable' $(if ($settings.randomEnchantsEnabled) {'1'} else {'0'})

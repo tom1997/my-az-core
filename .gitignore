@@ -1,6 +1,7 @@
 .idea/
 .vscode/*.log
 .cache/
+.research/
 build/
 dist/
 artifacts/

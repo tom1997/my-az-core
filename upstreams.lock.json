@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-09-04T00:00:00Z",
+  "generatedAt": "2026-09-05T00:00:00Z",
   "core": {
     "name": "playerbot-core",
     "repository": "https://github.com/mod-playerbots/azerothcore-wotlk.git",
@@ -49,6 +49,13 @@
       "branch": "master",
       "commit": "02a2e0d83b3cfad039bf1967177326aef8dd71f5",
       "profiles": ["enhanced"]
+    },
+    {
+      "name": "mod-dungeon-clear",
+      "repository": "https://github.com/jrad7/mod-dungeon-clear.git",
+      "branch": "master",
+      "commit": "b0884fd25df4dd6317b6962b68c5671e3191d41b",
+      "profiles": ["stable", "enhanced"]
     }
   ]
 }

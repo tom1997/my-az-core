@@ -10,6 +10,7 @@
 - RDF Expansion（默认 Classic）
 - AOE Loot
 - Transmog
+- Dungeon Clear（机器人坦克自主路线、拉怪、开门和清理 Boss）
 - Random Enchants（仅 enhanced 包，默认关闭）
 
 上游版本全部固定在 [`upstreams.lock.json`](upstreams.lock.json)，不会在生产构建中静默追随 master。
@@ -37,6 +38,8 @@
 ```
 
 生成的模块位于 `modules/custom/mod-my-feature`。提交并推送后，GitHub Actions 会在 Windows 上同时验证 stable 和 enhanced 构建。详细说明见 [`CONTRIBUTING.md`](CONTRIBUTING.md) 和 [`docs/development.zh-CN.md`](docs/development.zh-CN.md)。
+
+Dungeon Clear 的启用条件、命令和默认安全设置见 [`docs/dungeon-clear.zh-CN.md`](docs/dungeon-clear.zh-CN.md)。
 
 ## 重要边界
 
