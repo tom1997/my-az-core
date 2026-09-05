@@ -185,9 +185,26 @@ if ($autoBalance) {
     Set-ConfigValue $autoBalance 'AutoBalance.MinPlayers.Heroic' '1'
     Set-ConfigValue $autoBalance 'AutoBalance.LevelScaling.DynamicLevel.Ceiling.Dungeons' '1'
     Set-ConfigValue $autoBalance 'AutoBalance.LevelScaling.DynamicLevel.Floor.Dungeons' '5'
+    # Mythic Plus owns scaling in its WotLK heroic pool. Disabling AutoBalance
+    # there prevents health and damage from being multiplied twice.
+    Set-ConfigValue $autoBalance 'AutoBalance.Disable.PerInstance' ('"' + [string](Get-SettingValue $settings 'autoBalanceDisabledInstanceIds' '574,575,576,578,599,600,601,602,604,619,632,658') + '"')
 }
 $rdf = Find-ModuleConfig 'mod-rdf-expansion.conf'
 if ($rdf) { Set-ConfigValue $rdf 'RDF.Expansion' ([string]$settings.rdfExpansion) }
+$ahbot = Find-ModuleConfig 'mod_ahbot.conf'
+if ($ahbot) {
+    # Account/GUID are deliberately left at zero until configure-ahbot.ps1
+    # binds a dedicated, normal character to the market maker.
+    Set-ConfigValue $ahbot 'AuctionHouseBot.EnableSeller' $(if (Get-SettingValue $settings 'auctionHouseBotSellerEnabled' $false) {'1'} else {'0'})
+    Set-ConfigValue $ahbot 'AuctionHouseBot.EnableBuyer' $(if (Get-SettingValue $settings 'auctionHouseBotBuyerEnabled' $false) {'1'} else {'0'})
+}
+$mythicPlus = Find-ModuleConfig 'mod_mythic_plus.conf'
+if ($mythicPlus) {
+    Set-ConfigValue $mythicPlus 'MythicPlus.Enable' $(if (Get-SettingValue $settings 'mythicPlusEnabled' $true) {'1'} else {'0'})
+    Set-ConfigValue $mythicPlus 'MythicPlus.Penalty.OnDeath' ([string](Get-SettingValue $settings 'mythicPlusPenaltyOnDeathSeconds' 5))
+    Set-ConfigValue $mythicPlus 'MythicPlus.KeystoneBuyTimer' ([string](Get-SettingValue $settings 'mythicPlusKeystoneBuyTimerMinutes' 0))
+    Set-ConfigValue $mythicPlus 'MythicPlus.DropKeystoneOnDungeonComplete' '1'
+}
 $dungeonClear = Find-ModuleConfig 'mod_dungeon_clear.conf'
 if ($dungeonClear) {
     Set-ConfigValue $dungeonClear 'DungeonClear.Enable' $(if ($settings.dungeonClearEnabled) {'1'} else {'0'})

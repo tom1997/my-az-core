@@ -16,6 +16,18 @@ function Get-RuntimeSettings {
     return Get-Content -LiteralPath $SettingsPath -Raw | ConvertFrom-Json
 }
 
+function Get-SettingValue {
+    param(
+        [Parameter(Mandatory)][object]$Settings,
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][AllowNull()][object]$Default
+    )
+
+    $property = $Settings.PSObject.Properties[$Name]
+    if ($null -eq $property -or $null -eq $property.Value) { return $Default }
+    return $property.Value
+}
+
 function Get-AzPaths {
     param([object]$Settings)
 
