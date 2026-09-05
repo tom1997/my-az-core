@@ -31,6 +31,8 @@
 
 首次启动会由 AzerothCore 数据库更新器导入基础库和模块 SQL，耗时较长。随后使用 `create-account.ps1` 创建账号。
 
+Windows 下也可直接双击仓库根目录的 `启动服务端.cmd` 和 `关闭服务端.cmd`。关闭入口会按 World、Auth、MySQL 的顺序停止服务，并让 MySQL 安全刷盘退出。
+
 ## 开发模块
 
 ```powershell

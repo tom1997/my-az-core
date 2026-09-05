@@ -136,11 +136,16 @@ function Invoke-MySql {
 }
 
 function Stop-ProcessFromPidFile {
-    param([string]$PidFile, [string]$Name)
+    param([string]$PidFile, [string]$Name, [string]$ProcessName = $Name)
     if (-not (Test-Path -LiteralPath $PidFile)) { return }
     $processId = [int](Get-Content -LiteralPath $PidFile -Raw).Trim()
     $process = Get-Process -Id $processId -ErrorAction SilentlyContinue
     if ($process) {
+        if ($process.ProcessName -ine $ProcessName) {
+            Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
+            Write-Warning "$Name PID 文件已过期；PID $processId 属于 $($process.ProcessName)，未关闭该进程。"
+            return
+        }
         Stop-Process -Id $processId
         try {
             Wait-Process -Id $processId -Timeout 30 -ErrorAction Stop
