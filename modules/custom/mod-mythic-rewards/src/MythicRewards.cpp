@@ -59,6 +59,7 @@ struct LevelBand
     uint32 maxLevel;
     uint32 minItemLevel;
     uint32 maxItemLevel;
+    uint32 money;
 };
 
 RewardConfigData rewardConfig;
@@ -306,14 +307,14 @@ void LoadLevelBands()
     levelBands.clear();
     candidateCache.clear();
     QueryResult result = WorldDatabase.Query(
-        "SELECT min_mythic_level, max_mythic_level, min_item_level, max_item_level "
+        "SELECT min_mythic_level, max_mythic_level, min_item_level, max_item_level, money "
         "FROM mod_mythic_rewards_level ORDER BY min_mythic_level");
     if (result)
         do
         {
             Field* fields = result->Fetch();
             levelBands.push_back({fields[0].Get<uint32>(), fields[1].Get<uint32>(),
-                fields[2].Get<uint32>(), fields[3].Get<uint32>()});
+                fields[2].Get<uint32>(), fields[3].Get<uint32>(), fields[4].Get<uint32>()});
         } while (result->NextRow());
 
     LOG_INFO("module", "[MythicRewards] Loaded {} reward level bands.", levelBands.size());
@@ -344,18 +345,28 @@ void RewardMythicEquipment(Player* player, uint32 mythicLevel, uint32 instanceId
     if (!player || !rewardConfig.GetConfigValue<bool>(RewardConfig::Enabled))
         return;
 
-    uint32 chance = std::min<uint32>(100, rewardConfig.GetConfigValue<uint32>(RewardConfig::ChancePct));
-    if (chance == 0 || urand(1, 100) > chance)
-        return;
-
     uint32 playerGuid = player->GetGUID().GetCounter();
     if (WasRewarded(instanceId, playerGuid))
         return;
 
     LevelBand const* band = FindBand(mythicLevel);
-    uint32 itemEntry = band ? SelectReward(player, *band) : 0;
+    if (!band)
+        return;
+
+    if (band->money)
+        player->ModifyMoney(band->money);
+
+    uint32 chance = std::min<uint32>(100, rewardConfig.GetConfigValue<uint32>(RewardConfig::ChancePct));
+    if (chance == 0 || urand(1, 100) > chance)
+    {
+        RecordReward(instanceId, playerGuid, mythicLevel, 0, false);
+        return;
+    }
+
+    uint32 itemEntry = SelectReward(player, *band);
     if (!itemEntry)
     {
+        RecordReward(instanceId, playerGuid, mythicLevel, 0, false);
         if (player->GetSession())
             ChatHandler(player->GetSession()).PSendSysMessage(LANG_NO_REWARD, mythicLevel);
         return;
@@ -366,7 +377,10 @@ void RewardMythicEquipment(Player* player, uint32 mythicLevel, uint32 instanceId
     {
         mailed = MailReward(player, itemEntry);
         if (!mailed)
+        {
+            RecordReward(instanceId, playerGuid, mythicLevel, 0, false);
             return;
+        }
     }
 
     RecordReward(instanceId, playerGuid, mythicLevel, itemEntry, mailed);

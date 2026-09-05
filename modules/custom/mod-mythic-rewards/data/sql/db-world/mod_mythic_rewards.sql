@@ -3,19 +3,20 @@ CREATE TABLE IF NOT EXISTS `mod_mythic_rewards_level` (
   `max_mythic_level` tinyint unsigned NOT NULL,
   `min_item_level` smallint unsigned NOT NULL,
   `max_item_level` smallint unsigned NOT NULL,
+  `money` int unsigned NOT NULL DEFAULT 0,
   PRIMARY KEY (`min_mythic_level`, `max_mythic_level`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 DELETE FROM `mod_mythic_rewards_level`;
 INSERT INTO `mod_mythic_rewards_level`
-(`min_mythic_level`, `max_mythic_level`, `min_item_level`, `max_item_level`) VALUES
-(1, 1, 200, 200),
-(2, 2, 213, 213),
-(3, 3, 219, 219),
-(4, 4, 226, 226),
-(5, 5, 232, 232),
-(6, 6, 239, 239),
-(7, 255, 245, 245);
+(`min_mythic_level`, `max_mythic_level`, `min_item_level`, `max_item_level`, `money`) VALUES
+(1, 1, 200, 200, 200000),
+(2, 2, 213, 213, 300000),
+(3, 3, 219, 219, 400000),
+(4, 4, 226, 226, 500000),
+(5, 5, 232, 232, 600000),
+(6, 6, 239, 239, 700000),
+(7, 255, 245, 245, 800000);
 
 DELETE FROM `acore_string` WHERE `entry` BETWEEN 85000 AND 85002;
 INSERT INTO `acore_string`
