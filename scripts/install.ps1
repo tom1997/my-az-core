@@ -16,7 +16,7 @@ if (-not (Test-Path -LiteralPath $wowExe)) {
 }
 $wowVersion = (Get-Item -LiteralPath $wowExe).VersionInfo
 $versionText = "$($wowVersion.FileVersion) $($wowVersion.ProductVersion)"
-if ($versionText -notmatch '3[,.]3[,.]5' -or $versionText -notmatch '12340') {
+if ($versionText -notmatch '3\s*[,\.]\s*3\s*[,\.]\s*5' -or $versionText -notmatch '12340') {
     throw "客户端版本不是 3.3.5a Build 12340：$versionText"
 }
 
