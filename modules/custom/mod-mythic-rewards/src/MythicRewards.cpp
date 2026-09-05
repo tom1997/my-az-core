@@ -6,19 +6,21 @@
 #include "Chat.h"
 #include "ConfigValueCache.h"
 #include "DatabaseEnv.h"
+#include "GameTime.h"
 #include "Item.h"
 #include "ItemTemplate.h"
 #include "LFG.h"
 #include "LFGMgr.h"
 #include "Log.h"
 #include "Mail.h"
+#include "Map.h"
 #include "ObjectMgr.h"
 #include "Player.h"
 #include "Random.h"
 #include "ScriptMgr.h"
 
 #include <algorithm>
-#include <array>
+#include <sstream>
 #include <unordered_map>
 #include <vector>
 
@@ -26,7 +28,11 @@ namespace
 {
 constexpr uint32 LANG_REWARD_BAG = 85000;
 constexpr uint32 LANG_REWARD_MAIL = 85001;
-constexpr uint32 LANG_NO_REWARD = 85002;
+constexpr uint32 LANG_NO_PERSONAL_REWARD = 85002;
+constexpr uint32 LANG_TIMED_SUMMARY = 85003;
+constexpr uint32 LANG_OVERTIME_SUMMARY = 85004;
+constexpr uint32 LANG_WEEKLY_REWARD = 85005;
+constexpr uint64 SECONDS_PER_WEEK = 7 * DAY;
 
 enum class RewardConfig
 {
@@ -35,6 +41,9 @@ enum class RewardConfig
     MailOnFull,
     IncludeWeapons,
     CandidateWindowPct,
+    TimedPartyItems,
+    OvertimePartyItems,
+    WeeklyEnabled,
     NumConfigs
 };
 
@@ -50,6 +59,9 @@ public:
         SetConfigValue<bool>(RewardConfig::MailOnFull, "MythicRewards.MailOnFull", true);
         SetConfigValue<bool>(RewardConfig::IncludeWeapons, "MythicRewards.IncludeWeapons", true);
         SetConfigValue<uint32>(RewardConfig::CandidateWindowPct, "MythicRewards.CandidateWindowPct", 20);
+        SetConfigValue<uint32>(RewardConfig::TimedPartyItems, "MythicRewards.TimedPartyItems", 3);
+        SetConfigValue<uint32>(RewardConfig::OvertimePartyItems, "MythicRewards.OvertimePartyItems", 2);
+        SetConfigValue<bool>(RewardConfig::WeeklyEnabled, "MythicRewards.Weekly.Enable", true);
     }
 };
 
@@ -57,14 +69,19 @@ struct LevelBand
 {
     uint32 minLevel;
     uint32 maxLevel;
-    uint32 minItemLevel;
-    uint32 maxItemLevel;
+    uint32 endVariant;
+    uint32 weeklyVariant;
     uint32 money;
 };
 
 RewardConfigData rewardConfig;
 std::vector<LevelBand> levelBands;
 std::unordered_map<uint64, std::vector<uint32>> candidateCache;
+
+uint32 CurrentWeek()
+{
+    return uint32(GameTime::GetGameTime().count() / SECONDS_PER_WEEK);
+}
 
 bool IsBodyArmor(uint32 inventoryType)
 {
@@ -183,7 +200,6 @@ int64 ScoreCandidate(ItemTemplate const* item, StatProfile const& equipped, uint
 {
     StatProfile stats;
     AddStats(item, stats);
-
     if (role & lfg::PLAYER_ROLE_TANK)
         return int64(stats.tank) * 8 + int64(stats.stamina) * 2 + stats.physical + stats.caster / 2;
     if (role & lfg::PLAYER_ROLE_HEALER)
@@ -201,61 +217,34 @@ LevelBand const* FindBand(uint32 mythicLevel)
     return nullptr;
 }
 
-std::vector<uint32> const& GetCandidates(LevelBand const& band)
-{
-    uint64 key = (uint64(band.minItemLevel) << 32) | band.maxItemLevel;
-    auto cached = candidateCache.find(key);
-    if (cached == candidateCache.end())
-    {
-        std::vector<uint32> entries;
-        QueryResult result = WorldDatabase.Query(
-            "SELECT DISTINCT i.entry FROM item_template i JOIN "
-            "(SELECT Item FROM creature_loot_template WHERE Item > 0 UNION "
-            "SELECT Item FROM reference_loot_template WHERE Item > 0) loot ON loot.Item = i.entry "
-            "WHERE i.Quality = 4 "
-            "AND i.ItemLevel BETWEEN {} AND {} AND i.RequiredLevel <= 80 "
-            "AND i.InventoryType <> 0 AND i.class IN (2, 4) AND i.Bonding <> 4 "
-            "AND i.StartQuest = 0",
-            band.minItemLevel, band.maxItemLevel);
-        if (result)
-            do
-            {
-                entries.push_back(result->Fetch()[0].Get<uint32>());
-            } while (result->NextRow());
-        cached = candidateCache.emplace(key, std::move(entries)).first;
-    }
-
-    return cached->second;
-}
-
 bool IsEligible(Player* player, ItemTemplate const* item)
 {
-    if (!item || player->CanUseItem(item) != EQUIP_ERR_OK)
+    if (!item || player->CanUseItem(item) != EQUIP_ERR_OK || item->ItemSet != 0)
         return false;
-
     if (!rewardConfig.GetConfigValue<bool>(RewardConfig::IncludeWeapons) && item->Class == ITEM_CLASS_WEAPON)
         return false;
-
     if (item->Class == ITEM_CLASS_ARMOR && IsBodyArmor(item->InventoryType) &&
         item->SubClass != PreferredArmorSubclass(player->getClass()))
         return false;
-
     return true;
 }
 
-uint32 SelectReward(Player* player, LevelBand const& band)
+uint32 SelectReward(Player* player, uint32 mapId, uint32 variantId)
 {
+    uint64 key = (uint64(mapId) << 32) | variantId;
+    auto found = candidateCache.find(key);
+    if (found == candidateCache.end())
+        return 0;
+
     StatProfile equipped = BuildEquippedProfile(player);
     uint8 role = GetRole(player);
     std::vector<std::pair<int64, uint32>> ranked;
-
-    for (uint32 entry : GetCandidates(band))
+    for (uint32 entry : found->second)
     {
         ItemTemplate const* item = sObjectMgr->GetItemTemplate(entry);
         if (IsEligible(player, item))
             ranked.emplace_back(ScoreCandidate(item, equipped, role), entry);
     }
-
     if (ranked.empty())
         return 0;
 
@@ -263,61 +252,168 @@ uint32 SelectReward(Player* player, LevelBand const& band)
     {
         return left.first > right.first;
     });
-
-    uint32 windowPct = std::clamp<uint32>(rewardConfig.GetConfigValue<uint32>(RewardConfig::CandidateWindowPct), 1, 100);
-    uint32 window = std::max<uint32>(1, uint32((ranked.size() * windowPct + 99) / 100));
+    uint32 pct = std::clamp<uint32>(rewardConfig.GetConfigValue<uint32>(RewardConfig::CandidateWindowPct), 1, 100);
+    uint32 window = std::max<uint32>(1, uint32((ranked.size() * pct + 99) / 100));
     return ranked[urand(0, window - 1)].second;
 }
 
-bool WasRewarded(uint32 instanceId, uint32 playerGuid)
+std::string ItemLink(Player* player, uint32 entry)
 {
-    return bool(CharacterDatabase.Query(
-        "SELECT 1 FROM mod_mythic_rewards_history WHERE instance_id = {} AND guid = {} LIMIT 1",
-        instanceId, playerGuid));
+    ItemTemplate const* item = sObjectMgr->GetItemTemplate(entry);
+    if (!item)
+        return std::to_string(entry);
+
+    std::string name = item->Name1;
+    if (player->GetSession())
+        if (ItemLocale const* locale = sObjectMgr->GetItemLocale(entry))
+            ObjectMgr::GetLocaleString(locale->Name, player->GetSession()->GetSessionDbLocaleIndex(), name);
+
+    std::ostringstream out;
+    out << "|c" << std::hex << ItemQualityColors[item->Quality] << std::dec
+        << "|Hitem:" << entry << ":0:0:0:0:0:0:0:0:0|h[" << name << "]|h|r";
+    return out.str();
 }
 
-void RecordReward(uint32 instanceId, uint32 playerGuid, uint32 mythicLevel, uint32 itemEntry, bool mailed)
-{
-    CharacterDatabase.Execute(
-        "INSERT IGNORE INTO mod_mythic_rewards_history "
-        "(instance_id, guid, mythic_level, item_entry, mailed) VALUES ({}, {}, {}, {}, {})",
-        instanceId, playerGuid, mythicLevel, itemEntry, mailed ? 1 : 0);
-}
-
-bool MailReward(Player* player, uint32 entry)
+bool MailReward(Player* player, uint32 entry, bool weekly)
 {
     if (!rewardConfig.GetConfigValue<bool>(RewardConfig::MailOnFull))
         return false;
-
     Item* item = Item::CreateItem(entry, 1, player);
     if (!item)
         return false;
 
     CharacterDatabaseTransaction transaction = CharacterDatabase.BeginTransaction();
     item->SaveToDB(transaction);
-    MailDraft draft("Mythic Plus reward", "Your bags were full, so your personal Mythic Plus reward is attached.");
+    MailDraft draft(weekly ? "Weekly Mythic reward" : "Mythic Plus reward",
+        "Your inventory was full, so the reward is attached.");
     draft.AddItem(item);
-    draft.SendMailTo(transaction, MailReceiver(player), MailSender(MAIL_NORMAL, player->GetGUID().GetCounter(), MAIL_STATIONERY_GM));
+    draft.SendMailTo(transaction, MailReceiver(player),
+        MailSender(MAIL_NORMAL, player->GetGUID().GetCounter(), MAIL_STATIONERY_GM));
     CharacterDatabase.CommitTransaction(transaction);
     return true;
 }
 
-void LoadLevelBands()
+bool GiveReward(Player* player, uint32 entry, bool weekly, bool& mailed)
+{
+    mailed = false;
+    if (player->AddItem(entry, 1))
+        return true;
+    mailed = MailReward(player, entry, weekly);
+    return mailed;
+}
+
+bool WasRewarded(uint32 instanceId, uint32 playerGuid)
+{
+    return bool(CharacterDatabase.Query(
+        "SELECT 1 FROM mod_mythic_rewards_history_v2 WHERE instance_id = {} AND guid = {} LIMIT 1",
+        instanceId, playerGuid));
+}
+
+void RecordCompletion(uint32 instanceId, uint32 playerGuid, uint32 mapId, uint32 mythicLevel,
+    bool timed, uint32 itemEntry, bool mailed)
+{
+    CharacterDatabase.Execute(
+        "INSERT IGNORE INTO mod_mythic_rewards_history_v2 "
+        "(instance_id, guid, map_id, mythic_level, timed, item_entry, mailed) "
+        "VALUES ({}, {}, {}, {}, {}, {}, {})",
+        instanceId, playerGuid, mapId, mythicLevel, timed ? 1 : 0, itemEntry, mailed ? 1 : 0);
+}
+
+void RecordWeekly(Player* player, uint32 mythicLevel, uint32 mapId)
+{
+    if (!rewardConfig.GetConfigValue<bool>(RewardConfig::WeeklyEnabled))
+        return;
+    CharacterDatabase.Execute(
+        "INSERT INTO mod_mythic_rewards_weekly (week_key, guid, highest_level, map_id, claimed) "
+        "VALUES ({}, {}, {}, {}, 0) ON DUPLICATE KEY UPDATE "
+        "map_id = IF(VALUES(highest_level) > highest_level, VALUES(map_id), map_id), "
+        "highest_level = GREATEST(highest_level, VALUES(highest_level))",
+        CurrentWeek(), player->GetGUID().GetCounter(), mythicLevel, mapId);
+}
+
+uint32 Mix(uint32 value)
+{
+    value ^= value >> 16;
+    value *= 0x7feb352dU;
+    value ^= value >> 15;
+    value *= 0x846ca68bU;
+    return value ^ (value >> 16);
+}
+
+bool IsPartyItemWinner(Player* player, uint32 instanceId, bool timed)
+{
+    std::vector<std::pair<uint32, uint32>> order;
+    for (Map::PlayerList::const_iterator itr = player->GetMap()->GetPlayers().begin();
+         itr != player->GetMap()->GetPlayers().end(); ++itr)
+        if (Player* member = itr->GetSource())
+            order.emplace_back(Mix(member->GetGUID().GetCounter() ^ instanceId), member->GetGUID().GetCounter());
+
+    std::sort(order.begin(), order.end());
+    uint32 configured = rewardConfig.GetConfigValue<uint32>(
+        timed ? RewardConfig::TimedPartyItems : RewardConfig::OvertimePartyItems);
+    uint32 winners = std::min<uint32>(configured, order.size());
+    uint32 guid = player->GetGUID().GetCounter();
+    return std::any_of(order.begin(), order.begin() + winners,
+        [guid](auto const& candidate) { return candidate.second == guid; });
+}
+
+void LoadRewardData()
 {
     levelBands.clear();
     candidateCache.clear();
-    QueryResult result = WorldDatabase.Query(
-        "SELECT min_mythic_level, max_mythic_level, min_item_level, max_item_level, money "
-        "FROM mod_mythic_rewards_level ORDER BY min_mythic_level");
-    if (result)
+    if (QueryResult levels = WorldDatabase.Query(
+        "SELECT min_mythic_level, max_mythic_level, end_variant_id, weekly_variant_id, money "
+        "FROM mod_mythic_rewards_level_v2 ORDER BY min_mythic_level"))
         do
         {
-            Field* fields = result->Fetch();
+            Field* fields = levels->Fetch();
             levelBands.push_back({fields[0].Get<uint32>(), fields[1].Get<uint32>(),
                 fields[2].Get<uint32>(), fields[3].Get<uint32>(), fields[4].Get<uint32>()});
-        } while (result->NextRow());
+        } while (levels->NextRow());
 
-    LOG_INFO("module", "[MythicRewards] Loaded {} reward level bands.", levelBands.size());
+    if (QueryResult pool = WorldDatabase.Query(
+        "SELECT map_id, variant_id, item_entry FROM mod_mythic_rewards_item_pool"))
+        do
+        {
+            Field* fields = pool->Fetch();
+            uint32 mapId = fields[0].Get<uint32>();
+            uint32 variantId = fields[1].Get<uint32>();
+            candidateCache[(uint64(mapId) << 32) | variantId].push_back(fields[2].Get<uint32>());
+        } while (pool->NextRow());
+
+    LOG_INFO("module", "[MythicRewards] Loaded {} level bands and {} dungeon/variant pools.",
+        levelBands.size(), candidateCache.size());
+}
+
+void ClaimWeeklyReward(Player* player)
+{
+    if (!rewardConfig.GetConfigValue<bool>(RewardConfig::Enabled) ||
+        !rewardConfig.GetConfigValue<bool>(RewardConfig::WeeklyEnabled))
+        return;
+
+    QueryResult result = CharacterDatabase.Query(
+        "SELECT week_key, highest_level, map_id FROM mod_mythic_rewards_weekly "
+        "WHERE guid = {} AND week_key < {} AND claimed = 0 ORDER BY week_key DESC LIMIT 1",
+        player->GetGUID().GetCounter(), CurrentWeek());
+    if (!result)
+        return;
+
+    Field* fields = result->Fetch();
+    uint32 weekKey = fields[0].Get<uint32>();
+    uint32 mythicLevel = fields[1].Get<uint32>();
+    uint32 mapId = fields[2].Get<uint32>();
+    LevelBand const* band = FindBand(mythicLevel);
+    uint32 entry = band ? SelectReward(player, mapId, band->weeklyVariant) : 0;
+    bool mailed = false;
+    if (!entry || !GiveReward(player, entry, true, mailed))
+        return;
+
+    CharacterDatabase.Execute(
+        "UPDATE mod_mythic_rewards_weekly SET claimed = 1, item_entry = {} "
+        "WHERE week_key = {} AND guid = {} AND claimed = 0",
+        entry, weekKey, player->GetGUID().GetCounter());
+    if (player->GetSession())
+        ChatHandler(player->GetSession()).PSendSysMessage(LANG_WEEKLY_REWARD, mythicLevel, ItemLink(player, entry));
 }
 
 class MythicRewardsWorldScript : public WorldScript
@@ -326,25 +422,23 @@ public:
     MythicRewardsWorldScript() : WorldScript("MythicRewardsWorldScript",
         { WORLDHOOK_ON_BEFORE_CONFIG_LOAD, WORLDHOOK_ON_STARTUP }) { }
 
-    void OnBeforeConfigLoad(bool reload) override
-    {
-        rewardConfig.Initialize(reload);
-    }
+    void OnBeforeConfigLoad(bool reload) override { rewardConfig.Initialize(reload); }
+    void OnStartup() override { LoadRewardData(); }
+};
 
-    void OnStartup() override
-    {
-        LoadLevelBands();
-    }
+class MythicRewardsPlayerScript : public PlayerScript
+{
+public:
+    MythicRewardsPlayerScript() : PlayerScript("MythicRewardsPlayerScript", { PLAYERHOOK_ON_LOGIN }) { }
+    void OnPlayerLogin(Player* player) override { ClaimWeeklyReward(player); }
 };
 }
 
-// Called by the deliberately small bridge in mod-mythic-plus after a timed completion.
-// Keeping all policy here means upstream updates only have to preserve a single call site.
-void RewardMythicEquipment(Player* player, uint32 mythicLevel, uint32 instanceId)
+// Called once for each party member by the deliberately small mod-mythic-plus bridge.
+void RewardMythicCompletion(Player* player, uint32 mythicLevel, uint32 instanceId, uint32 mapId, bool timed)
 {
     if (!player || !rewardConfig.GetConfigValue<bool>(RewardConfig::Enabled))
         return;
-
     uint32 playerGuid = player->GetGUID().GetCounter();
     if (WasRewarded(instanceId, playerGuid))
         return;
@@ -353,42 +447,43 @@ void RewardMythicEquipment(Player* player, uint32 mythicLevel, uint32 instanceId
     if (!band)
         return;
 
+    RecordWeekly(player, mythicLevel, mapId);
     if (band->money)
         player->ModifyMoney(band->money);
 
+    bool winner = IsPartyItemWinner(player, instanceId, timed);
     uint32 chance = std::min<uint32>(100, rewardConfig.GetConfigValue<uint32>(RewardConfig::ChancePct));
-    if (chance == 0 || urand(1, 100) > chance)
+    if (!winner || chance == 0 || urand(1, 100) > chance)
     {
-        RecordReward(instanceId, playerGuid, mythicLevel, 0, false);
-        return;
-    }
-
-    uint32 itemEntry = SelectReward(player, *band);
-    if (!itemEntry)
-    {
-        RecordReward(instanceId, playerGuid, mythicLevel, 0, false);
+        RecordCompletion(instanceId, playerGuid, mapId, mythicLevel, timed, 0, false);
         if (player->GetSession())
-            ChatHandler(player->GetSession()).PSendSysMessage(LANG_NO_REWARD, mythicLevel);
+        {
+            ChatHandler handler(player->GetSession());
+            handler.PSendSysMessage(LANG_NO_PERSONAL_REWARD, mythicLevel);
+            handler.PSendSysMessage(timed ? LANG_TIMED_SUMMARY : LANG_OVERTIME_SUMMARY, mythicLevel);
+        }
         return;
     }
 
+    uint32 entry = SelectReward(player, mapId, band->endVariant);
     bool mailed = false;
-    if (!player->AddItem(itemEntry, 1))
+    if (!entry || !GiveReward(player, entry, false, mailed))
     {
-        mailed = MailReward(player, itemEntry);
-        if (!mailed)
-        {
-            RecordReward(instanceId, playerGuid, mythicLevel, 0, false);
-            return;
-        }
+        RecordCompletion(instanceId, playerGuid, mapId, mythicLevel, timed, 0, false);
+        return;
     }
 
-    RecordReward(instanceId, playerGuid, mythicLevel, itemEntry, mailed);
+    RecordCompletion(instanceId, playerGuid, mapId, mythicLevel, timed, entry, mailed);
     if (player->GetSession())
-        ChatHandler(player->GetSession()).PSendSysMessage(mailed ? LANG_REWARD_MAIL : LANG_REWARD_BAG, mythicLevel);
+    {
+        ChatHandler handler(player->GetSession());
+        handler.PSendSysMessage(mailed ? LANG_REWARD_MAIL : LANG_REWARD_BAG, mythicLevel, ItemLink(player, entry));
+        handler.PSendSysMessage(timed ? LANG_TIMED_SUMMARY : LANG_OVERTIME_SUMMARY, mythicLevel);
+    }
 }
 
 void AddMythicRewardsScripts()
 {
     new MythicRewardsWorldScript();
+    new MythicRewardsPlayerScript();
 }

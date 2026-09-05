@@ -19,3 +19,13 @@ MythicRewards.IncludeWeapons = 1
 # Randomly choose from this percentage of the best role-weighted candidates.
 # A small window improves role relevance while still allowing variety.
 MythicRewards.CandidateWindowPct = 20
+
+# Total party equipment items. Winners are selected deterministically from
+# everyone present, including Playerbots. Each character can win at most one.
+MythicRewards.TimedPartyItems = 3
+MythicRewards.OvertimePartyItems = 2
+
+# On the first login after a weekly boundary, award one item based on the
+# highest completed key from the previous week. The weekly tier is one step
+# above the corresponding end-of-run tier.
+MythicRewards.Weekly.Enable = 1

@@ -15,16 +15,17 @@ index 813cb38..fce93b5 100644
 -
      RewardKeystone(player);
 diff --git a/modules/mod-mythic-plus/src/mythic_plus_unitscript.cpp b/modules/mod-mythic-plus/src/mythic_plus_unitscript.cpp
-index aa78aa7..4875c1c 100644
+index aa78aa7..c0d48c3 100644
 --- a/modules/mod-mythic-plus/src/mythic_plus_unitscript.cpp
 +++ b/modules/mod-mythic-plus/src/mythic_plus_unitscript.cpp
 @@ -9,2 +9,5 @@
  
 +// Implemented by modules/custom/mod-mythic-rewards.
-+void RewardMythicEquipment(Player* player, uint32 mythicLevel, uint32 instanceId);
++void RewardMythicCompletion(Player* player, uint32 mythicLevel, uint32 instanceId, uint32 mapId, bool timed);
 +
  class mythic_plus_unitscript : public UnitScript
-@@ -109,2 +112,3 @@ public:
-                             sMythicPlus->Reward(player, mapData->mythicLevel->reward);
-+                            RewardMythicEquipment(player, mapData->mythicLevel->level, map->GetInstanceId());
+@@ -110,2 +113,4 @@ public:
                          }
++                        RewardMythicCompletion(player, mapData->mythicLevel->level, map->GetInstanceId(),
++                            map->GetId(), mapData->receiveLoot);
+                         mapData->done = true;

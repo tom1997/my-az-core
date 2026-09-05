@@ -212,6 +212,9 @@ if ($mythicRewards) {
     Set-ConfigValue $mythicRewards 'MythicRewards.MailOnFull' $(if (Get-SettingValue $settings 'mythicRewardsMailOnFull' $true) {'1'} else {'0'})
     Set-ConfigValue $mythicRewards 'MythicRewards.IncludeWeapons' $(if (Get-SettingValue $settings 'mythicRewardsIncludeWeapons' $true) {'1'} else {'0'})
     Set-ConfigValue $mythicRewards 'MythicRewards.CandidateWindowPct' ([string](Get-SettingValue $settings 'mythicRewardsCandidateWindowPct' 20))
+    Set-ConfigValue $mythicRewards 'MythicRewards.TimedPartyItems' ([string](Get-SettingValue $settings 'mythicRewardsTimedPartyItems' 3))
+    Set-ConfigValue $mythicRewards 'MythicRewards.OvertimePartyItems' ([string](Get-SettingValue $settings 'mythicRewardsOvertimePartyItems' 2))
+    Set-ConfigValue $mythicRewards 'MythicRewards.Weekly.Enable' $(if (Get-SettingValue $settings 'mythicRewardsWeeklyEnabled' $true) {'1'} else {'0'})
 }
 $dungeonClear = Find-ModuleConfig 'mod_dungeon_clear.conf'
 if ($dungeonClear) {

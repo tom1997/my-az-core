@@ -47,7 +47,7 @@ if (Test-Path -LiteralPath $mythicRewards) {
     $bridgePatch = Join-Path $repoRoot 'patches\0002-mythic-rewards-bridge.patch'
     if (-not (Test-Path -LiteralPath $bridgePatch)) { throw 'mod-mythic-rewards 缺少 Mythic Plus 桥接补丁。' }
     $bridge = Get-Content -LiteralPath $bridgePatch -Raw
-    if ($bridge -notmatch 'RewardMythicEquipment') { throw 'Mythic Plus 桥接补丁未调用 RewardMythicEquipment。' }
+    if ($bridge -notmatch 'RewardMythicCompletion') { throw 'Mythic Plus 桥接补丁未调用 RewardMythicCompletion。' }
     foreach ($required in @(
         'conf\mod_mythic_rewards.conf.dist',
         'data\sql\db-world\mod_mythic_rewards.sql',
@@ -58,6 +58,16 @@ if (Test-Path -LiteralPath $mythicRewards) {
         if (-not (Test-Path -LiteralPath (Join-Path $mythicRewards $required))) {
             throw "mod-mythic-rewards 缺少文件：$required"
         }
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $repoRoot 'scripts\generate-mythic-items.ps1'))) {
+        throw 'mod-mythic-rewards 缺少装备 SQL 生成器。'
+    }
+    $rewardSql = Get-Content -LiteralPath (Join-Path $mythicRewards 'data\sql\db-world\mod_mythic_rewards.sql') -Raw
+    foreach ($mapId in @(574,575,576,578,599,600,601,602,604,619,632,658)) {
+        if ($rewardSql -notmatch "(?<!\d)$mapId(?!\d)") { throw "大秘境装备池缺少地图：$mapId" }
+    }
+    if ($rewardSql -notmatch 'src\.itemset\s*=\s*0' -or $rewardSql -notmatch 'InventoryType NOT IN \(0,12\)') {
+        throw '大秘境装备池必须排除套装、兑换物和饰品。'
     }
 }
 
