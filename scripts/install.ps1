@@ -39,7 +39,8 @@ try {
     $manifestPath = Join-Path $tempRoot 'source-manifest.json'
     if (-not (Test-Path -LiteralPath $manifestPath)) { throw '运行包缺少 source-manifest.json。' }
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-    $releaseName = "$($manifest.builtAt.Substring(0,10).Replace('-','')).$($manifest.profile).$($manifest.core.commit.Substring(0,8))"
+    $releaseDate = ([DateTime]$manifest.builtAt).ToUniversalTime().ToString('yyyyMMdd')
+    $releaseName = "$releaseDate.$($manifest.profile).$($manifest.core.commit.Substring(0,8))"
     $releasePath = Join-Path $paths.Releases $releaseName
     if (Test-Path -LiteralPath $releasePath) { Remove-Item -LiteralPath $releasePath -Recurse -Force }
     Move-Item -LiteralPath $tempRoot -Destination $releasePath
