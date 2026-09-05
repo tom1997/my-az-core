@@ -17,6 +17,9 @@ foreach ($name in $toolNames) {
     if (-not $tool -and ($name -ne 'mmaps-config.yaml')) { throw "运行包缺少提取器：$name" }
     if ($tool) { Copy-Item -LiteralPath $tool.FullName -Destination (Join-Path $paths.Client $name) -Force }
 }
+Get-ChildItem -LiteralPath $dist -Filter '*.dll' -File -Recurse | ForEach-Object {
+    Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $paths.Client $_.Name) -Force
+}
 
 Push-Location $paths.Client
 try {

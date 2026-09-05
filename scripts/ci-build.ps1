@@ -48,7 +48,7 @@ New-Item -ItemType Junction -Path 'C:\openssl' -Target $opensslRoot | Out-Null
 
 $configDir = Join-Path $sourceRoot 'conf'
 New-Item -ItemType Directory -Path $configDir -Force | Out-Null
-$cmakeOptions = "-DBOOST_ROOT=C:/local/boost_1_87_0 -DOPENSSL_ROOT_DIR=C:/openssl -DOPENSSL_USE_STATIC_LIBS=FALSE -DCMAKE_RC_COMPILER=rc -DCMAKE_NINJA_FORCE_RESPONSE_FILE=ON -DCMAKE_NINJA_CMCLDEPS_RC=OFF -DCMAKE_C_USE_RESPONSE_FILE_FOR_OBJECTS=ON -DCMAKE_CXX_USE_RESPONSE_FILE_FOR_OBJECTS=ON -DCMAKE_C_USE_RESPONSE_FILE_FOR_INCLUDES=ON -DCMAKE_CXX_USE_RESPONSE_FILE_FOR_INCLUDES=ON -DCMAKE_C_USE_RESPONSE_FILE_FOR_LIBRARIES=ON -DCMAKE_CXX_USE_RESPONSE_FILE_FOR_LIBRARIES=ON"
+$cmakeOptions = "-DBOOST_ROOT=C:/local/boost_1_87_0 -DMYSQL_ROOT_DIR=C:/tools/mysql/current -DOPENSSL_ROOT_DIR=C:/openssl -DOPENSSL_USE_STATIC_LIBS=FALSE -DCMAKE_RC_COMPILER=rc -DCMAKE_NINJA_FORCE_RESPONSE_FILE=ON -DCMAKE_NINJA_CMCLDEPS_RC=OFF -DCMAKE_C_USE_RESPONSE_FILE_FOR_OBJECTS=ON -DCMAKE_CXX_USE_RESPONSE_FILE_FOR_OBJECTS=ON -DCMAKE_C_USE_RESPONSE_FILE_FOR_INCLUDES=ON -DCMAKE_CXX_USE_RESPONSE_FILE_FOR_INCLUDES=ON -DCMAKE_C_USE_RESPONSE_FILE_FOR_LIBRARIES=ON -DCMAKE_CXX_USE_RESPONSE_FILE_FOR_LIBRARIES=ON"
 $config = @"
 CCOMPILERC="cl"
 CCOMPILERCXX="cl"
@@ -61,6 +61,7 @@ CCUSTOMOPTIONS="$cmakeOptions"
 [IO.File]::WriteAllText((Join-Path $configDir 'config.sh'), $config, [Text.UTF8Encoding]::new($false))
 
 $env:BOOST_ROOT = $boostRoot
+$env:MYSQL_ROOT_DIR = $mysqlRoot
 $env:OPENSSL_ROOT_DIR = 'C:\openssl'
 $env:CTOOLS_BUILD = 'all'
 $env:CMAKE_GENERATOR = 'Ninja'
@@ -75,5 +76,17 @@ if ($LASTEXITCODE -ne 0) { throw "AzerothCore $Profile 构建失败。" }
 $buildRoot = Join-Path $sourceRoot 'var\build\obj'
 & cmake --install $buildRoot --config $BuildType
 if ($LASTEXITCODE -ne 0) { throw "AzerothCore $Profile 安装到发布目录失败。" }
+
+$distRoot = Join-Path $sourceRoot 'env\dist'
+$runtimeBin = (Get-ChildItem -LiteralPath $distRoot -Filter 'authserver.exe' -File -Recurse | Select-Object -First 1).DirectoryName
+if (-not $runtimeBin) { throw '安装后找不到 authserver.exe。' }
+$runtimeDependencies = @(
+    (Join-Path $mysqlRoot 'lib\libmysql.dll')
+) + @(Get-ChildItem -LiteralPath $opensslRoot -Filter 'libcrypto-3*.dll' -File -Recurse | Select-Object -ExpandProperty FullName) +
+    @(Get-ChildItem -LiteralPath $opensslRoot -Filter 'libssl-3*.dll' -File -Recurse | Select-Object -ExpandProperty FullName)
+foreach ($dependency in $runtimeDependencies | Select-Object -Unique) {
+    if (-not (Test-Path -LiteralPath $dependency)) { throw "缺少运行时依赖：$dependency" }
+    Copy-Item -LiteralPath $dependency -Destination $runtimeBin -Force
+}
 
 & (Join-Path $PSScriptRoot 'package-build.ps1') -Profile $Profile -WorkingRoot $WorkingRoot -ArtifactRoot $ArtifactRoot
