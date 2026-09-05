@@ -1,33 +1,8 @@
-diff --git a/modules/mod-mythic-plus/src/mythic_plus_unitscript.cpp b/modules/mod-mythic-plus/src/mythic_plus_unitscript.cpp
-index 4bc7ddd..924f8a1 100644
---- a/modules/mod-mythic-plus/src/mythic_plus_unitscript.cpp
-+++ b/modules/mod-mythic-plus/src/mythic_plus_unitscript.cpp
-@@ -7,6 +7,9 @@
- #include "mythic_plus.h"
- #include "mythic_affix.h"
- 
-+// Implemented by modules/custom/mod-mythic-rewards.
-+void RewardMythicEquipment(Player* player, uint32 mythicLevel, uint32 instanceId);
-+
- class mythic_plus_unitscript : public UnitScript
- {
- public:
-@@ -107,6 +110,7 @@ public:
-                         {
-                             rewarded = true;
-                             sMythicPlus->Reward(player, mapData->mythicLevel->reward);
-+                            RewardMythicEquipment(player, mapData->mythicLevel->level, map->GetInstanceId());
-                         }
-                         mapData->done = true;
- 
 diff --git a/modules/mod-mythic-plus/data/sql/db-world/b_mythic_plus_level_rewards.sql b/modules/mod-mythic-plus/data/sql/db-world/b_mythic_plus_level_rewards.sql
-index 24dfeb8..106b186 100644
+index 358fc2e..3247c6f 100644
 --- a/modules/mod-mythic-plus/data/sql/db-world/b_mythic_plus_level_rewards.sql
 +++ b/modules/mod-mythic-plus/data/sql/db-world/b_mythic_plus_level_rewards.sql
-@@ -6,13 +6,8 @@ CREATE TABLE `mythic_plus_level_rewards`(
- 	`val2` int unsigned
- ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
- 
+@@ -9,10 +9,5 @@ CREATE TABLE `mythic_plus_level_rewards`(
 -INSERT INTO `mythic_plus_level_rewards` (`lvl`, `rewardtype`, `val1`, `val2`) VALUES (1, 0, 1000000, null);
 -INSERT INTO `mythic_plus_level_rewards` (`lvl`, `rewardtype`, `val1`, `val2`) VALUES (1, 1, 29434, 1);
 -INSERT INTO `mythic_plus_level_rewards` (`lvl`, `rewardtype`, `val1`, `val2`) VALUES (2, 0, 4000000, null);
@@ -44,24 +19,28 @@ index 24dfeb8..106b186 100644
 +INSERT INTO `mythic_plus_level_rewards` (`lvl`, `rewardtype`, `val1`, `val2`) VALUES (4, 0, 500000, null);
 +INSERT INTO `mythic_plus_level_rewards` (`lvl`, `rewardtype`, `val1`, `val2`) VALUES (5, 0, 600000, null);
 diff --git a/modules/mod-mythic-plus/data/sql/db-world/u_mp_2025_06_15_00.sql b/modules/mod-mythic-plus/data/sql/db-world/u_mp_2025_06_15_00.sql
-index d55132c..01d2704 100644
+index da2e987..ad85545 100644
 --- a/modules/mod-mythic-plus/data/sql/db-world/u_mp_2025_06_15_00.sql
 +++ b/modules/mod-mythic-plus/data/sql/db-world/u_mp_2025_06_15_00.sql
-@@ -6,5 +6,4 @@ INSERT INTO `mythic_plus_affix` (`lvl`, `affixtype`, `val1`) VALUES (6, 3, 30);
- INSERT INTO `mythic_plus_affix` (`lvl`, `affixtype`, `val1`) VALUES (6, 4, 30);
- INSERT INTO `mythic_plus_affix` (`lvl`, `affixtype`, `val1`, `val2`) VALUES (6, 6, 25000, 65);
- 
+@@ -9,2 +9 @@ INSERT INTO `mythic_plus_affix` (`lvl`, `affixtype`, `val1`, `val2`) VALUES (6,
 -INSERT INTO `mythic_plus_level_rewards` (`lvl`, `rewardtype`, `val1`, `val2`) VALUES (6, 0, 25000000, null);
 -INSERT INTO `mythic_plus_level_rewards` (`lvl`, `rewardtype`, `val1`, `val2`) VALUES (6, 1, 29434, 25);
 +INSERT INTO `mythic_plus_level_rewards` (`lvl`, `rewardtype`, `val1`, `val2`) VALUES (6, 0, 700000, null);
 diff --git a/modules/mod-mythic-plus/data/sql/db-world/u_mp_2025_06_30_01.sql b/modules/mod-mythic-plus/data/sql/db-world/u_mp_2025_06_30_01.sql
-index 51d0301..4bf1068 100644
+index 6726e96..00991d2 100644
 --- a/modules/mod-mythic-plus/data/sql/db-world/u_mp_2025_06_30_01.sql
 +++ b/modules/mod-mythic-plus/data/sql/db-world/u_mp_2025_06_30_01.sql
-@@ -8,5 +8,4 @@ INSERT INTO `mythic_plus_affix` (`lvl`, `affixtype`, `val1`) VALUES (7, 3, 30);
- INSERT INTO `mythic_plus_affix` (`lvl`, `affixtype`, `val1`) VALUES (7, 4, 30);
- INSERT INTO `mythic_plus_affix` (`lvl`, `affixtype`, `val1`, `val2`) VALUES (7, 6, 25000, 65);
- 
+@@ -11,2 +11 @@ INSERT INTO `mythic_plus_affix` (`lvl`, `affixtype`, `val1`, `val2`) VALUES (7,
 -INSERT INTO `mythic_plus_level_rewards` (`lvl`, `rewardtype`, `val1`, `val2`) VALUES (7, 0, 30000000, null);
 -INSERT INTO `mythic_plus_level_rewards` (`lvl`, `rewardtype`, `val1`, `val2`) VALUES (7, 1, 29434, 30);
 +INSERT INTO `mythic_plus_level_rewards` (`lvl`, `rewardtype`, `val1`, `val2`) VALUES (7, 0, 800000, null);
+diff --git a/modules/mod-mythic-plus/src/mythic_plus_unitscript.cpp b/modules/mod-mythic-plus/src/mythic_plus_unitscript.cpp
+index aa78aa7..4875c1c 100644
+--- a/modules/mod-mythic-plus/src/mythic_plus_unitscript.cpp
++++ b/modules/mod-mythic-plus/src/mythic_plus_unitscript.cpp
+@@ -9,0 +10,3 @@
++// Implemented by modules/custom/mod-mythic-rewards.
++void RewardMythicEquipment(Player* player, uint32 mythicLevel, uint32 instanceId);
++
+@@ -109,0 +113 @@ public:
++                            RewardMythicEquipment(player, mapData->mythicLevel->level, map->GetInstanceId());
