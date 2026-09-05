@@ -205,6 +205,14 @@ if ($mythicPlus) {
     Set-ConfigValue $mythicPlus 'MythicPlus.KeystoneBuyTimer' ([string](Get-SettingValue $settings 'mythicPlusKeystoneBuyTimerMinutes' 0))
     Set-ConfigValue $mythicPlus 'MythicPlus.DropKeystoneOnDungeonComplete' '1'
 }
+$mythicRewards = Find-ModuleConfig 'mod_mythic_rewards.conf'
+if ($mythicRewards) {
+    Set-ConfigValue $mythicRewards 'MythicRewards.Enable' $(if (Get-SettingValue $settings 'mythicRewardsEnabled' $true) {'1'} else {'0'})
+    Set-ConfigValue $mythicRewards 'MythicRewards.ChancePct' ([string](Get-SettingValue $settings 'mythicRewardsChancePct' 100))
+    Set-ConfigValue $mythicRewards 'MythicRewards.MailOnFull' $(if (Get-SettingValue $settings 'mythicRewardsMailOnFull' $true) {'1'} else {'0'})
+    Set-ConfigValue $mythicRewards 'MythicRewards.IncludeWeapons' $(if (Get-SettingValue $settings 'mythicRewardsIncludeWeapons' $true) {'1'} else {'0'})
+    Set-ConfigValue $mythicRewards 'MythicRewards.CandidateWindowPct' ([string](Get-SettingValue $settings 'mythicRewardsCandidateWindowPct' 20))
+}
 $dungeonClear = Find-ModuleConfig 'mod_dungeon_clear.conf'
 if ($dungeonClear) {
     Set-ConfigValue $dungeonClear 'DungeonClear.Enable' $(if ($settings.dungeonClearEnabled) {'1'} else {'0'})

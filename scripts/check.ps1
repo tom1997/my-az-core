@@ -42,6 +42,25 @@ foreach ($file in $sqlFiles) {
     }
 }
 
+$mythicRewards = Join-Path $repoRoot 'modules\custom\mod-mythic-rewards'
+if (Test-Path -LiteralPath $mythicRewards) {
+    $bridgePatch = Join-Path $repoRoot 'patches\0002-mythic-rewards-bridge.patch'
+    if (-not (Test-Path -LiteralPath $bridgePatch)) { throw 'mod-mythic-rewards 缺少 Mythic Plus 桥接补丁。' }
+    $bridge = Get-Content -LiteralPath $bridgePatch -Raw
+    if ($bridge -notmatch 'RewardMythicEquipment') { throw 'Mythic Plus 桥接补丁未调用 RewardMythicEquipment。' }
+    foreach ($required in @(
+        'conf\mod_mythic_rewards.conf.dist',
+        'data\sql\db-world\mod_mythic_rewards.sql',
+        'data\sql\db-characters\mod_mythic_rewards.sql',
+        'src\mod_mythic_rewards_loader.cpp',
+        'src\MythicRewards.cpp'
+    )) {
+        if (-not (Test-Path -LiteralPath (Join-Path $mythicRewards $required))) {
+            throw "mod-mythic-rewards 缺少文件：$required"
+        }
+    }
+}
+
 $trackedRiskPatterns = @('secrets.json', 'runtime.settings.json', '.pdb', '.zip')
 $tracked = git -C $repoRoot ls-files
 foreach ($pattern in $trackedRiskPatterns) {

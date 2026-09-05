@@ -1,0 +1,21 @@
+[worldserver]
+
+########################################
+# Mythic Rewards
+########################################
+
+# Enable one personal equipment reward after an in-time Mythic Plus completion.
+MythicRewards.Enable = 1
+
+# Completion reward chance. Keep 100 for the first progression pass.
+MythicRewards.ChancePct = 100
+
+# Mail the reward when inventory is full.
+MythicRewards.MailOnFull = 1
+
+# Allow usable weapons in the personal reward pool.
+MythicRewards.IncludeWeapons = 1
+
+# Randomly choose from this percentage of the best role-weighted candidates.
+# A small window improves role relevance while still allowing variety.
+MythicRewards.CandidateWindowPct = 20

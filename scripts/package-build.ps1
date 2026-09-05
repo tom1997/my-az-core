@@ -44,6 +44,9 @@ $manifest = [ordered]@{
     builtAt = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
     core = $lock.core
     modules = @($lock.modules | Where-Object { $_.profiles -contains $Profile })
+    customModules = @(Get-ChildItem -LiteralPath (Join-Path $sourceRoot 'modules') -Directory |
+        Where-Object { $_.Name -eq 'mod-mythic-rewards' } |
+        ForEach-Object { [ordered]@{ name = $_.Name; source = 'my-az-core'; revision = $env:GITHUB_SHA } })
 }
 [IO.File]::WriteAllText((Join-Path $stage 'source-manifest.json'), (($manifest | ConvertTo-Json -Depth 8) + "`n"), [Text.UTF8Encoding]::new($false))
 
