@@ -14,7 +14,7 @@ $old = $env:MYSQL_PWD
 try {
     $env:MYSQL_PWD = $secrets.acorePassword
     foreach ($db in @('acore_auth','acore_world','acore_characters','acore_playerbots')) {
-        & $dump --protocol=tcp --host=127.0.0.1 "--port=$($settings.mysqlPort)" --user=acore --single-transaction --routines --events --hex-blob "--result-file=$(Join-Path $stage "$db.sql")" $db
+        & $dump --protocol=tcp --host=127.0.0.1 "--port=$($settings.mysqlPort)" --user=acore --single-transaction --no-tablespaces --routines --events --hex-blob "--result-file=$(Join-Path $stage "$db.sql")" $db
         if ($LASTEXITCODE -ne 0) { throw "备份 $db 失败。" }
     }
 } finally { $env:MYSQL_PWD = $old }
