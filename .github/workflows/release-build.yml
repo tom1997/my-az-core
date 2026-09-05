@@ -65,6 +65,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          gh release view '${{ steps.tag.outputs.value }}' >/dev/null 2>&1 || \
-            gh release create '${{ steps.tag.outputs.value }}' --title '${{ steps.tag.outputs.value }}' --generate-notes
-          gh release upload '${{ steps.tag.outputs.value }}' release-files/* --clobber
+          gh release view '${{ steps.tag.outputs.value }}' --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create '${{ steps.tag.outputs.value }}' --repo "$GITHUB_REPOSITORY" --title '${{ steps.tag.outputs.value }}' --generate-notes
+          gh release upload '${{ steps.tag.outputs.value }}' --repo "$GITHUB_REPOSITORY" release-files/* --clobber

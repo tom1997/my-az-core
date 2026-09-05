@@ -11,7 +11,7 @@ if (-not (Test-Path -LiteralPath $wowExe)) { throw "找不到客户端：$wowExe
 $version = (Get-Item -LiteralPath $wowExe).VersionInfo
 if ("$($version.FileVersion) $($version.ProductVersion)" -notmatch '12340') { throw '客户端不是 Build 12340。' }
 
-$toolNames = @('mapextractor.exe', 'vmap4extractor.exe', 'vmap4assembler.exe', 'mmaps_generator.exe', 'mmaps-config.yaml')
+$toolNames = @('map_extractor.exe', 'vmap4_extractor.exe', 'vmap4_assembler.exe', 'mmaps_generator.exe', 'mmaps-config.yaml')
 foreach ($name in $toolNames) {
     $tool = Get-ChildItem -LiteralPath $dist -Filter $name -File -Recurse | Select-Object -First 1
     if (-not $tool -and ($name -ne 'mmaps-config.yaml')) { throw "运行包缺少提取器：$name" }
@@ -20,12 +20,12 @@ foreach ($name in $toolNames) {
 
 Push-Location $paths.Client
 try {
-    & .\mapextractor.exe
+    & .\map_extractor.exe
     if ($LASTEXITCODE -ne 0) { throw 'mapextractor 执行失败。' }
     New-Item -ItemType Directory -Path 'Buildings','vmaps' -Force | Out-Null
-    & .\vmap4extractor.exe
+    & .\vmap4_extractor.exe
     if ($LASTEXITCODE -ne 0) { throw 'vmap4extractor 执行失败。' }
-    & .\vmap4assembler.exe Buildings vmaps
+    & .\vmap4_assembler.exe Buildings vmaps
     if ($LASTEXITCODE -ne 0) { throw 'vmap4assembler 执行失败。' }
     if (-not $SkipMMaps) {
         New-Item -ItemType Directory -Path 'mmaps' -Force | Out-Null
