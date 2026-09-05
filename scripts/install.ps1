@@ -149,12 +149,16 @@ $db = "127.0.0.1;$($settings.mysqlPort);acore;$($secrets.acorePassword)"
 Set-ConfigValue $worldConf 'LoginDatabaseInfo' "`"$db;acore_auth`""
 Set-ConfigValue $worldConf 'WorldDatabaseInfo' "`"$db;acore_world`""
 Set-ConfigValue $worldConf 'CharacterDatabaseInfo' "`"$db;acore_characters`""
+Set-ConfigValue $worldConf 'PlayerbotsDatabaseInfo' "`"$db;acore_playerbots`""
+Set-ConfigValue $worldConf 'Playerbots.Updates.EnableDatabases' '1'
 Set-ConfigValue $authConf 'LoginDatabaseInfo' "`"$db;acore_auth`""
 Set-ConfigValue $authConf 'RealmServerPort' ([string]$settings.authPort)
 Set-ConfigValue $worldConf 'WorldServerPort' ([string]$settings.worldPort)
 Set-ConfigValue $worldConf 'DataDir' "`"$($paths.Data.Replace('\','/'))`""
 Set-ConfigValue $worldConf 'SourceDirectory' "`"$($paths.SourceData.Replace('\','/'))`""
 Set-ConfigValue $worldConf 'MySQLExecutable' "`"$((Join-Path $paths.MySqlBin 'mysql.exe').Replace('\','/'))`""
+Set-ConfigValue $authConf 'SourceDirectory' "`"$($paths.SourceData.Replace('\','/'))`""
+Set-ConfigValue $authConf 'MySQLExecutable' "`"$((Join-Path $paths.MySqlBin 'mysql.exe').Replace('\','/'))`""
 Set-ConfigValue $worldConf 'MapUpdate.Threads' ([string]$settings.mapUpdateThreads)
 foreach ($key in @('Rate.XP.Kill','Rate.XP.Quest','Rate.XP.Explore','Rate.Drop.Item.Poor','Rate.Drop.Item.Normal','Rate.Drop.Item.Uncommon','Rate.Drop.Item.Rare','Rate.Drop.Item.Epic','Rate.Drop.Money','Rate.Reputation.Gain')) {
     Set-ConfigValue $worldConf $key '1'

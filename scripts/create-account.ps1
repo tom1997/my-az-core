@@ -19,7 +19,7 @@ $releasePath = (Get-Content -LiteralPath (Join-Path $paths.State 'current-releas
 $bin = Get-ReleaseBinPath -ReleasePath $releasePath
 $world = Join-Path $bin 'worldserver.exe'
 $commands = @("account create $Username $password", "account set gmlevel $Username $GmLevel -1", 'server shutdown 1')
-Push-Location $bin
+Push-Location $paths.Runtime
 try {
     $commands | & $world -c (Join-Path $paths.Configs 'worldserver.conf')
     if ($LASTEXITCODE -ne 0) { throw "worldserver 维护模式退出码：$LASTEXITCODE" }

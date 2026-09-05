@@ -17,9 +17,9 @@ try { Wait-TcpPort -Port $settings.mysqlPort -TimeoutSeconds 1 } catch {
 
 $authArgs = @('-c', (Join-Path $paths.Configs 'authserver.conf'))
 $worldArgs = @('-c', (Join-Path $paths.Configs 'worldserver.conf'))
-$auth = Start-Process -FilePath (Join-Path $bin 'authserver.exe') -ArgumentList $authArgs -WorkingDirectory $bin -PassThru -WindowStyle Hidden
+$auth = Start-Process -FilePath (Join-Path $bin 'authserver.exe') -ArgumentList $authArgs -WorkingDirectory $paths.Runtime -PassThru -WindowStyle Hidden
 [IO.File]::WriteAllText((Join-Path $paths.State 'authserver.pid'), [string]$auth.Id)
-$world = Start-Process -FilePath (Join-Path $bin 'worldserver.exe') -ArgumentList $worldArgs -WorkingDirectory $bin -PassThru -WindowStyle Hidden
+$world = Start-Process -FilePath (Join-Path $bin 'worldserver.exe') -ArgumentList $worldArgs -WorkingDirectory $paths.Runtime -PassThru -WindowStyle Hidden
 [IO.File]::WriteAllText((Join-Path $paths.State 'worldserver.pid'), [string]$world.Id)
 Write-Host "服务已启动：MySQL $($settings.mysqlPort)，Auth $($settings.authPort)，World $($settings.worldPort)。"
 Write-Host '首次启动会自动导入数据库，请在 worldserver 窗口中等待启动完成。'

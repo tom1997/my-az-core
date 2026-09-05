@@ -142,7 +142,13 @@ function Stop-ProcessFromPidFile {
     $process = Get-Process -Id $processId -ErrorAction SilentlyContinue
     if ($process) {
         Stop-Process -Id $processId
-        try { Wait-Process -Id $processId -Timeout 30 -ErrorAction Stop } catch { Stop-Process -Id $processId -Force }
+        try {
+            Wait-Process -Id $processId -Timeout 30 -ErrorAction Stop
+        } catch {
+            if (Get-Process -Id $processId -ErrorAction SilentlyContinue) {
+                Stop-Process -Id $processId -Force
+            }
+        }
     }
     Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
     Write-Host "$Name 已停止。"
