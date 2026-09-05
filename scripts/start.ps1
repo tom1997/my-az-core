@@ -8,8 +8,34 @@ $releasePath = (Get-Content -LiteralPath (Join-Path $paths.State 'current-releas
 $bin = Get-ReleaseBinPath -ReleasePath $releasePath
 if (-not (Test-Path -LiteralPath (Join-Path $paths.Data 'dbc'))) { throw '尚未提取客户端数据，请先运行 extract-client-data.ps1。' }
 
+function Find-ManagedProcess {
+    param([string]$Name, [string]$Executable, [string]$PidFile)
+
+    if (Test-Path -LiteralPath $PidFile) {
+        $savedId = 0
+        if ([int]::TryParse((Get-Content -LiteralPath $PidFile -Raw).Trim(), [ref]$savedId)) {
+            $saved = Get-Process -Id $savedId -ErrorAction SilentlyContinue
+            if ($saved -and $saved.ProcessName -ieq $Name -and $saved.Path -ieq $Executable) { return $saved }
+        }
+        Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
+    }
+
+    $running = Get-Process -Name $Name -ErrorAction SilentlyContinue |
+        Where-Object { $_.Path -ieq $Executable } |
+        Select-Object -First 1
+    if ($running) {
+        [IO.File]::WriteAllText($PidFile, [string]$running.Id)
+        return $running
+    }
+    return $null
+}
+
+function Test-LocalPort([int]$Port) {
+    try { Wait-TcpPort -Port $Port -TimeoutSeconds 1; return $true } catch { return $false }
+}
+
 $mysqlPid = Join-Path $paths.State 'mysql.pid'
-try { Wait-TcpPort -Port $settings.mysqlPort -TimeoutSeconds 1 } catch {
+if (-not (Test-LocalPort -Port $settings.mysqlPort)) {
     $p = Start-Process -FilePath (Join-Path $paths.MySqlBin 'mysqld.exe') -ArgumentList "--defaults-file=$($paths.MyCnf)", '--console' -PassThru -WindowStyle Hidden
     [IO.File]::WriteAllText($mysqlPid, [string]$p.Id)
     Wait-TcpPort -Port $settings.mysqlPort -TimeoutSeconds 90
@@ -17,9 +43,30 @@ try { Wait-TcpPort -Port $settings.mysqlPort -TimeoutSeconds 1 } catch {
 
 $authArgs = @('-c', (Join-Path $paths.Configs 'authserver.conf'))
 $worldArgs = @('-c', (Join-Path $paths.Configs 'worldserver.conf'))
-$auth = Start-Process -FilePath (Join-Path $bin 'authserver.exe') -ArgumentList $authArgs -WorkingDirectory $paths.Runtime -PassThru -WindowStyle Hidden
-[IO.File]::WriteAllText((Join-Path $paths.State 'authserver.pid'), [string]$auth.Id)
-$world = Start-Process -FilePath (Join-Path $bin 'worldserver.exe') -ArgumentList $worldArgs -WorkingDirectory $paths.Runtime -PassThru -WindowStyle Hidden
-[IO.File]::WriteAllText((Join-Path $paths.State 'worldserver.pid'), [string]$world.Id)
-Write-Host "服务已启动：MySQL $($settings.mysqlPort)，Auth $($settings.authPort)，World $($settings.worldPort)。"
-Write-Host '首次启动会自动导入数据库，请在 worldserver 窗口中等待启动完成。'
+$authExe = Join-Path $bin 'authserver.exe'
+$worldExe = Join-Path $bin 'worldserver.exe'
+$authPid = Join-Path $paths.State 'authserver.pid'
+$worldPid = Join-Path $paths.State 'worldserver.pid'
+$auth = Find-ManagedProcess -Name 'authserver' -Executable $authExe -PidFile $authPid
+$world = Find-ManagedProcess -Name 'worldserver' -Executable $worldExe -PidFile $worldPid
+$started = [Collections.Generic.List[string]]::new()
+
+if (-not $auth) {
+    if (Test-LocalPort -Port $settings.authPort) { throw "Auth 端口 $($settings.authPort) 已被其他程序占用。" }
+    $auth = Start-Process -FilePath $authExe -ArgumentList $authArgs -WorkingDirectory $paths.Runtime -PassThru -WindowStyle Hidden
+    [IO.File]::WriteAllText($authPid, [string]$auth.Id)
+    $started.Add('Auth')
+}
+if (-not $world) {
+    if (Test-LocalPort -Port $settings.worldPort) { throw "World 端口 $($settings.worldPort) 已被其他程序占用。" }
+    $world = Start-Process -FilePath $worldExe -ArgumentList $worldArgs -WorkingDirectory $paths.Runtime -PassThru -WindowStyle Hidden
+    [IO.File]::WriteAllText($worldPid, [string]$world.Id)
+    $started.Add('World')
+}
+
+if ($started.Count) {
+    Write-Host "已启动：$($started -join '、')。MySQL $($settings.mysqlPort)，Auth $($settings.authPort)，World $($settings.worldPort)。"
+} else {
+    Write-Host "服务端已经在运行，未重复启动。MySQL $($settings.mysqlPort)，Auth $($settings.authPort)，World $($settings.worldPort)。"
+}
+Write-Host '首次启动会自动导入数据库；进度可查看 D:\AzerothCore\runtime\Server.log。'
