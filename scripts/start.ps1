@@ -1,5 +1,8 @@
 [CmdletBinding()]
-param([string]$SettingsPath)
+param(
+    [string]$SettingsPath,
+    [switch]$VisibleWorld
+)
 
 . (Join-Path $PSScriptRoot 'lib\Common.ps1')
 $settings = Get-RuntimeSettings -SettingsPath $SettingsPath
@@ -59,7 +62,15 @@ if (-not $auth) {
 }
 if (-not $world) {
     if (Test-LocalPort -Port $settings.worldPort) { throw "World 端口 $($settings.worldPort) 已被其他程序占用。" }
-    $world = Start-Process -FilePath $worldExe -ArgumentList $worldArgs -WorkingDirectory $paths.Runtime -PassThru -WindowStyle Hidden
+    $worldStart = @{
+        FilePath = $worldExe
+        ArgumentList = $worldArgs
+        WorkingDirectory = $paths.Runtime
+        PassThru = $true
+    }
+    if ($VisibleWorld) { $worldStart.NoNewWindow = $true }
+    else { $worldStart.WindowStyle = 'Hidden' }
+    $world = Start-Process @worldStart
     [IO.File]::WriteAllText($worldPid, [string]$world.Id)
     $started.Add('World')
 }
@@ -70,3 +81,11 @@ if ($started.Count) {
     Write-Host "服务端已经在运行，未重复启动。MySQL $($settings.mysqlPort)，Auth $($settings.authPort)，World $($settings.worldPort)。"
 }
 Write-Host '首次启动会自动导入数据库；进度可查看 D:\AzerothCore\runtime\Server.log。'
+
+if ($VisibleWorld -and $started -contains 'World') {
+    Write-Host '当前窗口已连接 WorldServer；可直接输入服务端命令。'
+    Wait-Process -Id $world.Id
+    if ((Test-Path -LiteralPath $worldPid) -and ((Get-Content -LiteralPath $worldPid -Raw).Trim() -eq [string]$world.Id)) {
+        Remove-Item -LiteralPath $worldPid -Force
+    }
+}

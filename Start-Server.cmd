@@ -10,6 +10,6 @@ if not exist "%PWSH%" if "%PWSH%" neq "pwsh.exe" (
     pause
     exit /b 1
 )
-"%PWSH%" -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\start.ps1"
+"%PWSH%" -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\start.ps1" -VisibleWorld
 echo.
 pause

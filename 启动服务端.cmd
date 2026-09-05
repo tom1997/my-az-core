@@ -4,7 +4,7 @@ title AzerothCore - 启动服务端
 cd /d "%~dp0"
 set "PWSH=pwsh.exe"
 where pwsh.exe >nul 2>nul || set "PWSH=%USERPROFILE%\.cache\codex-runtimes\codex-primary-runtime\dependencies\native\powershell\pwsh.exe"
-"%PWSH%" -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\start.ps1"
+"%PWSH%" -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\start.ps1" -VisibleWorld
 if errorlevel 1 (
     echo.
     echo 启动失败，请把上面的错误发给 Codex。
