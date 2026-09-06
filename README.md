@@ -48,6 +48,8 @@ Dungeon Clear 的启用条件、命令和默认安全设置见 [`docs/dungeon-cl
 
 拍卖行机器人和大秘境的启用步骤分别见 [`docs/ahbot.zh-CN.md`](docs/ahbot.zh-CN.md) 与 [`docs/mythic-plus.zh-CN.md`](docs/mythic-plus.zh-CN.md)。RDF 资料片切换见 [`docs/rdf-expansion.zh-CN.md`](docs/rdf-expansion.zh-CN.md)。
 
+Playerbot 的独立登录、主人离线后继续活动、用户策略持久化和 `botduel` 决斗实验入口见 [`docs/playerbot-owned-autonomy.zh-CN.md`](docs/playerbot-owned-autonomy.zh-CN.md)。
+
 ## 重要边界
 
 - 仓库不包含游戏客户端、数据库、密码或正式服配置。
