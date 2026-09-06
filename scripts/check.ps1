@@ -30,6 +30,22 @@ foreach ($patch in Get-ChildItem -LiteralPath (Join-Path $repoRoot 'patches') -F
     }
 }
 
+$ownedBotsPatch = Join-Path $repoRoot 'patches\0003-playerbot-owned-autonomy-and-duels.patch'
+if (-not (Test-Path -LiteralPath $ownedBotsPatch)) { throw '缺少 Playerbot 自主与决斗补丁。' }
+$ownedBotsPatchText = Get-Content -LiteralPath $ownedBotsPatch -Raw
+foreach ($requiredMarker in @(
+    'ApplyUserStrategies',
+    'login-solo',
+    'login-persistent',
+    'PersistentOwned',
+    'botduel',
+    'LogoutRandomBots'
+)) {
+    if ($ownedBotsPatchText -notmatch [regex]::Escape($requiredMarker)) {
+        throw "Playerbot 自主与决斗补丁缺少标记：$requiredMarker"
+    }
+}
+
 $sqlFiles = @(Get-ChildItem -LiteralPath (Join-Path $repoRoot 'modules\custom') -Filter '*.sql' -File -Recurse -ErrorAction SilentlyContinue)
 foreach ($file in $sqlFiles) {
     $relative = [IO.Path]::GetRelativePath($repoRoot, $file.FullName).Replace('\', '/')

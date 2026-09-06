@@ -1,0 +1,709 @@
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/ChangeStrategyAction.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/ChangeStrategyAction.cpp
+index 19dc854f..872178c5 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/ChangeStrategyAction.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/ChangeStrategyAction.cpp
+@@ -12,6 +12,7 @@
+ // Helper function for prefixes used by combat and non-combat strategy commands.
+ static void HandleStrategyCommon(PlayerbotAI* botAI, std::string const& text, BotState state)
+ {
++    bool save = false;
+     std::vector<std::string> splitted = split(text, ',');
+     for (std::vector<std::string>::iterator i = splitted.begin(); i != splitted.end(); i++)
+     {
+@@ -21,16 +22,20 @@ static void HandleStrategyCommon(PlayerbotAI* botAI, std::string const& text, Bo
+             case '+':
+             case '-':
+             case '~':
+-                PlayerbotRepository::instance().Save(botAI);
++                PlayerbotRepository::instance().SaveUserStrategyChange(botAI, state, *i);
++                save = true;
+                 break;
+             case '!':
+                 botAI->SelectiveResetStrategies(state);
+-                PlayerbotRepository::instance().Save(botAI);
++                PlayerbotRepository::instance().ClearUserStrategies(botAI, state);
++                save = true;
+                 break;
+             case '?':
+                 break;
+         }
+     }
++    if (save)
++        PlayerbotRepository::instance().Save(botAI);
+ }
+ 
+ bool ChangeCombatStrategyAction::Execute(Event event)
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/ResetAiAction.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/ResetAiAction.cpp
+index 0ec911dd..c940ff27 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/ResetAiAction.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/ResetAiAction.cpp
+@@ -59,8 +59,8 @@ bool ResetAiAction::Execute(Event event)
+                 botAI->SetMaster(newMaster);
+         }
+     }
+-    PlayerbotRepository::instance().Reset(botAI);
+     botAI->ResetStrategies(false);
++    PlayerbotRepository::instance().ApplyUserStrategies(botAI);
+     botAI->TellMaster("AI was reset to defaults");
+     return true;
+ }
+diff --git a/modules/mod-playerbots/src/Bot/PlayerbotMgr.cpp b/modules/mod-playerbots/src/Bot/PlayerbotMgr.cpp
+index 833c60d8..0b26fd6e 100644
+--- a/modules/mod-playerbots/src/Bot/PlayerbotMgr.cpp
++++ b/modules/mod-playerbots/src/Bot/PlayerbotMgr.cpp
+@@ -65,22 +65,26 @@ private:
+ 
+ std::unordered_set<ObjectGuid> BotInitGuard::botsBeingInitialized;
+ std::unordered_map<ObjectGuid, uint32> PlayerbotHolder::botLoading;
++std::unordered_map<ObjectGuid, PlayerbotLoginMode> PlayerbotHolder::botLoginModes;
++std::unordered_map<ObjectGuid, uint32> PlayerbotHolder::botOwnerAccounts;
+ 
+ PlayerbotHolder::PlayerbotHolder() : PlayerbotAIBase(false) {}
+ class PlayerbotLoginQueryHolder : public LoginQueryHolder
+ {
+ private:
+     uint32 masterAccountId;
++    PlayerbotLoginMode loginMode;
+ public:
+-    PlayerbotLoginQueryHolder(uint32 masterAccount, uint32 accountId, ObjectGuid guid)
+-        : LoginQueryHolder(accountId, guid), masterAccountId(masterAccount)
++    PlayerbotLoginQueryHolder(uint32 masterAccount, uint32 accountId, ObjectGuid guid, PlayerbotLoginMode mode)
++        : LoginQueryHolder(accountId, guid), masterAccountId(masterAccount), loginMode(mode)
+     {
+     }
+ 
+     uint32 GetMasterAccountId() const { return masterAccountId; }
++    PlayerbotLoginMode GetLoginMode() const { return loginMode; }
+ };
+ 
+-void PlayerbotHolder::AddPlayerBot(ObjectGuid playerGuid, uint32 masterAccountId)
++void PlayerbotHolder::AddPlayerBot(ObjectGuid playerGuid, uint32 masterAccountId, PlayerbotLoginMode mode)
+ {
+     if (botLoading.find(playerGuid) != botLoading.end())
+         return;
+@@ -144,13 +148,15 @@ void PlayerbotHolder::AddPlayerBot(ObjectGuid playerGuid, uint32 masterAccountId
+         return;
+     }
+     std::shared_ptr<PlayerbotLoginQueryHolder> holder =
+-        std::make_shared<PlayerbotLoginQueryHolder>(masterAccountId, accountId, playerGuid);
++        std::make_shared<PlayerbotLoginQueryHolder>(masterAccountId, accountId, playerGuid, mode);
+     if (!holder->Initialize())
+     {
+         return;
+     }
+ 
+     botLoading.emplace(playerGuid, masterAccountId);
++    botLoginModes[playerGuid] = mode;
++    botOwnerAccounts[playerGuid] = masterAccountId;
+ 
+     // Always login in with world session to avoid race condition
+     sWorld->AddQueryHolderCallback(CharacterDatabase.DelayQueryHolder(holder))
+@@ -402,6 +408,8 @@ void PlayerbotHolder::LogoutPlayerBot(ObjectGuid guid)
+                 "goodbye", "Goodbye!", {});
+             botAI->TellMaster(message);
+             RemoveFromPlayerbotsMap(guid);              // deletes bot player ptr inside this WorldSession PlayerBotMap
++            botLoginModes.erase(guid);
++            botOwnerAccounts.erase(guid);
+             botWorldSessionPtr->LogoutPlayer(true);     // this will delete the bot Player object and PlayerbotAI object
+             delete botWorldSessionPtr;                  // finally delete the bot's WorldSession
+         }
+@@ -433,6 +441,8 @@ void PlayerbotHolder::DisablePlayerBot(ObjectGuid guid)
+         bot->SaveToDB(false, false);
+ 
+         RemoveFromPlayerbotsMap(guid);  // deletes bot player ptr inside this WorldSession PlayerBotMap
++        botLoginModes.erase(guid);
++        botOwnerAccounts.erase(guid);
+ 
+         delete botAI;
+     }
+@@ -443,6 +453,31 @@ void PlayerbotHolder::RemoveFromPlayerbotsMap(ObjectGuid guid)
+     playerBots.erase(guid);
+ }
+ 
++void PlayerbotHolder::AttachPlayerBot(Player* bot)
++{
++    if (bot)
++        playerBots[bot->GetGUID()] = bot;
++}
++
++Player* PlayerbotHolder::DetachPlayerBot(ObjectGuid guid)
++{
++    Player* bot = GetPlayerBot(guid);
++    playerBots.erase(guid);
++    return bot;
++}
++
++PlayerbotLoginMode PlayerbotHolder::GetLoginMode(ObjectGuid guid)
++{
++    auto const itr = botLoginModes.find(guid);
++    return itr == botLoginModes.end() ? PlayerbotLoginMode::GroupWithMaster : itr->second;
++}
++
++uint32 PlayerbotHolder::GetOwnerAccountId(ObjectGuid guid)
++{
++    auto const itr = botOwnerAccounts.find(guid);
++    return itr == botOwnerAccounts.end() ? 0 : itr->second;
++}
++
+ Player* PlayerbotHolder::GetPlayerBot(ObjectGuid playerGuid) const
+ {
+     PlayerBotMap::const_iterator it = playerBots.find(playerGuid);
+@@ -525,6 +560,11 @@ void PlayerbotHolder::OnBotLogin(Player* const bot)
+         botAI->ResetStrategies(!sRandomPlayerbotMgr.IsRandomBot(bot));
+     }
+     PlayerbotRepository::instance().Load(botAI);
++    PlayerbotRepository::instance().ApplyUserStrategies(botAI);
++
++    PlayerbotLoginMode const loginMode = GetLoginMode(bot->GetGUID());
++    if (loginMode != PlayerbotLoginMode::GroupWithMaster)
++        botAI->ChangeStrategy("+new rpg", BOT_STATE_NON_COMBAT);
+ 
+     if (master && !master->HasUnitState(UNIT_STATE_IN_FLIGHT))
+     {
+@@ -542,7 +582,7 @@ void PlayerbotHolder::OnBotLogin(Player* const bot)
+         "hello", "Hello!", {}), PLAYERBOT_SECURITY_TALK);
+ 
+     // Queue group operations for world thread
+-    if (master && master->GetGroup() && !group)
++    if (loginMode == PlayerbotLoginMode::GroupWithMaster && master && master->GetGroup() && !group)
+     {
+         Group* mgroup = master->GetGroup();
+         if (mgroup->GetMembersCount() >= 5)
+@@ -566,7 +606,7 @@ void PlayerbotHolder::OnBotLogin(Player* const bot)
+             PlayerbotWorldThreadProcessor::instance().QueueOperation(std::move(addOp));
+         }
+     }
+-    else if (master && !group)
++    else if (loginMode == PlayerbotLoginMode::GroupWithMaster && master && !group)
+     {
+         // Queue group creation and AddMember operation
+         auto inviteOp = std::make_unique<GroupInviteOperation>(master->GetGUID(), bot->GetGUID());
+@@ -679,7 +719,8 @@ std::string const PlayerbotHolder::ProcessBotCommand(std::string const cmd, Obje
+     //bool isRandomAccount = sPlayerbotAIConfig.IsInRandomAccountList(botAccount); //not used, shadowed, line marked for removal.
+     //bool isMasterAccount = (masterAccountId == botAccount); //not used, line marked for removal.
+ 
+-    if (cmd == "add" || cmd == "addaccount" || cmd == "login")
++    if (cmd == "add" || cmd == "addaccount" || cmd == "login" || cmd == "login-solo" ||
++        cmd == "addsolo" || cmd == "login-persistent" || cmd == "addpersistent")
+     {
+         if (ObjectAccessor::FindPlayer(guid))
+             return "player already logged in";
+@@ -700,7 +741,13 @@ std::string const PlayerbotHolder::ProcessBotCommand(std::string const cmd, Obje
+             }
+         }
+ 
+-        AddPlayerBot(guid, masterAccountId);
++        PlayerbotLoginMode mode = PlayerbotLoginMode::GroupWithMaster;
++        if (cmd == "login-solo" || cmd == "addsolo")
++            mode = PlayerbotLoginMode::SoloOwned;
++        else if (cmd == "login-persistent" || cmd == "addpersistent")
++            mode = PlayerbotLoginMode::PersistentOwned;
++
++        AddPlayerBot(guid, masterAccountId, mode);
+         return "ok";
+     }
+     else if (cmd == "remove" || cmd == "logout" || cmd == "rm")
+@@ -899,7 +946,7 @@ std::vector<std::string> PlayerbotHolder::HandlePlayerbotCommand(char const* arg
+ 
+     if (!*args)
+     {
+-        messages.push_back("usage: list/reload/tweak/self or add/addaccount/init/remove PLAYERNAME\n");
++        messages.push_back("usage: list/reload/tweak/self or add/addaccount/login-solo/login-persistent/init/remove PLAYERNAME\n");
+         messages.push_back("usage: addclass CLASSNAME [male|female|0|1]");
+         return messages;
+     }
+@@ -1495,6 +1542,15 @@ void PlayerbotMgr::HandleCommand(uint32 type, std::string const text)
+     if (!master)
+         return;
+ 
++    std::string normalized = text;
++    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
++                   [](unsigned char c) { return std::tolower(c); });
++    if (normalized == "botduel")
++    {
++        StartBotDuels();
++        return;
++    }
++
+     if (text.find(sPlayerbotAIConfig.commandSeparator) != std::string::npos)
+     {
+         std::vector<std::string> commands;
+@@ -1525,6 +1581,62 @@ void PlayerbotMgr::HandleCommand(uint32 type, std::string const text)
+     }
+ }
+ 
++void PlayerbotMgr::StartBotDuels()
++{
++    if (!master || !master->GetGroup())
++    {
++        if (master && master->GetSession())
++            ChatHandler(master->GetSession()).SendSysMessage("botduel: you must be in a group");
++        return;
++    }
++
++    std::vector<Player*> candidates;
++    for (GroupReference* reference = master->GetGroup()->GetFirstMember(); reference; reference = reference->next())
++    {
++        Player* bot = reference->GetSource();
++        PlayerbotAI* botAI = bot ? GET_PLAYERBOT_AI(bot) : nullptr;
++        if (!bot || bot == master || !botAI || !bot->IsAlive() || bot->IsInCombat() || bot->duel ||
++            bot->GetMap() != master->GetMap())
++            continue;
++        candidates.push_back(bot);
++    }
++
++    std::sort(candidates.begin(), candidates.end(),
++              [this](Player* left, Player* right)
++              {
++                  return master->GetDistance(left) < master->GetDistance(right);
++              });
++
++    uint32 started = 0;
++    for (size_t i = 0; i + 1 < candidates.size(); i += 2)
++    {
++        Player* challenger = candidates[i];
++        Player* opponent = candidates[i + 1];
++        if (challenger->GetTeamId() != opponent->GetTeamId() || challenger->GetDistance(opponent) > 40.0f)
++            continue;
++
++        PlayerbotAI* challengerAI = GET_PLAYERBOT_AI(challenger);
++        PlayerbotAI* opponentAI = GET_PLAYERBOT_AI(opponent);
++        if (!challengerAI || !opponentAI)
++            continue;
++
++        challengerAI->ChangeStrategy("+duel", BOT_STATE_COMBAT);
++        opponentAI->ChangeStrategy("+duel", BOT_STATE_COMBAT);
++        if (challengerAI->DoSpecificAction(
++                "cast custom spell", Event("botduel", "7266 on " + opponent->GetName()), true))
++            ++started;
++    }
++
++    if (master->GetSession())
++    {
++        if (started)
++            ChatHandler(master->GetSession()).PSendSysMessage("botduel: started {} bot duel(s)", started);
++        else
++            ChatHandler(master->GetSession()).SendSysMessage(
++                "botduel: no eligible same-faction bot pairs within 40 yards");
++    }
++}
++
+ void PlayerbotMgr::HandleMasterIncomingPacket(WorldPacket const& packet)
+ {
+     for (PlayerBotMap::const_iterator it = GetPlayerBotsBegin(); it != GetPlayerBotsEnd(); ++it)
+@@ -1569,7 +1681,7 @@ void PlayerbotMgr::HandleMasterIncomingPacket(WorldPacket const& packet)
+                 }
+             }
+ 
+-            LogoutAllBots();
++            LogoutBotsForMaster();
+             break;
+         }
+         // if master cancelled logout, cancel too
+@@ -1654,6 +1766,8 @@ void PlayerbotMgr::OnPlayerLogin(Player* player)
+     // set locale priority for bot texts
+     PlayerbotTextMgr::instance().AddLocalePriority(usedLocale);
+ 
++    ReclaimPersistentBots();
++
+     if (sPlayerbotAIConfig.selfBotLevel > 2)
+         HandlePlayerbotCommand("self", player);
+ 
+@@ -1683,6 +1797,64 @@ void PlayerbotMgr::OnPlayerLogin(Player* player)
+     }
+ }
+ 
++void PlayerbotMgr::DetachPersistentBots()
++{
++    std::vector<ObjectGuid> persistentBots;
++    for (auto const& [guid, bot] : playerBots)
++        if (bot && GetLoginMode(guid) == PlayerbotLoginMode::PersistentOwned)
++            persistentBots.push_back(guid);
++
++    for (ObjectGuid const guid : persistentBots)
++    {
++        Player* bot = DetachPlayerBot(guid);
++        PlayerbotAI* botAI = bot ? GET_PLAYERBOT_AI(bot) : nullptr;
++        if (!botAI)
++            continue;
++
++        botAI->SetMaster(nullptr);
++        botAI->ResetStrategies(false);
++        PlayerbotRepository::instance().ApplyUserStrategies(botAI);
++        botAI->ChangeStrategy("+new rpg", BOT_STATE_NON_COMBAT);
++        sRandomPlayerbotMgr.AttachPlayerBot(bot);
++        LOG_INFO("playerbots", "Persistent owned bot {} remains online after owner logout", bot->GetName());
++    }
++}
++
++void PlayerbotMgr::ReclaimPersistentBots()
++{
++    if (!master || !master->GetSession())
++        return;
++
++    uint32 const ownerAccount = master->GetSession()->GetAccountId();
++    PlayerBotMap const onlineBots = sRandomPlayerbotMgr.GetAllBots();
++    for (auto const& [guid, candidate] : onlineBots)
++    {
++        if (!candidate || GetLoginMode(guid) != PlayerbotLoginMode::PersistentOwned ||
++            GetOwnerAccountId(guid) != ownerAccount)
++            continue;
++
++        Player* bot = sRandomPlayerbotMgr.DetachPlayerBot(guid);
++        if (!bot)
++            continue;
++
++        AttachPlayerBot(bot);
++        if (PlayerbotAI* botAI = GET_PLAYERBOT_AI(bot))
++        {
++            botAI->SetMaster(master);
++            botAI->ResetStrategies(false);
++            PlayerbotRepository::instance().ApplyUserStrategies(botAI);
++            botAI->ChangeStrategy("+new rpg", BOT_STATE_NON_COMBAT);
++        }
++        LOG_INFO("playerbots", "Persistent owned bot {} reattached to owner {}", bot->GetName(), master->GetName());
++    }
++}
++
++void PlayerbotMgr::LogoutBotsForMaster()
++{
++    DetachPersistentBots();
++    LogoutAllBots();
++}
++
+ void PlayerbotMgr::TellError(std::string const botName, std::string const text)
+ {
+     std::set<std::string> names = errors[text];
+diff --git a/modules/mod-playerbots/src/Bot/PlayerbotMgr.h b/modules/mod-playerbots/src/Bot/PlayerbotMgr.h
+index 005b8286..bc0975b5 100644
+--- a/modules/mod-playerbots/src/Bot/PlayerbotMgr.h
++++ b/modules/mod-playerbots/src/Bot/PlayerbotMgr.h
+@@ -19,13 +19,21 @@ class WorldPacket;
+ typedef std::map<ObjectGuid, Player*> PlayerBotMap;
+ typedef std::map<std::string, std::set<std::string> > PlayerBotErrorMap;
+ 
++enum class PlayerbotLoginMode : uint8
++{
++    GroupWithMaster,
++    SoloOwned,
++    PersistentOwned
++};
++
+ class PlayerbotHolder : public PlayerbotAIBase
+ {
+ public:
+     PlayerbotHolder();
+     virtual ~PlayerbotHolder(){};
+ 
+-    void AddPlayerBot(ObjectGuid guid, uint32 masterAccountId);
++    void AddPlayerBot(ObjectGuid guid, uint32 masterAccountId,
++                      PlayerbotLoginMode mode = PlayerbotLoginMode::GroupWithMaster);
+     bool IsAccountLinked(uint32 accountId, uint32 masterAccountId);
+     void HandlePlayerBotLoginCallback(PlayerbotLoginQueryHolder const& holder);
+ 
+@@ -43,6 +51,10 @@ public:
+ 
+     void LogoutAllBots();
+     void OnBotLogin(Player* const bot);
++    void AttachPlayerBot(Player* bot);
++    Player* DetachPlayerBot(ObjectGuid guid);
++    static PlayerbotLoginMode GetLoginMode(ObjectGuid guid);
++    static uint32 GetOwnerAccountId(ObjectGuid guid);
+ 
+     std::vector<std::string> HandlePlayerbotCommand(char const* args, Player* master = nullptr);
+     std::string const ProcessBotCommand(std::string const cmd, ObjectGuid guid, ObjectGuid masterguid, bool admin,
+@@ -59,6 +71,8 @@ protected:
+ 
+     PlayerBotMap playerBots;
+     static std::unordered_map<ObjectGuid, uint32> botLoading;
++    static std::unordered_map<ObjectGuid, PlayerbotLoginMode> botLoginModes;
++    static std::unordered_map<ObjectGuid, uint32> botOwnerAccounts;
+ };
+ 
+ class PlayerbotMgr : public PlayerbotHolder
+@@ -73,6 +87,7 @@ public:
+     void HandleCommand(uint32 type, std::string const text);
+     void OnPlayerLogin(Player* player);
+     void CancelLogout();
++    void LogoutBotsForMaster();
+ 
+     void UpdateAIInternal(uint32 elapsed, bool minimal = false) override;
+     void TellError(std::string const botName, std::string const text);
+@@ -89,6 +104,9 @@ public:
+ protected:
+     void OnBotLoginInternal(Player* const bot) override;
+     void CheckTellErrors(uint32 elapsed);
++    void DetachPersistentBots();
++    void ReclaimPersistentBots();
++    void StartBotDuels();
+ 
+ private:
+     Player* const master;
+diff --git a/modules/mod-playerbots/src/Bot/RandomPlayerbotMgr.cpp b/modules/mod-playerbots/src/Bot/RandomPlayerbotMgr.cpp
+index 16858375..98170896 100644
+--- a/modules/mod-playerbots/src/Bot/RandomPlayerbotMgr.cpp
++++ b/modules/mod-playerbots/src/Bot/RandomPlayerbotMgr.cpp
+@@ -28,6 +28,7 @@
+ #include "PlayerbotAI.h"
+ #include "PlayerbotAIConfig.h"
+ #include "PlayerbotFactory.h"
++#include "PlayerbotRepository.h"
+ #include "PlayerbotTextMgr.h"
+ #include "Playerbots.h"
+ #include "Position.h"
+@@ -353,7 +354,7 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 /*elapsed*/, bool /*minimal*/)
+             if (RealPlayerLastTimeSeen != 0 && onlineBotCount > 0 &&
+                 time(nullptr) > RealPlayerLastTimeSeen + sPlayerbotAIConfig.disabledWithoutRealPlayerLogoutDelay)
+             {
+-                LogoutAllBots();
++                LogoutRandomBots();
+                 LOG_INFO("playerbots", "Logout all bots due no real player session.");
+             }
+         }
+@@ -462,6 +463,17 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 /*elapsed*/, bool /*minimal*/)
+     }
+ }
+ 
++void RandomPlayerbotMgr::LogoutRandomBots()
++{
++    PlayerBotMap const bots = playerBots;
++    for (auto const& [guid, bot] : bots)
++    {
++        if (!bot || GetLoginMode(guid) == PlayerbotLoginMode::PersistentOwned)
++            continue;
++        LogoutPlayerBot(guid);
++    }
++}
++
+ // void RandomPlayerbotMgr::ScaleBotActivity()
+ //{
+ //     float activityPercentage = getActivityPercentage();
+@@ -2543,6 +2555,19 @@ void RandomPlayerbotMgr::OnPlayerLogout(Player* player)
+ 
+ void RandomPlayerbotMgr::OnBotLoginInternal(Player* const bot)
+ {
++    if (GetLoginMode(bot->GetGUID()) == PlayerbotLoginMode::PersistentOwned)
++    {
++        if (PlayerbotAI* botAI = GET_PLAYERBOT_AI(bot))
++        {
++            botAI->SetMaster(nullptr);
++            botAI->ResetStrategies(false);
++            PlayerbotRepository::instance().ApplyUserStrategies(botAI);
++            botAI->ChangeStrategy("+new rpg", BOT_STATE_NON_COMBAT);
++        }
++        LOG_INFO("playerbots", "Persistent owned bot {} logged in without its owner", bot->GetName());
++        return;
++    }
++
+     if (_isBotLogging)
+     {
+         LOG_INFO("playerbots", "{}/{} Bot {} logged in", playerBots.size(),
+diff --git a/modules/mod-playerbots/src/Bot/RandomPlayerbotMgr.h b/modules/mod-playerbots/src/Bot/RandomPlayerbotMgr.h
+index c7c27e07..1198c43b 100644
+--- a/modules/mod-playerbots/src/Bot/RandomPlayerbotMgr.h
++++ b/modules/mod-playerbots/src/Bot/RandomPlayerbotMgr.h
+@@ -100,6 +100,7 @@ public:
+ 
+     void LogPlayerLocation();
+     void UpdateAIInternal(uint32 elapsed, bool minimal = false) override;
++    void LogoutRandomBots();
+ 
+     uint32 activeBots = 0;
+     static bool HandlePlayerbotConsoleCommand(ChatHandler* handler, char const* args);
+diff --git a/modules/mod-playerbots/src/Db/PlayerbotRepository.cpp b/modules/mod-playerbots/src/Db/PlayerbotRepository.cpp
+index b516a8e4..6e5aef9e 100644
+--- a/modules/mod-playerbots/src/Db/PlayerbotRepository.cpp
++++ b/modules/mod-playerbots/src/Db/PlayerbotRepository.cpp
+@@ -6,6 +6,34 @@
+ 
+ #include "PlayerbotRepository.h"
+ #include "AiObjectContext.h"
++#include <algorithm>
++#include <cctype>
++#include <sstream>
++#include <unordered_map>
++#include <unordered_set>
++
++namespace
++{
++std::string UserStrategyKey(BotState state)
++{
++    return state == BOT_STATE_COMBAT ? "user_co" : state == BOT_STATE_NON_COMBAT ? "user_nc" : "user_dead";
++}
++
++std::string Trim(std::string value)
++{
++    value.erase(value.begin(), std::find_if(value.begin(), value.end(), [](unsigned char c) { return !std::isspace(c); }));
++    value.erase(std::find_if(value.rbegin(), value.rend(), [](unsigned char c) { return !std::isspace(c); }).base(), value.end());
++    return value;
++}
++
++bool IsTransientStrategy(std::string const& name)
++{
++    static std::unordered_set<std::string> const transient = {
++        "follow", "stay", "guard", "free", "move from group", "start duel"
++    };
++    return transient.contains(name);
++}
++}
+ 
+ void PlayerbotRepository::Load(PlayerbotAI* botAI)
+ {
+@@ -50,12 +78,11 @@ void PlayerbotRepository::Save(PlayerbotAI* botAI)
+ {
+     ObjectGuid::LowType guid = botAI->GetBot()->GetGUID().GetCounter();
+ 
+-    Reset(botAI);
++    std::string const userCo = GetSingleValue(guid, "user_co");
++    std::string const userNc = GetSingleValue(guid, "user_nc");
++    std::string const userDead = GetSingleValue(guid, "user_dead");
+ 
+-    PlayerbotsDatabasePreparedStatement* deleteStatement =
+-        PlayerbotsDatabase.GetPreparedStatement(PLAYERBOTS_DEL_DB_STORE);
+-    deleteStatement->SetData(0, guid);
+-    PlayerbotsDatabase.Execute(deleteStatement);
++    Reset(botAI);
+ 
+     std::vector<std::string> data = botAI->GetAiObjectContext()->Save();
+     for (std::vector<std::string>::iterator i = data.begin(); i != data.end(); ++i)
+@@ -66,10 +93,19 @@ void PlayerbotRepository::Save(PlayerbotAI* botAI)
+     SaveValue(guid, "co", FormatStrategies("co", botAI->GetStrategies(BOT_STATE_COMBAT)));
+     SaveValue(guid, "nc", FormatStrategies("nc", botAI->GetStrategies(BOT_STATE_NON_COMBAT)));
+     SaveValue(guid, "dead", FormatStrategies("dead", botAI->GetStrategies(BOT_STATE_DEAD)));
++    if (!userCo.empty())
++        SaveValue(guid, "user_co", userCo);
++    if (!userNc.empty())
++        SaveValue(guid, "user_nc", userNc);
++    if (!userDead.empty())
++        SaveValue(guid, "user_dead", userDead);
+ }
+ 
+ std::string const PlayerbotRepository::FormatStrategies(std::string const /*type*/, std::vector<std::string> strategies)
+ {
++    if (strategies.empty())
++        return "";
++
+     std::ostringstream out;
+     for (std::vector<std::string>::iterator i = strategies.begin(); i != strategies.end(); ++i)
+         out << "+" << (*i).c_str() << ",";
+@@ -78,6 +114,64 @@ std::string const PlayerbotRepository::FormatStrategies(std::string const /*type
+     return res.substr(0, res.size() - 1);
+ }
+ 
++void PlayerbotRepository::ApplyUserStrategies(PlayerbotAI* botAI)
++{
++    uint32 guid = botAI->GetBot()->GetGUID().GetCounter();
++    for (BotState state : {BOT_STATE_COMBAT, BOT_STATE_NON_COMBAT, BOT_STATE_DEAD})
++    {
++        std::string changes = GetSingleValue(guid, UserStrategyKey(state));
++        if (!changes.empty())
++            botAI->ChangeStrategy(changes, state);
++    }
++}
++
++void PlayerbotRepository::SaveUserStrategyChange(PlayerbotAI* botAI, BotState state, std::string const& change)
++{
++    if (change.size() < 2 || (change[0] != '+' && change[0] != '-' && change[0] != '~'))
++        return;
++
++    std::string name = Trim(change.substr(1));
++    if (name.empty())
++        return;
++
++    uint32 guid = botAI->GetBot()->GetGUID().GetCounter();
++    std::string const key = UserStrategyKey(state);
++    std::unordered_map<std::string, char> changes;
++    std::stringstream input(GetSingleValue(guid, key));
++    std::string token;
++    while (std::getline(input, token, ','))
++    {
++        token = Trim(token);
++        if (token.size() > 1 && (token[0] == '+' || token[0] == '-'))
++            changes[Trim(token.substr(1))] = token[0];
++    }
++
++    if (IsTransientStrategy(name))
++        changes.erase(name);
++    else
++        changes[name] = change[0] == '~' ? (botAI->HasStrategy(name, state) ? '+' : '-') : change[0];
++
++    std::vector<std::string> names;
++    names.reserve(changes.size());
++    for (auto const& [strategy, operation] : changes)
++        names.push_back(std::string(1, operation) + strategy);
++    std::sort(names.begin(), names.end());
++
++    std::ostringstream output;
++    for (size_t i = 0; i < names.size(); ++i)
++    {
++        if (i)
++            output << ',';
++        output << names[i];
++    }
++    SaveSingleValue(guid, key, output.str());
++}
++
++void PlayerbotRepository::ClearUserStrategies(PlayerbotAI* botAI, BotState state)
++{
++    SaveSingleValue(botAI->GetBot()->GetGUID().GetCounter(), UserStrategyKey(state), "");
++}
++
+ void PlayerbotRepository::Reset(PlayerbotAI* botAI)
+ {
+     ObjectGuid::LowType guid = botAI->GetBot()->GetGUID().GetCounter();
+@@ -95,3 +189,18 @@ void PlayerbotRepository::SaveValue(uint32 guid, std::string const key, std::str
+     stmt->SetData(2, value);
+     PlayerbotsDatabase.Execute(stmt);
+ }
++
++void PlayerbotRepository::SaveSingleValue(uint32 guid, std::string const& key, std::string const& value)
++{
++    PlayerbotsDatabase.Execute("DELETE FROM playerbots_db_store WHERE guid = {} AND `key` = '{}'", guid, key);
++    if (!value.empty())
++        SaveValue(guid, key, value);
++}
++
++std::string PlayerbotRepository::GetSingleValue(uint32 guid, std::string const& key)
++{
++    if (QueryResult result = PlayerbotsDatabase.Query(
++            "SELECT `value` FROM playerbots_db_store WHERE guid = {} AND `key` = '{}' ORDER BY id DESC LIMIT 1", guid, key))
++        return (*result)[0].Get<std::string>();
++    return "";
++}
+diff --git a/modules/mod-playerbots/src/Db/PlayerbotRepository.h b/modules/mod-playerbots/src/Db/PlayerbotRepository.h
+index e1bcf4b2..1a316752 100644
+--- a/modules/mod-playerbots/src/Db/PlayerbotRepository.h
++++ b/modules/mod-playerbots/src/Db/PlayerbotRepository.h
+@@ -25,6 +25,9 @@ public:
+     void Save(PlayerbotAI* botAI);
+     void Load(PlayerbotAI* botAI);
+     void Reset(PlayerbotAI* botAI);
++    void ApplyUserStrategies(PlayerbotAI* botAI);
++    void SaveUserStrategyChange(PlayerbotAI* botAI, BotState state, std::string const& change);
++    void ClearUserStrategies(PlayerbotAI* botAI, BotState state);
+ 
+ private:
+     PlayerbotRepository() = default;
+@@ -37,6 +40,8 @@ private:
+     PlayerbotRepository& operator=(PlayerbotRepository&&) = delete;
+ 
+     void SaveValue(uint32_t guid, std::string const key, std::string const value);
++    void SaveSingleValue(uint32_t guid, std::string const& key, std::string const& value);
++    std::string GetSingleValue(uint32_t guid, std::string const& key);
+     std::string const FormatStrategies(std::string const type, std::vector<std::string> strategies);
+ };
+ 
+diff --git a/modules/mod-playerbots/src/Script/Playerbots.cpp b/modules/mod-playerbots/src/Script/Playerbots.cpp
+index ef39400f..b0f54f61 100644
+--- a/modules/mod-playerbots/src/Script/Playerbots.cpp
++++ b/modules/mod-playerbots/src/Script/Playerbots.cpp
+@@ -451,7 +451,7 @@ public:
+             PlayerbotAI* botAI = PlayerbotsMgr::instance().GetPlayerbotAI(player);
+ 
+             if (botAI == nullptr || IsSelfBot(player))
+-                playerbotMgr->LogoutAllBots();
++                playerbotMgr->LogoutBotsForMaster();
+         }
+ 
+         sRandomPlayerbotMgr.OnPlayerLogout(player);
+
