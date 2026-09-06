@@ -1,6 +1,6 @@
 # Playerbot PvP Tactical：空间控制第一阶段
 
-本发行版通过 `patches/0004-playerbot-pvp-tactical-ranged.patch` 增加共享 PvP 空间控制器。它不是需要逐个机器人添加的游戏内策略；是否启用、在哪些场景启用以及距离参数全部由 `playerbots.conf` 决定。
+本发行版通过 `patches/0004-playerbot-pvp-tactical-ranged.patch`、`0005-playerbot-pvp-tactical-melee-flanking.patch` 增加共享 PvP 空间控制器，并由 `0006-playerbot-pvp-cooperative-scheduling.patch` 修复动作调度和决斗入口。它不是需要逐个机器人添加的游戏内策略；是否启用、在哪些场景启用以及距离参数全部由 `playerbots.conf` 决定。
 
 ## 行为范围
 
@@ -10,27 +10,19 @@
 
 默认启用决斗、竞技场和战场，关闭野外 PvP。这样 2000 个随机机器人不会在日常活动中持续执行额外的 PvP 位置判断。
 
-控制器每次决策会完成以下工作：
+正式修复后，空间控制器只负责选择移动目的地，不再直接选择或施放职业技能：
 
 1. 根据当前天赋判断机器人属于猎人、施法者还是治疗者。
-2. 目标正在攻击机器人并进入理想距离下限时，先尝试本职业的脱离技能。
-3. 没有学会对应技能、技能冷却或无法施放时，自动退化为碰撞检测后的侧向/后向拉距。
-4. 安全距离内正在读条时允许完成施法；敌人已经进入近战危险距离时允许中断读条保命。
-5. 非决斗目标超过追击上限时放弃目标，避免机器人跨地图追逐玩家。
+2. 职业原有策略优先选择当前等级已经学会、当前可用的控制、减速、脱离和输出技能。
+3. 本轮没有更高优先级技能可执行时，空间控制器才生成一次碰撞检测后的侧向/后向拉距或近战侧后方移动。
+4. 移动样条会跨 AI tick 持续运行，后续 tick 仍能选择瞬发技能，因此移动和技能决策不再互相锁死。
+5. 战术走位不会主动中断正在读条或引导的技能；需要站定的法术仍遵守 3.3.5a 的原版施法规则。
+6. 已在执行的战斗点移动不会被每次判断重新下发，避免来回改目的地造成木讷和抖动。
+7. 非决斗目标超过追击上限时放弃目标，避免机器人跨地图追逐玩家。
 
-## 等级与技能降级
+## 等级与技能
 
-技能是否可用以角色当前真正学会的法术为准，不按满级模板假定：
-
-- 猎人优先尝试冰冻陷阱、摔绊、逃脱和震荡射击；低等级缺少其中某项时继续尝试下一项。
-- 法师尝试冰霜新星、闪现和冰锥术。
-- 术士尝试死亡缠绕、疲劳诅咒和恐惧。
-- 牧师尝试心灵尖啸。
-- 萨满尝试雷霆风暴、冰霜震击和地缚图腾。
-- 德鲁伊尝试纠缠根须和旋风。
-- 神圣圣骑士在减速或定身时尝试自由之手，并可用制裁之锤脱离。
-
-因此一级或低等级机器人仍能使用基础移动，不会因为缺少高级技能而停止决策。机器人升级和学习法术后，新选项会自动进入技能选择，无需修改配置或重新编译。
+技能仍完全由 Playerbots 各职业原有策略选择，所以天然依据当前等级、天赋、已学法术、冷却和施法条件降级。空间控制器不再复制一份固定职业技能表，避免它与职业轮转抢占同一个 AI tick。一级或低等级机器人仍可执行基础移动；升级学会新技能后，职业策略会自动使用，无需修改配置或重新编译。
 
 ## 默认配置
 
@@ -41,7 +33,7 @@ AiPlayerbot.PvPTactical.Arena = 1
 AiPlayerbot.PvPTactical.Battleground = 1
 AiPlayerbot.PvPTactical.OpenWorld = 0
 
-AiPlayerbot.PvPTactical.DecisionInterval = 250
+AiPlayerbot.PvPTactical.DecisionInterval = 900
 AiPlayerbot.PvPTactical.Hunter.MinDistance = 24.0
 AiPlayerbot.PvPTactical.Caster.MinDistance = 18.0
 AiPlayerbot.PvPTactical.Healer.MinDistance = 22.0
@@ -49,13 +41,15 @@ AiPlayerbot.PvPTactical.RetreatStep = 7.0
 AiPlayerbot.PvPTactical.TargetLeashDistance = 55.0
 
 AiPlayerbot.PvPTactical.Melee.Enable = 1
-AiPlayerbot.PvPTactical.Melee.DecisionInterval = 600
+AiPlayerbot.PvPTactical.Melee.DecisionInterval = 900
 AiPlayerbot.PvPTactical.Melee.FlankDistance = 1.5
 AiPlayerbot.PvPTactical.Melee.MinAngle = 100.0
 AiPlayerbot.PvPTactical.Melee.MaxAngle = 145.0
 ```
 
-这些值由 `runtime.defaults.json` 和安装脚本写入正式配置。修改距离或判断频率只需要编辑配置并重启 worldserver，不需要重新编译。
+这些值由 `runtime.defaults.json` 和安装脚本写入正式配置。判断间隔低于 750 ms 会被服务端钳制为 750 ms，防止走位连续占用动作选择。修改距离或判断频率只需要编辑配置并重启 worldserver，不需要重新编译。
+
+Dungeon Clear 在决斗、竞技场和战场中会让自己的动作失效，并立即释放它设置的 `passive`、`stay` 等站位钉住状态，避免副本自动清理逻辑混入 PvP。
 
 ## botduel 验收
 
@@ -63,9 +57,10 @@ AiPlayerbot.PvPTactical.Melee.MaxAngle = 145.0
 
 1. 猎人对战近战，确认贴近前开始减速并主动拉距。
 2. 分别用低等级和满级猎人测试，确认没有学会的技能不会造成停顿。
-3. 法师对战近战，确认近距离冰环或闪现后继续拉距。
+3. 法师对战近战，确认职业策略能使用冰环或闪现，随后继续拉距。
 4. 术士、牧师、萨满和德鲁伊分别确认控制技能冷却时仍会移动。
 5. 观察机器人不会在理想距离边界持续前后抖动，也不会追逐超过 55 码的非决斗目标。
-6. 用盗贼、战士或死亡骑士对战，确认位于目标正面时会向较近的一侧移动，进入侧后方后停止重复绕圈。
+6. 用盗贼、战士或死亡骑士对战，确认位于目标正面时会向较近的一侧移动，移动途中仍能使用瞬发技能，进入侧后方后停止重复绕圈。
+7. 在允许决斗的区域使用 `.botduel`，确认聊天框收到候选数量或成功发起数量；纯文本 `botduel` 也可作为队伍聊天别名。
 
 后续阶段再增加防御性绕柱、控制递减、打断评分和竞技场团队协同；绕柱不会混入首版，以免在复杂地形中引入新的卡点。

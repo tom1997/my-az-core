@@ -75,6 +75,24 @@ foreach ($requiredMarker in @(
     }
 }
 
+$pvpCooperativePatch = Join-Path $repoRoot 'patches\0006-playerbot-pvp-cooperative-scheduling.patch'
+if (-not (Test-Path -LiteralPath $pvpCooperativePatch)) { throw '缺少 Playerbot PvP 协作调度修复补丁。' }
+$pvpCooperativePatchText = Get-Content -LiteralPath $pvpCooperativePatch -Raw
+foreach ($requiredMarker in @(
+    'ACTION_NORMAL + 4',
+    'IsCombatPointMovementActive',
+    'HandleBotDuelCommand',
+    'IsPlayerPvpActive',
+    'RemoveFollowerPassive'
+)) {
+    if ($pvpCooperativePatchText -notmatch [regex]::Escape($requiredMarker)) {
+        throw "Playerbot PvP 协作调度修复补丁缺少标记：$requiredMarker"
+    }
+}
+if ($pvpCooperativePatchText -match '(?m)^\+\s*bot->InterruptNonMeleeSpells') {
+    throw 'PvP 空间控制器不得主动中断职业策略的施法。'
+}
+
 $sqlFiles = @(Get-ChildItem -LiteralPath (Join-Path $repoRoot 'modules\custom') -Filter '*.sql' -File -Recurse -ErrorAction SilentlyContinue)
 foreach ($file in $sqlFiles) {
     $relative = [IO.Path]::GetRelativePath($repoRoot, $file.FullName).Replace('\', '/')
