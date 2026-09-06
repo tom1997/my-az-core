@@ -24,7 +24,7 @@ index 0b2d9fa..bc8e201 100644
  AiPlayerbot.PvPTactical.Melee.MinAngle = 100.0
  AiPlayerbot.PvPTactical.Melee.MaxAngle = 145.0
 diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp
-index 15079ef..c3b5bf8 100644
+index 15079ef..68f9cd7 100644
 --- a/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp
 +++ b/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp
 @@ -39,6 +39,30 @@
@@ -173,18 +173,18 @@ index 15079ef..c3b5bf8 100644
      float const distance = std::max(1.0f, bot->GetMeleeRange(target) * 0.6f);
      Position left = target->GetPosition();
      Position right = target->GetPosition();
-@@ -1968,6 +1934,11 @@ bool PvpTacticalMeleeFlankAction::Execute(Event /*event*/)
- bool PvpTacticalMeleeFlankAction::isUseful()
- {
+@@ -1978,6 +1944,11 @@ bool FleeAction::isUseful()
+         return false;
+ 
      Unit* target = AI_VALUE(Unit*, "current target");
 +    // Stock ranged flee outranks class abilities. The tactical controller uses
 +    // a cooperative fallback retreat instead when it owns player PvP.
 +    if (target && target->IsPlayer() && botAI->IsRanged(bot, true) && IsPvpTacticalMovementContext(bot))
 +        return false;
 +
-     return sPlayerbotAIConfig.pvpTacticalEnabled && sPlayerbotAIConfig.pvpTacticalMeleeEnabled && target &&
-            target->IsPlayer() && botAI->IsMelee(bot, true);
- }
+     if (target && target->IsInWorld() && !bot->IsWithinMeleeRange(target))
+         return false;
+ 
 diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.h b/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.h
 index 0f93c94..3b3f622 100644
 --- a/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.h

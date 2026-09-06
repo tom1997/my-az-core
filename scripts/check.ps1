@@ -92,6 +92,12 @@ foreach ($requiredMarker in @(
 if ($pvpCooperativePatchText -match '(?m)^\+\s*bot->InterruptNonMeleeSpells') {
     throw 'PvP 空间控制器不得主动中断职业策略的施法。'
 }
+if ($pvpCooperativePatchText -notmatch '(?s)bool FleeAction::isUseful\(\).{0,400}\+\s*// Stock ranged flee') {
+    throw '原版 ranged flee 抑制逻辑必须位于 FleeAction::isUseful。'
+}
+if ($pvpCooperativePatchText -match '(?s)bool PvpTacticalMeleeFlankAction::isUseful\(\).{0,400}\+\s*// Stock ranged flee') {
+    throw '原版 ranged flee 抑制逻辑被错误放入近战 flank 判断。'
+}
 
 $sqlFiles = @(Get-ChildItem -LiteralPath (Join-Path $repoRoot 'modules\custom') -Filter '*.sql' -File -Recurse -ErrorAction SilentlyContinue)
 foreach ($file in $sqlFiles) {
