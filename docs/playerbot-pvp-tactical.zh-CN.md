@@ -1,10 +1,12 @@
-# Playerbot PvP Tactical：远程职业第一阶段
+# Playerbot PvP Tactical：空间控制第一阶段
 
 本发行版通过 `patches/0004-playerbot-pvp-tactical-ranged.patch` 增加共享 PvP 空间控制器。它不是需要逐个机器人添加的游戏内策略；是否启用、在哪些场景启用以及距离参数全部由 `playerbots.conf` 决定。
 
 ## 行为范围
 
 首版覆盖当前天赋定位为远程或治疗的机器人：猎人、法师、术士、牧师、元素/恢复萨满、平衡/恢复德鲁伊和神圣圣骑士。增强只在当前目标确实是玩家时工作，不改变 PvE 副本战斗。
+
+近战机器人同时启用轻量抓背机制。进入近战范围后，如果机器人仍在目标的正面半区，会选择碰撞检测通过且距离较短的一侧移动到目标侧后方；当对方重新转身面对机器人时才再次计算。这样可以形成左右压迫和抓背，而不是原地站桩或无休止高速绕圈。
 
 默认启用决斗、竞技场和战场，关闭野外 PvP。这样 2000 个随机机器人不会在日常活动中持续执行额外的 PvP 位置判断。
 
@@ -45,6 +47,12 @@ AiPlayerbot.PvPTactical.Caster.MinDistance = 18.0
 AiPlayerbot.PvPTactical.Healer.MinDistance = 22.0
 AiPlayerbot.PvPTactical.RetreatStep = 7.0
 AiPlayerbot.PvPTactical.TargetLeashDistance = 55.0
+
+AiPlayerbot.PvPTactical.Melee.Enable = 1
+AiPlayerbot.PvPTactical.Melee.DecisionInterval = 600
+AiPlayerbot.PvPTactical.Melee.FlankDistance = 1.5
+AiPlayerbot.PvPTactical.Melee.MinAngle = 100.0
+AiPlayerbot.PvPTactical.Melee.MaxAngle = 145.0
 ```
 
 这些值由 `runtime.defaults.json` 和安装脚本写入正式配置。修改距离或判断频率只需要编辑配置并重启 worldserver，不需要重新编译。
@@ -58,5 +66,6 @@ AiPlayerbot.PvPTactical.TargetLeashDistance = 55.0
 3. 法师对战近战，确认近距离冰环或闪现后继续拉距。
 4. 术士、牧师、萨满和德鲁伊分别确认控制技能冷却时仍会移动。
 5. 观察机器人不会在理想距离边界持续前后抖动，也不会追逐超过 55 码的非决斗目标。
+6. 用盗贼、战士或死亡骑士对战，确认位于目标正面时会向较近的一侧移动，进入侧后方后停止重复绕圈。
 
-后续阶段再增加近战绕背、防御性绕柱、控制递减、打断评分和竞技场团队协同；绕柱不会混入首版，以免在复杂地形中引入新的卡点。
+后续阶段再增加防御性绕柱、控制递减、打断评分和竞技场团队协同；绕柱不会混入首版，以免在复杂地形中引入新的卡点。

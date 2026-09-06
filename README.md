@@ -14,7 +14,7 @@
 - AHBot（独立拍卖行做市，可自动出售和收购）
 - Mythic Plus（钥石、限时、词缀与层数）
 - Mythic Rewards（按层数提供职业/职责倾向的个人装备，支持 Playerbot）
-- PvP Tactical（远程职业按等级、天赋和已学技能进行拉距、控制与脱离）
+- PvP Tactical（远程按技能拉距与脱离，近战主动侧移抓背）
 - Random Enchants（仅 enhanced 包，默认关闭）
 
 上游版本全部固定在 [`upstreams.lock.json`](upstreams.lock.json)，不会在生产构建中静默追随 master。

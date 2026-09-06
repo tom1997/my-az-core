@@ -187,6 +187,11 @@ Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.Caster.MinDistance' ([strin
 Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.Healer.MinDistance' ([string](Get-SettingValue $settings 'pvpTacticalHealerMinDistance' 22.0))
 Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.RetreatStep' ([string](Get-SettingValue $settings 'pvpTacticalRetreatStep' 7.0))
 Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.TargetLeashDistance' ([string](Get-SettingValue $settings 'pvpTacticalTargetLeashDistance' 55.0))
+Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.Melee.Enable' $(if (Get-SettingValue $settings 'pvpTacticalMeleeEnabled' $true) {'1'} else {'0'})
+Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.Melee.DecisionInterval' ([string](Get-SettingValue $settings 'pvpTacticalMeleeDecisionInterval' 600))
+Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.Melee.FlankDistance' ([string](Get-SettingValue $settings 'pvpTacticalMeleeFlankDistance' 1.5))
+Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.Melee.MinAngle' ([string](Get-SettingValue $settings 'pvpTacticalMeleeMinAngle' 100.0))
+Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.Melee.MaxAngle' ([string](Get-SettingValue $settings 'pvpTacticalMeleeMaxAngle' 145.0))
 
 $autoBalance = Find-ModuleConfig 'AutoBalance.conf'
 if ($autoBalance) {

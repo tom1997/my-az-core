@@ -46,6 +46,20 @@ foreach ($requiredMarker in @(
     }
 }
 
+$pvpMeleePatch = Join-Path $repoRoot 'patches\0005-playerbot-pvp-tactical-melee-flanking.patch'
+if (-not (Test-Path -LiteralPath $pvpMeleePatch)) { throw '缺少 Playerbot PvP 近战抓背补丁。' }
+$pvpMeleePatchText = Get-Content -LiteralPath $pvpMeleePatch -Raw
+foreach ($requiredMarker in @(
+    'PvPTactical.Melee.Enable',
+    'pvp tactical melee flank',
+    'PvpTacticalMeleeFlankAction',
+    'pvpTacticalMeleeDecisionInterval'
+)) {
+    if ($pvpMeleePatchText -notmatch [regex]::Escape($requiredMarker)) {
+        throw "Playerbot PvP 近战抓背补丁缺少标记：$requiredMarker"
+    }
+}
+
 $pvpTacticalPatch = Join-Path $repoRoot 'patches\0004-playerbot-pvp-tactical-ranged.patch'
 if (-not (Test-Path -LiteralPath $pvpTacticalPatch)) { throw '缺少 Playerbot PvP 战术补丁。' }
 $pvpTacticalPatchText = Get-Content -LiteralPath $pvpTacticalPatch -Raw
