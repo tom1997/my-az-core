@@ -14,6 +14,7 @@
 - AHBot（独立拍卖行做市，可自动出售和收购）
 - Mythic Plus（钥石、限时、词缀与层数）
 - Mythic Rewards（按层数提供职业/职责倾向的个人装备，支持 Playerbot）
+- PvP Tactical（远程职业按等级、天赋和已学技能进行拉距、控制与脱离）
 - Random Enchants（仅 enhanced 包，默认关闭）
 
 上游版本全部固定在 [`upstreams.lock.json`](upstreams.lock.json)，不会在生产构建中静默追随 master。
@@ -49,6 +50,8 @@ Dungeon Clear 的启用条件、命令和默认安全设置见 [`docs/dungeon-cl
 拍卖行机器人和大秘境的启用步骤分别见 [`docs/ahbot.zh-CN.md`](docs/ahbot.zh-CN.md) 与 [`docs/mythic-plus.zh-CN.md`](docs/mythic-plus.zh-CN.md)。RDF 资料片切换见 [`docs/rdf-expansion.zh-CN.md`](docs/rdf-expansion.zh-CN.md)。
 
 Playerbot 的独立登录、主人离线后继续活动、用户策略持久化和 `botduel` 决斗实验入口见 [`docs/playerbot-owned-autonomy.zh-CN.md`](docs/playerbot-owned-autonomy.zh-CN.md)。
+
+远程 Playerbot 的 PvP 距离控制、职业技能降级和配置项见 [`docs/playerbot-pvp-tactical.zh-CN.md`](docs/playerbot-pvp-tactical.zh-CN.md)。
 
 ## 重要边界
 

@@ -46,6 +46,21 @@ foreach ($requiredMarker in @(
     }
 }
 
+$pvpTacticalPatch = Join-Path $repoRoot 'patches\0004-playerbot-pvp-tactical-ranged.patch'
+if (-not (Test-Path -LiteralPath $pvpTacticalPatch)) { throw '缺少 Playerbot PvP 战术补丁。' }
+$pvpTacticalPatchText = Get-Content -LiteralPath $pvpTacticalPatch -Raw
+foreach ($requiredMarker in @(
+    'PvPTactical.Enable',
+    'pvp tactical ranged too close',
+    'PvpTacticalRetreatAction',
+    'pvpTacticalDecisionInterval',
+    'TargetLeashDistance'
+)) {
+    if ($pvpTacticalPatchText -notmatch [regex]::Escape($requiredMarker)) {
+        throw "Playerbot PvP 战术补丁缺少标记：$requiredMarker"
+    }
+}
+
 $sqlFiles = @(Get-ChildItem -LiteralPath (Join-Path $repoRoot 'modules\custom') -Filter '*.sql' -File -Recurse -ErrorAction SilentlyContinue)
 foreach ($file in $sqlFiles) {
     $relative = [IO.Path]::GetRelativePath($repoRoot, $file.FullName).Replace('\', '/')
