@@ -81,6 +81,7 @@ $pvpCooperativePatchText = Get-Content -LiteralPath $pvpCooperativePatch -Raw
 foreach ($requiredMarker in @(
     'ACTION_NORMAL + 4',
     'IsCombatPointMovementActive',
+    'GetAiObjectContext()->GetValue<LastMovement&>',
     'HandleBotDuelCommand',
     'IsPlayerPvpActive',
     'RemoveFollowerPassive'
@@ -91,6 +92,9 @@ foreach ($requiredMarker in @(
 }
 if ($pvpCooperativePatchText -match '(?m)^\+\s*bot->InterruptNonMeleeSpells') {
     throw 'PvP 空间控制器不得主动中断职业策略的施法。'
+}
+if ($pvpCooperativePatchText -match '(?m)^\+\s*LastMovement const& last = AI_VALUE') {
+    throw '普通辅助函数不得使用依赖 Action::context 的 AI_VALUE 宏。'
 }
 if ($pvpCooperativePatchText -notmatch '(?s)bool FleeAction::isUseful\(\).{0,400}\+\s*// Stock ranged flee') {
     throw '原版 ranged flee 抑制逻辑必须位于 FleeAction::isUseful。'

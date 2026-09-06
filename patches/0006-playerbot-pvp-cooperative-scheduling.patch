@@ -24,10 +24,10 @@ index 0b2d9fa..bc8e201 100644
  AiPlayerbot.PvPTactical.Melee.MinAngle = 100.0
  AiPlayerbot.PvPTactical.Melee.MaxAngle = 145.0
 diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp
-index 15079ef..68f9cd7 100644
+index 15079ef..10da8d2 100644
 --- a/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp
 +++ b/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp
-@@ -39,6 +39,30 @@
+@@ -39,6 +39,31 @@
  #include <iomanip>
  #include <string>
  
@@ -49,7 +49,8 @@ index 15079ef..68f9cd7 100644
 +
 +bool IsCombatPointMovementActive(PlayerbotAI* botAI, Player* bot)
 +{
-+    LastMovement const& last = AI_VALUE(LastMovement&, "last movement");
++    LastMovement const& last =
++        botAI->GetAiObjectContext()->GetValue<LastMovement&>("last movement")->Get();
 +    return bot->isMoving() && bot->GetMotionMaster()->GetCurrentMovementGeneratorType() == POINT_MOTION_TYPE &&
 +           last.priority >= MovementPriority::MOVEMENT_COMBAT;
 +}
@@ -58,7 +59,7 @@ index 15079ef..68f9cd7 100644
  MovementAction::MovementAction(PlayerbotAI* botAI, std::string const name) : Action(botAI, name)
  {
      bot = botAI->GetBot();
-@@ -1828,86 +1852,24 @@ bool FleeAction::Execute(Event /*event*/)
+@@ -1828,86 +1853,24 @@ bool FleeAction::Execute(Event /*event*/)
      return MoveAway(AI_VALUE(Unit*, "current target"), sPlayerbotAIConfig.fleeDistance, true);
  }
  
@@ -155,7 +156,7 @@ index 15079ef..68f9cd7 100644
      float minimumDistance = sPlayerbotAIConfig.pvpTacticalCasterMinDistance;
      if (bot->getClass() == CLASS_HUNTER)
          minimumDistance = sPlayerbotAIConfig.pvpTacticalHunterMinDistance;
-@@ -1931,12 +1893,16 @@ bool PvpTacticalMeleeFlankAction::Execute(Event /*event*/)
+@@ -1931,12 +1894,16 @@ bool PvpTacticalMeleeFlankAction::Execute(Event /*event*/)
      if (!target || !target->IsPlayer() || !botAI->IsMelee(bot, true))
          return false;
  
@@ -173,7 +174,7 @@ index 15079ef..68f9cd7 100644
      float const distance = std::max(1.0f, bot->GetMeleeRange(target) * 0.6f);
      Position left = target->GetPosition();
      Position right = target->GetPosition();
-@@ -1978,6 +1944,11 @@ bool FleeAction::isUseful()
+@@ -1978,6 +1945,11 @@ bool FleeAction::isUseful()
          return false;
  
      Unit* target = AI_VALUE(Unit*, "current target");
