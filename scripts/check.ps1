@@ -78,6 +78,43 @@ foreach ($requiredMarker in @(
     }
 }
 
+foreach ($pvpPatchName in @(
+    '0009-playerbot-pvp-state-capabilities-dr-movement.patch',
+    '0010-playerbot-pvp-warrior-paladin-death-knight.patch',
+    '0011-playerbot-pvp-hunter-rogue-druid.patch',
+    '0012-playerbot-pvp-casters-healers.patch',
+    '0013-playerbot-pvp-world-group-coordination.patch'
+)) {
+    if (-not (Test-Path -LiteralPath (Join-Path $repoRoot "patches\$pvpPatchName"))) {
+        throw "缺少分层 PvP 补丁：$pvpPatchName"
+    }
+}
+
+$pvpStatePatchText = Get-Content -LiteralPath (Join-Path $repoRoot 'patches\0009-playerbot-pvp-state-capabilities-dr-movement.patch') -Raw
+foreach ($requiredMarker in @('PvpTacticalState', 'PvpMovementOwner', 'DIMINISHING_LEVEL_IMMUNE', 'DecisionInterval", 200')) {
+    if ($pvpStatePatchText -notmatch [regex]::Escape($requiredMarker)) {
+        throw "PvP 状态补丁缺少标记：$requiredMarker"
+    }
+}
+
+$mythicUiModule = Join-Path $repoRoot 'modules\custom\mod-mythic-plus-ui'
+foreach ($requiredFile in @(
+    'include.sh',
+    'src\mod_mythic_plus_ui.cpp',
+    'client\MythicPlusUI.lua',
+    'client\MythicPlusUI.toc',
+    'data\sql\db-world\mod_mythic_plus_ui.sql',
+    'data\sql\db-characters\mod_mythic_plus_ui_progress.sql'
+)) {
+    if (-not (Test-Path -LiteralPath (Join-Path $mythicUiModule $requiredFile))) {
+        throw "大秘境 UI 模块缺少文件：$requiredFile"
+    }
+}
+
+foreach ($script in @('generate-mythic-items.ps1', 'build-client-compat-patch.ps1', 'package-build.ps1')) {
+    [void][scriptblock]::Create((Get-Content -LiteralPath (Join-Path $repoRoot "scripts\$script") -Raw))
+}
+
 $pvpMeleePatch = Join-Path $repoRoot 'patches\0005-playerbot-pvp-tactical-melee-flanking.patch'
 if (-not (Test-Path -LiteralPath $pvpMeleePatch)) { throw '缺少 Playerbot PvP 近战抓背补丁。' }
 $pvpMeleePatchText = Get-Content -LiteralPath $pvpMeleePatch -Raw

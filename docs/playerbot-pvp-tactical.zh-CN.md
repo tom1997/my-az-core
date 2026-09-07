@@ -1,6 +1,6 @@
 # Playerbot PvP Tactical：空间控制第一阶段
 
-本发行版通过 `patches/0004-playerbot-pvp-tactical-ranged.patch`、`0005-playerbot-pvp-tactical-melee-flanking.patch` 增加共享 PvP 空间控制器，由 `0006-playerbot-pvp-cooperative-scheduling.patch` 修复动作调度和决斗入口，由 `0007-playerbot-pvp-ranged-distance-control.patch` 增加持续拉距，并由 `0008-playerbot-pvp-duel-matchups-and-control.patch` 增加决斗边界、职业控制链、开战准备和免疫目标切换。它不是需要逐个机器人添加的游戏内策略；是否启用、在哪些场景启用以及距离参数全部由 `playerbots.conf` 决定。
+本发行版在 `0004–0008` 的空间控制基础上，新增 `0009–0013` 五层 PvP 框架：共享战术状态、能力检查、控制递减、移动所有权、全部职业控制入口，以及野外/多人 PvP 协同。它不是需要逐个机器人添加的游戏内策略；是否启用、在哪些场景启用以及距离参数全部由 `playerbots.conf` 决定。
 
 ## 行为范围
 
@@ -8,7 +8,7 @@
 
 近战机器人同时启用轻量抓背机制。进入近战范围后，如果机器人仍在目标的正面半区，会选择碰撞检测通过且距离较短的一侧移动到目标侧后方；当对方重新转身面对机器人时才再次计算。这样可以形成左右压迫和抓背，而不是原地站桩或无休止高速绕圈。
 
-默认启用决斗、竞技场和战场，关闭野外 PvP。这样 2000 个随机机器人不会在日常活动中持续执行额外的 PvP 位置判断。
+默认启用决斗、竞技场、战场和野外 PvP。野外逻辑只在当前目标为敌对玩家且进入战斗后接管职业控制；近距离空间检测会选择最近敌对玩家作为走位威胁。
 
 正式修复后，空间控制器只负责选择移动目的地，不再直接选择或施放职业技能：
 
@@ -38,9 +38,9 @@ AiPlayerbot.PvPTactical.Enable = 1
 AiPlayerbot.PvPTactical.Duel = 1
 AiPlayerbot.PvPTactical.Arena = 1
 AiPlayerbot.PvPTactical.Battleground = 1
-AiPlayerbot.PvPTactical.OpenWorld = 0
+AiPlayerbot.PvPTactical.OpenWorld = 1
 
-AiPlayerbot.PvPTactical.DecisionInterval = 900
+AiPlayerbot.PvPTactical.DecisionInterval = 200
 AiPlayerbot.PvPTactical.Hunter.MinDistance = 24.0
 AiPlayerbot.PvPTactical.Caster.MinDistance = 18.0
 AiPlayerbot.PvPTactical.Healer.MinDistance = 22.0
@@ -54,13 +54,13 @@ AiPlayerbot.PvPTactical.RetreatStep = 14.0
 AiPlayerbot.PvPTactical.TargetLeashDistance = 55.0
 
 AiPlayerbot.PvPTactical.Melee.Enable = 1
-AiPlayerbot.PvPTactical.Melee.DecisionInterval = 900
+AiPlayerbot.PvPTactical.Melee.DecisionInterval = 200
 AiPlayerbot.PvPTactical.Melee.FlankDistance = 1.5
 AiPlayerbot.PvPTactical.Melee.MinAngle = 100.0
 AiPlayerbot.PvPTactical.Melee.MaxAngle = 145.0
 ```
 
-这些值由 `runtime.defaults.json` 和安装脚本写入正式配置。`MinDistance` 是开始拉距的危险线，`PreferredDistance` 是本次拉距结束线；两条线形成迟滞区，避免反复启停。`RetreatStep` 是单段路径的最大长度，不是最终停止距离。判断间隔低于 750 ms 会被服务端钳制为 750 ms，防止走位连续占用动作选择。修改距离或判断频率只需要编辑配置并重启 worldserver，不需要重新编译。
+这些值由 `runtime.defaults.json` 和安装脚本写入正式配置。`MinDistance` 是开始拉距的危险线，`PreferredDistance` 是本次拉距结束线；两条线形成迟滞区，避免反复启停。`RetreatStep` 是单段路径的最大长度，不是最终停止距离。200 ms 只用于刷新距离与战术状态，已有路径不会被重复下发；服务端最低钳制为 150 ms。修改距离或判断频率只需要编辑配置并重启 worldserver，不需要重新编译。
 
 Dungeon Clear 在决斗、竞技场和战场中会让自己的动作失效，并立即释放它设置的 `passive`、`stay` 等站位钉住状态，避免副本自动清理逻辑混入 PvP。
 
@@ -76,4 +76,4 @@ Dungeon Clear 在决斗、竞技场和战场中会让自己的动作失效，并
 6. 用盗贼、战士或死亡骑士对战，确认位于目标正面时会向较近的一侧移动，移动途中仍能使用瞬发技能，进入侧后方后停止重复绕圈。
 7. 在允许决斗的区域使用 `.botduel`，确认聊天框收到候选数量或成功发起数量；纯文本 `botduel` 也可作为队伍聊天别名。
 
-后续阶段再增加防御性绕柱、控制递减、打断评分和竞技场团队协同；绕柱不会混入首版，以免在复杂地形中引入新的卡点。
+当前版本已经使用服务端控制递减状态避免对免疫目标重复控制，并在多人战斗中综合 15 码内敌人的方向选择退路。防御性绕柱和更精细的竞技场打断评分仍留作后续阶段，避免在复杂地形中引入新的卡点。

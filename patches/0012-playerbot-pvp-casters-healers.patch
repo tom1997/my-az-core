@@ -1,0 +1,98 @@
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
+index 9acb7f4..2917842 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
+@@ -95,6 +95,40 @@ bool PvpTacticalClassControlAction::Execute(Event /*event*/)
+             if (melee && TrySpell(botAI, "typhoon", target, false))
+                 return true;
+             return NeedsSlow(botAI, "entangling roots", target) && TrySpell(botAI, "entangling roots", target);
++        case CLASS_MAGE:
++            if (targetCasting && TrySpell(botAI, "counterspell", target, false))
++                return true;
++            if (melee && TrySpell(botAI, "frost nova", bot))
++                return true;
++            if (melee && TrySpell(botAI, "cone of cold", target, false))
++                return true;
++            if (bot->GetHealthPct() <= 60.0f && distance >= 8.0f && TrySpell(botAI, "polymorph", target))
++                return true;
++            return NeedsSlow(botAI, "slow", target) && TrySpell(botAI, "slow", target, false);
++        case CLASS_WARLOCK:
++            if (melee && TrySpell(botAI, "death coil", target))
++                return true;
++            if (distance <= 30.0f && TrySpell(botAI, "shadowfury", target))
++                return true;
++            return distance <= 30.0f && TrySpell(botAI, "fear", target);
++        case CLASS_PRIEST:
++            if (targetCasting && TrySpell(botAI, "silence", target, false))
++                return true;
++            if (melee && TrySpell(botAI, "psychic horror", target))
++                return true;
++            if (melee && TrySpell(botAI, "psychic scream", bot))
++                return true;
++            if (bot->GetHealthPct() < 55.0f && TrySpell(botAI, "power word: shield", bot, false))
++                return true;
++            return false;
++        case CLASS_SHAMAN:
++            if (targetCasting && TrySpell(botAI, "wind shear", target, false))
++                return true;
++            if (melee && TrySpell(botAI, "thunderstorm", bot, false))
++                return true;
++            if (distance < 12.0f && TrySpell(botAI, "earthbind totem", bot, false))
++                return true;
++            return NeedsSlow(botAI, "frost shock", target) && TrySpell(botAI, "frost shock", target, false);
+         default:
+             return false;
+     }
+diff --git a/modules/mod-playerbots/src/Ai/Class/Dk/DKActions.h b/modules/mod-playerbots/src/Ai/Class/Dk/DKActions.h
+index 7e09c29..6879166 100644
+--- a/modules/mod-playerbots/src/Ai/Class/Dk/DKActions.h
++++ b/modules/mod-playerbots/src/Ai/Class/Dk/DKActions.h
+@@ -50,7 +50,7 @@ END_SPELL_ACTION()
+ class CastPvpDeathGripAction : public CastSpellAction
+ {
+ public:
+-    CastPvpDeathGripAction(PlayerbotAI* botAI) : CastSpellAction(botAI, "pvp death grip") {}
++    CastPvpDeathGripAction(PlayerbotAI* botAI) : CastSpellAction(botAI, "death grip") {}
+     bool Execute(Event event) override;
+     bool isUseful() override;
+ };
+diff --git a/modules/mod-playerbots/src/Ai/Class/Mage/MageActions.h b/modules/mod-playerbots/src/Ai/Class/Mage/MageActions.h
+index 0fad723..48092d3 100644
+--- a/modules/mod-playerbots/src/Ai/Class/Mage/MageActions.h
++++ b/modules/mod-playerbots/src/Ai/Class/Mage/MageActions.h
+@@ -229,7 +229,7 @@ public:
+ class CastPvpPolymorphAction : public CastSpellAction
+ {
+ public:
+-    CastPvpPolymorphAction(PlayerbotAI* botAI) : CastSpellAction(botAI, "pvp polymorph") {}
++    CastPvpPolymorphAction(PlayerbotAI* botAI) : CastSpellAction(botAI, "polymorph") {}
+     bool Execute(Event event) override;
+     bool isUseful() override;
+ 
+@@ -237,10 +237,10 @@ private:
+     uint32 lastCastMs = 0;
+ };
+ 
+-class CastPvpMageSlowAction : public CastSpellAction
++class CastPvpMageSlowAction : public Action
+ {
+ public:
+-    CastPvpMageSlowAction(PlayerbotAI* botAI) : CastSpellAction(botAI, "pvp mage slow") {}
++    CastPvpMageSlowAction(PlayerbotAI* botAI) : Action(botAI, "pvp mage slow") {}
+     bool Execute(Event event) override;
+     bool isUseful() override;
+ };
+diff --git a/modules/mod-playerbots/src/Ai/Class/Warlock/WarlockActions.h b/modules/mod-playerbots/src/Ai/Class/Warlock/WarlockActions.h
+index 9442602..e9a825a 100644
+--- a/modules/mod-playerbots/src/Ai/Class/Warlock/WarlockActions.h
++++ b/modules/mod-playerbots/src/Ai/Class/Warlock/WarlockActions.h
+@@ -186,7 +186,7 @@ public:
+ class CastPvpFearAction : public CastSpellAction
+ {
+ public:
+-    CastPvpFearAction(PlayerbotAI* botAI) : CastSpellAction(botAI, "pvp fear") {}
++    CastPvpFearAction(PlayerbotAI* botAI) : CastSpellAction(botAI, "fear") {}
+     bool Execute(Event event) override;
+     bool isUseful() override;
+ 
+
