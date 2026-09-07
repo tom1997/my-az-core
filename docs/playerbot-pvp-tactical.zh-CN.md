@@ -1,6 +1,6 @@
 # Playerbot PvP Tactical：空间控制第一阶段
 
-本发行版在 `0004–0008` 的空间控制基础上，新增 `0009–0015` 的分层 PvP 框架：共享战术状态、能力检查、控制递减、移动所有权、全部职业控制入口、野外/多人 PvP 协同，以及受击响应和卡路恢复。它不是需要逐个机器人添加的游戏内策略；是否启用、在哪些场景启用以及距离参数全部由 `playerbots.conf` 决定。
+本发行版在 `0004–0008` 的空间控制基础上，新增 `0009–0017` 的分层 PvP 框架：共享战术状态、能力检查、控制递减、移动所有权、全部职业控制入口、野外/多人 PvP 协同、受击响应、卡路恢复，以及决斗准备和职业先手。它不是需要逐个机器人添加的游戏内策略；是否启用、在哪些场景启用以及距离参数全部由 `playerbots.conf` 决定。
 
 ## 行为范围
 
@@ -27,6 +27,13 @@
 13. 刚被玩家攻击但尚未生成 `current target` 时，直接从战斗系统的即时攻击者中接管威胁，不再等到半血才开始反应。
 14. 拉距路径 700 ms 内没有产生有效位移时，放弃受阻方向并从后方、左右和斜向候选点重新选路；敌人绕到另一侧超过方向阈值时也会重规划。
 15. 德鲁伊坦克起战优先进入熊形态；低血量时进入有迟滞的恢复状态，先尝试缠绕、旋风、自然之握或猛击控制目标，再解除形态并施放回春、愈合或治疗之触，恢复后回到原形态。
+16. 自己低于 40% 且目标处于会被伤害打断的完整控制时，停止自动攻击、宠物攻击和战术移动；控制至少还剩 2 秒才尝试自疗，绷带要求至少还剩 6.5 秒。
+17. 人类自利、亡灵意志、逃命专家等种族解控继续保持最高优先级；装备 PvP 徽章时，新的专用动作只在失控状态下使用，不会被普通爆发逻辑提前浪费。
+18. 盗贼低血量时优先尝试致盲；不可用时进入消失重置，沿安全方向拉开到约 30 码。脱战后可坐地进食，否则使用绷带并尝试二次潜行；重开前会等待至少约 80 能量，目标即将脱控、逼近 10 码或 12 秒超时才提前结束重置。
+19. 对手是潜行盗贼且接近约 12 码时，每 2.5 秒最多尝试一次职业范围技能进行反潜探测，避免精确追踪隐身坐标式的作弊行为。
+20. 决斗倒计时由独立的先手动作管理：战士补战斗怒吼，圣骑士补圣洁护盾，死亡骑士补骨盾/寒冬号角，猎人补守护并预埋冰冻陷阱，牧师补盾，萨满补闪电盾/水盾，法师补冰盾，术士补护甲；没有学会的技能自动跳过。
+21. 盗贼会潜行接近并尝试“闷棍 → 蓄到约 80 能量 → 偷袭”，闷棍不足约 1.5 秒时不再死等；没有偷袭时回退锁喉。野性输出德鲁伊会在倒计时切猎豹并潜行，开战后优先突袭，技能不可用时回退毁灭。
+22. 猎人放下的冰冻陷阱会记录为空间锚点。被近战逼近时优先在陷阱约 5 码范围内横向绕行，让追击者穿过陷阱，而不是直线跑出决斗区域。
 
 贴身时不会无条件逃跑。法师仍优先冰环，并只在 8 码内允许闪现；术士优先暗影之怒/暗影烈焰，牧师优先心灵尖啸，元素萨满优先雷暴，平衡德优先台风；猎人会优先尝试冰冻陷阱或原有伤害陷阱，并允许原职业策略在一对一被追击时使用逃脱。猎人会直接给当前 PvP 目标上震荡射击，法师会用减速/冰箭并在低血量时尝试变羊，术士会在贴近或血量受压时尝试恐惧。需要读条的控制会先停止战术移动，再在下一次决策施放。
 
@@ -44,6 +51,12 @@ AiPlayerbot.PvPTactical.Battleground = 1
 AiPlayerbot.PvPTactical.OpenWorld = 1
 AiPlayerbot.PvPTactical.Debug = 0
 AiPlayerbot.PvPTactical.DebugBot =
+AiPlayerbot.PvPTactical.Recovery.HealthPct = 40.0
+AiPlayerbot.PvPTactical.Recovery.MinControlMs = 2000
+AiPlayerbot.PvPTactical.Recovery.BandageMinControlMs = 6500
+AiPlayerbot.PvPTactical.Rogue.ResetHealthPct = 35.0
+AiPlayerbot.PvPTactical.Rogue.ResetDistance = 30.0
+AiPlayerbot.PvPTactical.AntiStealth.ProbeDistance = 12.0
 
 AiPlayerbot.PvPTactical.DecisionInterval = 200
 AiPlayerbot.PvPTactical.Hunter.MinDistance = 24.0
@@ -59,10 +72,10 @@ AiPlayerbot.PvPTactical.RetreatStep = 14.0
 AiPlayerbot.PvPTactical.TargetLeashDistance = 55.0
 
 AiPlayerbot.PvPTactical.Melee.Enable = 1
-AiPlayerbot.PvPTactical.Melee.DecisionInterval = 200
+AiPlayerbot.PvPTactical.Melee.DecisionInterval = 150
 AiPlayerbot.PvPTactical.Melee.FlankDistance = 1.5
-AiPlayerbot.PvPTactical.Melee.MinAngle = 100.0
-AiPlayerbot.PvPTactical.Melee.MaxAngle = 145.0
+AiPlayerbot.PvPTactical.Melee.MinAngle = 120.0
+AiPlayerbot.PvPTactical.Melee.MaxAngle = 165.0
 ```
 
 需要排查单个机器人为何停顿或换路时，可临时打开调试并填写角色名：

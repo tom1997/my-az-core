@@ -1,0 +1,589 @@
+diff --git a/modules/mod-playerbots/conf/playerbots.conf.dist b/modules/mod-playerbots/conf/playerbots.conf.dist
+index d6695c4..debf031 100644
+--- a/modules/mod-playerbots/conf/playerbots.conf.dist
++++ b/modules/mod-playerbots/conf/playerbots.conf.dist
+@@ -543,6 +543,18 @@ AiPlayerbot.PvPTactical.OpenWorld = 1
+ AiPlayerbot.PvPTactical.Debug = 0
+ AiPlayerbot.PvPTactical.DebugBot =
+ 
++# When a damage-breakable player control has enough time remaining, a low-health
++# bot pauses attacks to self-heal. Bandages require a longer safe window.
++AiPlayerbot.PvPTactical.Recovery.HealthPct = 40.0
++AiPlayerbot.PvPTactical.Recovery.MinControlMs = 2000
++AiPlayerbot.PvPTactical.Recovery.BandageMinControlMs = 6500
++
++# A low-health rogue may Blind/Vanish, create distance, bandage, then reopen.
++# Nearby opponents periodically use an available self-centered AoE to probe stealth.
++AiPlayerbot.PvPTactical.Rogue.ResetHealthPct = 35.0
++AiPlayerbot.PvPTactical.Rogue.ResetDistance = 30.0
++AiPlayerbot.PvPTactical.AntiStealth.ProbeDistance = 12.0
++
+ # Milliseconds between lightweight tactical state checks. Active movement is kept
+ # across ticks, so this does not repeatedly interrupt class abilities.
+ AiPlayerbot.PvPTactical.DecisionInterval = 200
+@@ -576,10 +588,10 @@ AiPlayerbot.PvPTactical.TargetLeashDistance = 55.0
+ # prevents constant orbiting while still allowing the bot to react when its
+ # opponent turns. Angles are degrees measured away from the target's front.
+ AiPlayerbot.PvPTactical.Melee.Enable = 1
+-AiPlayerbot.PvPTactical.Melee.DecisionInterval = 200
++AiPlayerbot.PvPTactical.Melee.DecisionInterval = 150
+ AiPlayerbot.PvPTactical.Melee.FlankDistance = 1.5
+-AiPlayerbot.PvPTactical.Melee.MinAngle = 100.0
+-AiPlayerbot.PvPTactical.Melee.MaxAngle = 145.0
++AiPlayerbot.PvPTactical.Melee.MinAngle = 120.0
++AiPlayerbot.PvPTactical.Melee.MaxAngle = 165.0
+ 
+ #
+ #
+diff --git a/modules/mod-playerbots/src/Ai/Base/ActionContext.h b/modules/mod-playerbots/src/Ai/Base/ActionContext.h
+index b3a1336..9f25c8c 100644
+--- a/modules/mod-playerbots/src/Ai/Base/ActionContext.h
++++ b/modules/mod-playerbots/src/Ai/Base/ActionContext.h
+@@ -184,6 +184,7 @@ public:
+         creators["stoneform"] = &ActionContext::stoneform;
+         creators["escape artist"] = &ActionContext::escape_artist;
+         creators["use trinket"] = &ActionContext::use_trinket;
++        creators["use pvp trinket"] = &ActionContext::use_pvp_trinket;
+         creators["auto talents"] = &ActionContext::auto_talents;
+         creators["auto share quest"] = &ActionContext::auto_share_quest;
+         creators["auto maintenance on levelup"] = &ActionContext::auto_maintenance_on_levelup;
+@@ -398,6 +399,7 @@ private:
+     static Action* stoneform(PlayerbotAI* botAI) { return new CastStoneformAction(botAI); }
+     static Action* escape_artist(PlayerbotAI* botAI) { return new CastEscapeArtistAction(botAI); }
+     static Action* use_trinket(PlayerbotAI* botAI) { return new UseTrinketAction(botAI); }
++    static Action* use_pvp_trinket(PlayerbotAI* botAI) { return new UseTrinketAction(botAI, true); }
+     static Action* auto_talents(PlayerbotAI* botAI) { return new AutoSetTalentsAction(botAI); }
+     static Action* auto_share_quest(PlayerbotAI* ai) { return new AutoShareQuestAction(ai); }
+     static Action* auto_maintenance_on_levelup(PlayerbotAI* botAI) { return new AutoMaintenanceOnLevelupAction(botAI); }
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/GenericSpellActions.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/GenericSpellActions.cpp
+index 57c69ed..e454cc2 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/GenericSpellActions.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/GenericSpellActions.cpp
+@@ -581,18 +581,26 @@ bool UseTrinketAction::UseTrinket(Item* item)
+             bool restoresMana = false;
+             bool improvesManaEfficiency = false;
+             bool defensiveTankEffect = false;
++            bool removesControlMechanic = false;
+             for (int i = 0; i < MAX_SPELL_EFFECTS; i++)
+             {
+                 const SpellEffectInfo& effectInfo = spellInfo->Effects[i];
+                 if (effectInfo.Effect == SPELL_EFFECT_APPLY_AURA)
+                     applyAura = true;
++                if (effectInfo.Effect == SPELL_EFFECT_DISPEL_MECHANIC)
++                    removesControlMechanic = true;
+ 
+                 restoresMana = restoresMana || IsManaRestoreEffect(effectInfo);
+                 improvesManaEfficiency = improvesManaEfficiency || IsManaEfficiencyEffect(effectInfo);
+                 defensiveTankEffect = defensiveTankEffect || IsDefensiveTankEffect(effectInfo);
+             }
+ 
+-            if (!applyAura && !restoresMana)
++            if (pvpOnly)
++            {
++                if (!removesControlMechanic)
++                    return false;
++            }
++            else if (!applyAura && !restoresMana)
+                 return false;
+ 
+             if (restoresMana || improvesManaEfficiency)
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/GenericSpellActions.h b/modules/mod-playerbots/src/Ai/Base/Actions/GenericSpellActions.h
+index 1c810a1..6565a60 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/GenericSpellActions.h
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/GenericSpellActions.h
+@@ -344,13 +344,15 @@ public:
+ class UseTrinketAction : public Action
+ {
+ public:
+-    UseTrinketAction(PlayerbotAI* botAI) : Action(botAI, "use trinket") {}
++    UseTrinketAction(PlayerbotAI* botAI, bool pvpOnly = false)
++        : Action(botAI, pvpOnly ? "use pvp trinket" : "use trinket"), pvpOnly(pvpOnly) {}
+     bool Execute(Event event) override;
+ 
+ protected:
+     bool UseTrinket(Item* trinket);
+ 
+ private:
++    bool pvpOnly;
+     std::unordered_map<uint64, uint32> trinketItemCooldownExpiries;
+     std::unordered_map<uint32, uint32> trinketCategoryCooldownExpiries;
+ };
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp
+index 02aaae2..55cfbde 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp
+@@ -2060,7 +2060,9 @@ bool PvpTacticalMeleeFlankAction::Execute(Event /*event*/)
+ 
+     // A stable angle prevents left/right destination churn every trigger tick.
+     float const angle = (minAngle + maxAngle) * 0.5f;
+-    float const distance = std::max(1.0f, bot->GetMeleeRange(target) * 0.6f);
++    // Stay near the edge of melee range so the path travels around the target
++    // instead of clipping through its center and producing a slow-looking swap.
++    float const distance = std::max(1.0f, bot->GetMeleeRange(target) * 0.85f);
+     Position left = target->GetPosition();
+     Position right = target->GetPosition();
+     left.RelocatePolarOffset(angle, distance);
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
+index 9d16eb3..2bfc629 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
+@@ -1,16 +1,32 @@
+ /* Class-aware PvP control actions. */
+ #include "PvpTacticalActions.h"
+ #include "AiObjectContext.h"
++#include "Aura.h"
++#include "Event.h"
++#include "GameObject.h"
++#include "Item.h"
++#include "Map.h"
+ #include "MotionMaster.h"
++#include "MovementGenerator.h"
+ #include "Player.h"
+ #include "PlayerbotAI.h"
++#include "PlayerbotAIConfig.h"
+ #include "Playerbots.h"
+ #include "PvpTacticalValue.h"
++#include "Position.h"
+ #include "SharedDefines.h"
++#include "SpellDefines.h"
++#include "SpellInfo.h"
++#include "Timer.h"
+ #include "Unit.h"
+ 
++#include <algorithm>
++#include <cmath>
++
+ namespace
+ {
++void StopOwnedPvpMovement(PlayerbotAI* botAI);
++
+ bool TrySpell(PlayerbotAI* botAI, std::string const& spell, Unit* target, bool respectDiminishing = true)
+ {
+     return CanUsePvpSpell(botAI, spell, target, respectDiminishing) && botAI->CastSpell(spell, target);
+@@ -20,6 +36,109 @@ bool NeedsSlow(PlayerbotAI* botAI, std::string const& aura, Unit* target)
+     return target && !botAI->HasAura(aura, target);
+ }
+ 
++int32 BreakableControlRemainingMs(PlayerbotAI* /*botAI*/, Unit* target)
++{
++    if (!target)
++        return 0;
++
++    bool const unableToAct = target->HasAuraType(SPELL_AURA_MOD_STUN) ||
++                             target->HasAuraType(SPELL_AURA_MOD_FEAR) ||
++                             target->HasAuraType(SPELL_AURA_MOD_CONFUSE) ||
++                             target->HasAuraType(SPELL_AURA_MOD_CHARM) ||
++                             target->HasAuraType(SPELL_AURA_AOE_CHARM) ||
++                             target->HasAuraWithMechanic(1 << MECHANIC_SLEEP) ||
++                             target->HasAuraWithMechanic(1 << MECHANIC_SAPPED);
++    if (!unableToAct)
++        return 0;
++
++    int32 remaining = 0;
++    for (auto const& applied : target->GetAppliedAuras())
++    {
++        Aura* aura = applied.second ? applied.second->GetBase() : nullptr;
++        SpellInfo const* spellInfo = aura ? aura->GetSpellInfo() : nullptr;
++        if (!spellInfo || spellInfo->IsPositive())
++            continue;
++        if (!(spellInfo->AuraInterruptFlags &
++              (AURA_INTERRUPT_FLAG_TAKE_DAMAGE | AURA_INTERRUPT_FLAG_DIRECT_DAMAGE)))
++            continue;
++        remaining = std::max(remaining, aura->GetDuration());
++    }
++    return remaining;
++}
++
++bool TryControlWindowRecovery(PlayerbotAI* botAI, Unit* target)
++{
++    Player* bot = botAI->GetBot();
++    if (bot->GetHealthPct() >= sPlayerbotAIConfig.pvpTacticalRecoveryHealthPct)
++        return false;
++
++    int32 const remaining = BreakableControlRemainingMs(botAI, target);
++    if (remaining < int32(sPlayerbotAIConfig.pvpTacticalRecoveryMinControlMs))
++        return false;
++
++    bot->AttackStop();
++    botAI->PetFollow();
++    if (bot->isMoving())
++    {
++        StopOwnedPvpMovement(botAI);
++        DebugPvpTactical(botAI, "control-window-stop", target);
++        return true;
++    }
++    if (bot->IsNonMeleeSpellCast(false))
++        return true;
++
++    bool healed = false;
++    switch (bot->getClass())
++    {
++        case CLASS_DRUID:
++            if (bot->GetShapeshiftForm() != FORM_NONE)
++            {
++                botAI->RemoveShapeshift();
++                return true;
++            }
++            healed = (!botAI->HasAura("rejuvenation", bot) && TrySpell(botAI, "rejuvenation", bot, false)) ||
++                     TrySpell(botAI, "regrowth", bot, false) || TrySpell(botAI, "healing touch", bot, false);
++            break;
++        case CLASS_PALADIN:
++            healed = TrySpell(botAI, "flash of light", bot, false) || TrySpell(botAI, "holy light", bot, false);
++            break;
++        case CLASS_PRIEST:
++            healed = (!botAI->HasAura("renew", bot) && TrySpell(botAI, "renew", bot, false)) ||
++                     TrySpell(botAI, "flash heal", bot, false) || TrySpell(botAI, "greater heal", bot, false);
++            break;
++        case CLASS_SHAMAN:
++            healed = TrySpell(botAI, "riptide", bot, false) || TrySpell(botAI, "lesser healing wave", bot, false) ||
++                     TrySpell(botAI, "healing wave", bot, false);
++            break;
++        case CLASS_DEATH_KNIGHT:
++            healed = TrySpell(botAI, "rune tap", bot, false) || TrySpell(botAI, "death pact", bot, false);
++            break;
++        case CLASS_WARRIOR:
++            healed = TrySpell(botAI, "enraged regeneration", bot, false);
++            break;
++        default:
++            break;
++    }
++    if (healed)
++    {
++        DebugPvpTactical(botAI, "control-window-heal", target);
++        return true;
++    }
++
++    if (remaining >= int32(sPlayerbotAIConfig.pvpTacticalBandageMinControlMs) && !bot->HasAura(11196))
++        if (Item* bandage = botAI->FindBandage())
++        {
++            botAI->ImbueItem(bandage, bot);
++            DebugPvpTactical(botAI, "control-window-bandage", target);
++            return true;
++        }
++
++    // Do not immediately break a useful recovery control merely because this
++    // bot has no heal or bandage available. The next tick may gain enough mana
++    // or finish a global cooldown; resume pressure near the end of the aura.
++    return true;
++}
++
+ bool TargetControlled(Unit* target)
+ {
+     return target && (target->HasUnitState(UNIT_STATE_CONTROLLED | UNIT_STATE_ROOT) || target->HasRootAura() ||
+@@ -54,6 +173,163 @@ void StopOwnedPvpMovement(PlayerbotAI* botAI)
+     bot->GetMotionMaster()->Clear(false);
+     bot->StopMoving();
+ }
++
++bool TryAntiStealthProbe(PlayerbotAI* botAI, Unit* target)
++{
++    Player* bot = botAI->GetBot();
++    if (!target || target->getClass() != CLASS_ROGUE || !botAI->HasAura("stealth", target) ||
++        bot->GetDistance2d(target) > sPlayerbotAIConfig.pvpTacticalAntiStealthProbeDistance)
++        return false;
++
++    PvpTacticalState& state = GetPvpTacticalState(botAI);
++    uint32 const now = getMSTime();
++    if (now - state.lastAntiStealthProbeAtMs < 2500)
++        return false;
++    state.lastAntiStealthProbeAtMs = now;
++
++    bool cast = false;
++    switch (bot->getClass())
++    {
++        case CLASS_WARRIOR: cast = TrySpell(botAI, "thunder clap", bot, false); break;
++        case CLASS_PALADIN: cast = TrySpell(botAI, "consecration", bot, false); break;
++        case CLASS_HUNTER:
++            cast = TrySpell(botAI, "explosive trap", bot, false) || TrySpell(botAI, "immolation trap", bot, false);
++            break;
++        case CLASS_ROGUE: cast = TrySpell(botAI, "fan of knives", bot, false); break;
++        case CLASS_PRIEST: cast = TrySpell(botAI, "holy nova", bot, false); break;
++        case CLASS_DEATH_KNIGHT: cast = TrySpell(botAI, "blood boil", bot, false); break;
++        case CLASS_SHAMAN:
++            cast = TrySpell(botAI, "magma totem", bot, false) || TrySpell(botAI, "fire nova", bot, false);
++            break;
++        case CLASS_MAGE: cast = TrySpell(botAI, "arcane explosion", bot, false); break;
++        case CLASS_WARLOCK: cast = TrySpell(botAI, "hellfire", bot, false); break;
++        case CLASS_DRUID: cast = TrySpell(botAI, "hurricane", bot, false) || TrySpell(botAI, "swipe", bot, false); break;
++        default: break;
++    }
++    if (cast)
++        DebugPvpTactical(botAI, "anti-stealth-probe", target);
++    return cast;
++}
++
++bool MoveRogueResetAway(PlayerbotAI* botAI, Unit* target)
++{
++    Player* bot = botAI->GetBot();
++    if (IsPvpMovementActive(botAI, bot, PvpMovementOwner::RogueReset))
++        return true;
++
++    float const desired = std::clamp(sPlayerbotAIConfig.pvpTacticalRogueResetDistance, 18.0f, 45.0f);
++    float const distance = bot->GetDistance2d(target);
++    if (distance >= desired)
++        return false;
++
++    float const step = std::min(12.0f, std::max(4.0f, desired - distance));
++    float const baseAngle = target->GetAngle(bot);
++    GameObject* duelFlag = bot->duel ? bot->GetMap()->GetGameObject(bot->GetGuidValue(PLAYER_DUEL_ARBITER)) : nullptr;
++    bool found = false;
++    Position best;
++    float bestDistance = distance;
++    for (float const offset : { 0.0f, float(M_PI / 4.0), float(-M_PI / 4.0), float(M_PI / 2.0), float(-M_PI / 2.0) })
++    {
++        float x = bot->GetPositionX() + std::cos(baseAngle + offset) * step;
++        float y = bot->GetPositionY() + std::sin(baseAngle + offset) * step;
++        float z = bot->GetPositionZ();
++        if (!bot->GetMap()->CheckCollisionAndGetValidCoords(bot, bot->GetPositionX(), bot->GetPositionY(),
++                                                             bot->GetPositionZ(), x, y, z))
++            continue;
++        if (duelFlag && duelFlag->GetDistance2d(x, y) > sPlayerbotAIConfig.pvpTacticalDuelSafeRadius)
++            continue;
++        float const candidateDistance = target->GetDistance2d(x, y);
++        if (!found || candidateDistance > bestDistance)
++        {
++            found = true;
++            bestDistance = candidateDistance;
++            best.Relocate(x, y, z);
++        }
++    }
++    if (!found)
++        return false;
++
++    ClaimPvpMovement(botAI, PvpMovementOwner::RogueReset, target);
++    SetPvpMovementDestination(botAI, best.GetPositionX(), best.GetPositionY());
++    bot->GetMotionMaster()->Clear(false);
++    bot->GetMotionMaster()->MovePoint(0, best.GetPositionX(), best.GetPositionY(), best.GetPositionZ(),
++                                      FORCED_MOVEMENT_NONE, 0.0f, 0.0f, true, false);
++    DebugPvpTactical(botAI, "rogue-reset-move", target);
++    return true;
++}
++
++bool TryRogueReset(PlayerbotAI* botAI, Unit* target)
++{
++    Player* bot = botAI->GetBot();
++    if (bot->getClass() != CLASS_ROGUE)
++        return false;
++    PvpTacticalState& state = GetPvpTacticalState(botAI);
++    uint32 const now = getMSTime();
++
++    if (!state.rogueResetting && bot->GetHealthPct() <= sPlayerbotAIConfig.pvpTacticalRogueResetHealthPct)
++    {
++        if (bot->GetDistance2d(target) <= 15.0f && TrySpell(botAI, "blind", target))
++            return true;
++        state.rogueResetting = true;
++        state.rogueResetStartedAtMs = now;
++        DebugPvpTactical(botAI, "rogue-reset-start", target);
++    }
++    if (!state.rogueResetting)
++        return false;
++
++    uint32 const elapsed = now - state.rogueResetStartedAtMs;
++    if (bot->GetHealthPct() >= 70.0f || elapsed >= 16000)
++    {
++        state.rogueResetting = false;
++        state.rogueResetStartedAtMs = 0;
++        ClearPvpMovement(botAI, PvpMovementOwner::RogueReset);
++        DebugPvpTactical(botAI, "rogue-reset-reopen", target);
++        return false;
++    }
++
++    bool const stealthed = botAI->HasAura("stealth", bot);
++    if (!stealthed)
++    {
++        if (!bot->IsInCombat() && bot->GetStandState() == UNIT_STAND_STATE_SIT && bot->GetHealthPct() < 70.0f)
++            return true;
++        if (TrySpell(botAI, "vanish", bot, false) || (!bot->IsInCombat() && TrySpell(botAI, "stealth", bot, false)))
++            return true;
++        // After bandaging, wait briefly for combat to drop and re-stealth. If
++        // the opponent closes to melee, abandon the reset and defend normally.
++        if (bot->GetDistance2d(target) > 10.0f)
++            return true;
++        state.rogueResetting = false;
++        return false;
++    }
++
++    bot->AttackStop();
++    botAI->PetFollow();
++    if (MoveRogueResetAway(botAI, target))
++        return true;
++
++    if (!bot->IsInCombat() && bot->GetHealthPct() < 70.0f && botAI->DoSpecificAction("food", Event(), true))
++    {
++        DebugPvpTactical(botAI, "rogue-reset-eat", target);
++        return true;
++    }
++
++    if (bot->GetHealthPct() < 60.0f && !bot->HasAura(11196))
++        if (Item* bandage = botAI->FindBandage())
++        {
++            botAI->ImbueItem(bandage, bot);
++            DebugPvpTactical(botAI, "rogue-reset-bandage", target);
++            return true;
++        }
++
++    // Hold stealth long enough to pool energy and let short cooldowns recover,
++    // then reopen even if no healing item was available.
++    if (elapsed >= 8000)
++    {
++        state.rogueResetting = false;
++        return false;
++    }
++    return true;
++}
+ }
+ 
+ bool PvpTacticalClassControlAction::isUseful()
+@@ -70,6 +346,12 @@ bool PvpTacticalClassControlAction::Execute(Event /*event*/)
+     float const distance = bot->GetDistance2d(target);
+     bool const melee = bot->IsWithinMeleeRange(target);
+     bool const targetCasting = target->IsNonMeleeSpellCast(false);
++    if (TryAntiStealthProbe(botAI, target))
++        return true;
++    if (TryControlWindowRecovery(botAI, target))
++        return true;
++    if (TryRogueReset(botAI, target))
++        return true;
+     switch (bot->getClass())
+     {
+         case CLASS_WARRIOR:
+diff --git a/modules/mod-playerbots/src/Ai/Base/Strategy/CombatStrategy.cpp b/modules/mod-playerbots/src/Ai/Base/Strategy/CombatStrategy.cpp
+index b803696..b050189 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Strategy/CombatStrategy.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Strategy/CombatStrategy.cpp
+@@ -57,7 +57,7 @@ void CombatStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
+     triggers.push_back(new TriggerNode(
+         "pvp tactical pressure hunter", { NextAction("pvp tactical pressure hunter", ACTION_NORMAL + 3) }));
+     triggers.push_back(
+-        new TriggerNode("pvp tactical melee flank", { NextAction("pvp tactical melee flank", ACTION_NORMAL + 4) }));
++        new TriggerNode("pvp tactical melee flank", { NextAction("pvp tactical melee flank", ACTION_MOVE - 1) }));
+     triggers.push_back(
+         new TriggerNode("pvp tactical player target", { NextAction("pvp tactical class control", 50.0f) }));
+     // The pet-attack trigger is commented out because it was forcing the bot's pet to attack, overriding stay and follow commands.
+diff --git a/modules/mod-playerbots/src/Ai/Base/Strategy/RacialsStrategy.cpp b/modules/mod-playerbots/src/Ai/Base/Strategy/RacialsStrategy.cpp
+index 1d45d78..b4c7e19 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Strategy/RacialsStrategy.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Strategy/RacialsStrategy.cpp
+@@ -84,6 +84,12 @@ void RacialsStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
+             "movement impaired", { NextAction("escape artist", ACTION_EMERGENCY + 1) }));
+     }
+ 
++    // The generic trinket action now recognizes PvP trinkets whose on-use
++    // spell removes mechanics. Racial breaks above have +1 relevance and are
++    // preferred, leaving the equipped trinket as the universal fallback.
++    triggers.push_back(new TriggerNode(
++        "loss of control", { NextAction("use pvp trinket", ACTION_EMERGENCY) }));
++
+     if (botAI->HasSpell("blood fury"))
+     {
+         triggers.push_back(new TriggerNode(
+diff --git a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp
+index e18a23a..dd53601 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp
+@@ -29,6 +29,8 @@ void PvpTacticalState::Reset()
+     movementProgressAtMs = 0;
+     movementFailedAtMs = 0;
+     lastDebugAtMs = 0;
++    rogueResetStartedAtMs = 0;
++    lastAntiStealthProbeAtMs = 0;
+     desiredDistance = 0.0f;
+     movementProgressX = 0.0f;
+     movementProgressY = 0.0f;
+@@ -40,6 +42,7 @@ void PvpTacticalState::Reset()
+     hasDestinationAngle = false;
+     hasThreatAngle = false;
+     druidRecovering = false;
++    rogueResetting = false;
+ }
+ 
+ bool IsPvpTacticalEligible(Player* bot)
+diff --git a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h
+index 036e38a..c9fbedd 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h
++++ b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h
+@@ -32,7 +32,8 @@ enum class PvpMovementOwner : uint8
+     Flank,
+     Pressure,
+     DuelPrepare,
+-    ReturnToAnchor
++    ReturnToAnchor,
++    RogueReset
+ };
+ 
+ struct PvpTacticalState
+@@ -45,6 +46,8 @@ struct PvpTacticalState
+     uint32 movementProgressAtMs = 0;
+     uint32 movementFailedAtMs = 0;
+     uint32 lastDebugAtMs = 0;
++    uint32 rogueResetStartedAtMs = 0;
++    uint32 lastAntiStealthProbeAtMs = 0;
+     float desiredDistance = 0.0f;
+     float movementProgressX = 0.0f;
+     float movementProgressY = 0.0f;
+@@ -56,6 +59,7 @@ struct PvpTacticalState
+     bool hasDestinationAngle = false;
+     bool hasThreatAngle = false;
+     bool druidRecovering = false;
++    bool rogueResetting = false;
+ 
+     void Reset();
+ };
+diff --git a/modules/mod-playerbots/src/PlayerbotAIConfig.cpp b/modules/mod-playerbots/src/PlayerbotAIConfig.cpp
+index 2de14ff..2884ac5 100644
+--- a/modules/mod-playerbots/src/PlayerbotAIConfig.cpp
++++ b/modules/mod-playerbots/src/PlayerbotAIConfig.cpp
+@@ -130,6 +130,18 @@ bool PlayerbotAIConfig::Initialize()
+     pvpTacticalOpenWorld = sConfigMgr->GetOption<bool>("AiPlayerbot.PvPTactical.OpenWorld", true);
+     pvpTacticalDebug = sConfigMgr->GetOption<bool>("AiPlayerbot.PvPTactical.Debug", false);
+     pvpTacticalDebugBot = sConfigMgr->GetOption<std::string>("AiPlayerbot.PvPTactical.DebugBot", "");
++    pvpTacticalRecoveryHealthPct =
++        sConfigMgr->GetOption<float>("AiPlayerbot.PvPTactical.Recovery.HealthPct", 40.0f);
++    pvpTacticalRecoveryMinControlMs =
++        sConfigMgr->GetOption<uint32>("AiPlayerbot.PvPTactical.Recovery.MinControlMs", 2000);
++    pvpTacticalBandageMinControlMs =
++        sConfigMgr->GetOption<uint32>("AiPlayerbot.PvPTactical.Recovery.BandageMinControlMs", 6500);
++    pvpTacticalRogueResetHealthPct =
++        sConfigMgr->GetOption<float>("AiPlayerbot.PvPTactical.Rogue.ResetHealthPct", 35.0f);
++    pvpTacticalRogueResetDistance =
++        sConfigMgr->GetOption<float>("AiPlayerbot.PvPTactical.Rogue.ResetDistance", 30.0f);
++    pvpTacticalAntiStealthProbeDistance =
++        sConfigMgr->GetOption<float>("AiPlayerbot.PvPTactical.AntiStealth.ProbeDistance", 12.0f);
+     pvpTacticalDecisionInterval =
+         std::max<uint32>(150, sConfigMgr->GetOption<uint32>("AiPlayerbot.PvPTactical.DecisionInterval", 200));
+     pvpTacticalHunterMinDistance =
+@@ -155,13 +167,13 @@ bool PlayerbotAIConfig::Initialize()
+         sConfigMgr->GetOption<float>("AiPlayerbot.PvPTactical.TargetLeashDistance", 55.0f);
+     pvpTacticalMeleeEnabled = sConfigMgr->GetOption<bool>("AiPlayerbot.PvPTactical.Melee.Enable", true);
+     pvpTacticalMeleeDecisionInterval =
+-        std::max<uint32>(150, sConfigMgr->GetOption<uint32>("AiPlayerbot.PvPTactical.Melee.DecisionInterval", 200));
++        std::max<uint32>(100, sConfigMgr->GetOption<uint32>("AiPlayerbot.PvPTactical.Melee.DecisionInterval", 150));
+     pvpTacticalMeleeFlankDistance =
+         sConfigMgr->GetOption<float>("AiPlayerbot.PvPTactical.Melee.FlankDistance", 1.5f);
+     pvpTacticalMeleeMinAngle =
+-        sConfigMgr->GetOption<float>("AiPlayerbot.PvPTactical.Melee.MinAngle", 100.0f);
++        sConfigMgr->GetOption<float>("AiPlayerbot.PvPTactical.Melee.MinAngle", 120.0f);
+     pvpTacticalMeleeMaxAngle =
+-        sConfigMgr->GetOption<float>("AiPlayerbot.PvPTactical.Melee.MaxAngle", 145.0f);
++        sConfigMgr->GetOption<float>("AiPlayerbot.PvPTactical.Melee.MaxAngle", 165.0f);
+ 
+     criticalHealth = sConfigMgr->GetOption<int32>("AiPlayerbot.CriticalHealth", 25);
+     lowHealth = sConfigMgr->GetOption<int32>("AiPlayerbot.LowHealth", 45);
+diff --git a/modules/mod-playerbots/src/PlayerbotAIConfig.h b/modules/mod-playerbots/src/PlayerbotAIConfig.h
+index fd43f67..cb1a814 100644
+--- a/modules/mod-playerbots/src/PlayerbotAIConfig.h
++++ b/modules/mod-playerbots/src/PlayerbotAIConfig.h
+@@ -132,6 +132,12 @@ public:
+     bool pvpTacticalOpenWorld;
+     bool pvpTacticalDebug;
+     std::string pvpTacticalDebugBot;
++    float pvpTacticalRecoveryHealthPct;
++    uint32 pvpTacticalRecoveryMinControlMs;
++    uint32 pvpTacticalBandageMinControlMs;
++    float pvpTacticalRogueResetHealthPct;
++    float pvpTacticalRogueResetDistance;
++    float pvpTacticalAntiStealthProbeDistance;
+     uint32 pvpTacticalDecisionInterval;
+     float pvpTacticalHunterMinDistance;
+     float pvpTacticalCasterMinDistance;
+
