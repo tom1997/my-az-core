@@ -1,6 +1,6 @@
 # Playerbot PvP Tactical：空间控制第一阶段
 
-本发行版通过 `patches/0004-playerbot-pvp-tactical-ranged.patch`、`0005-playerbot-pvp-tactical-melee-flanking.patch` 增加共享 PvP 空间控制器，由 `0006-playerbot-pvp-cooperative-scheduling.patch` 修复动作调度和决斗入口，并由 `0007-playerbot-pvp-ranged-distance-control.patch` 增加持续拉距和远程职业贴身反制。它不是需要逐个机器人添加的游戏内策略；是否启用、在哪些场景启用以及距离参数全部由 `playerbots.conf` 决定。
+本发行版通过 `patches/0004-playerbot-pvp-tactical-ranged.patch`、`0005-playerbot-pvp-tactical-melee-flanking.patch` 增加共享 PvP 空间控制器，由 `0006-playerbot-pvp-cooperative-scheduling.patch` 修复动作调度和决斗入口，由 `0007-playerbot-pvp-ranged-distance-control.patch` 增加持续拉距，并由 `0008-playerbot-pvp-duel-matchups-and-control.patch` 增加决斗边界、职业控制链、开战准备和免疫目标切换。它不是需要逐个机器人添加的游戏内策略；是否启用、在哪些场景启用以及距离参数全部由 `playerbots.conf` 决定。
 
 ## 行为范围
 
@@ -20,8 +20,12 @@
 6. 已在执行的战斗点移动不会被每次判断重新下发，避免来回改目的地造成木讷和抖动。
 7. 非决斗目标超过追击上限时放弃目标，避免机器人跨地图追逐玩家。
 8. 远程进入危险半径后保持“正在拉距”状态，直到达到首选距离才结束，不会在危险边界每次只挪两三码。
+9. 决斗中优先沿目标切线横向跑，目的地限制在决斗旗 38 码内；如果没有安全方向则先返回圈内。
+10. 远程对远程不再执行完整拉距，仅在 8 码内紧急脱离到约 12 码；优势明显时法师可主动压进猎人的射击死区。
+11. 开战倒计时中，盗贼准备潜行，战士预留冲锋距离，死亡骑士预留死亡之握距离，猎人和其他远程拉开起手距离。
+12. 决斗对手处于冰箱等完全免疫状态时，优先攻击其镜像、宠物或召唤物；免疫结束后在下一次维护判断切回对手。
 
-贴身时不会无条件逃跑。法师仍优先冰环/闪现，术士优先暗影之怒/暗影烈焰，牧师优先心灵尖啸，元素萨满优先雷暴，平衡德优先台风；猎人会优先尝试冰冻陷阱或原有伤害陷阱，并允许原职业策略在一对一被追击时使用逃脱。技能未学会、冷却或当前不可施放时，才由移动控制器补位。
+贴身时不会无条件逃跑。法师仍优先冰环，并只在 8 码内允许闪现；术士优先暗影之怒/暗影烈焰，牧师优先心灵尖啸，元素萨满优先雷暴，平衡德优先台风；猎人会优先尝试冰冻陷阱或原有伤害陷阱，并允许原职业策略在一对一被追击时使用逃脱。猎人会直接给当前 PvP 目标上震荡射击，法师会用减速/冰箭并在低血量时尝试变羊，术士会在贴近或血量受压时尝试恐惧。需要读条的控制会先停止战术移动，再在下一次决策施放。
 
 ## 等级与技能
 
@@ -43,6 +47,9 @@ AiPlayerbot.PvPTactical.Healer.MinDistance = 22.0
 AiPlayerbot.PvPTactical.Hunter.PreferredDistance = 32.0
 AiPlayerbot.PvPTactical.Caster.PreferredDistance = 26.0
 AiPlayerbot.PvPTactical.Healer.PreferredDistance = 30.0
+AiPlayerbot.PvPTactical.RangedOpponent.EmergencyDistance = 8.0
+AiPlayerbot.PvPTactical.RangedOpponent.PreferredDistance = 12.0
+AiPlayerbot.PvPTactical.Duel.SafeRadius = 38.0
 AiPlayerbot.PvPTactical.RetreatStep = 14.0
 AiPlayerbot.PvPTactical.TargetLeashDistance = 55.0
 

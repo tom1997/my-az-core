@@ -46,6 +46,25 @@ foreach ($requiredMarker in @(
     }
 }
 
+$pvpDuelControlPatch = Join-Path $repoRoot 'patches\0008-playerbot-pvp-duel-matchups-and-control.patch'
+if (-not (Test-Path -LiteralPath $pvpDuelControlPatch)) { throw '缺少 Playerbot PvP 决斗与控制链补丁。' }
+$pvpDuelControlPatchText = Get-Content -LiteralPath $pvpDuelControlPatch -Raw
+foreach ($requiredMarker in @(
+    'Duel.SafeRadius',
+    'RangedOpponent.EmergencyDistance',
+    'pvp concussive shot',
+    'pvp polymorph',
+    'pvp fear',
+    'pvp death grip',
+    'cancel pvp feign death',
+    'pvp tactical duel maintenance',
+    'GetDuelSecondaryTarget'
+)) {
+    if ($pvpDuelControlPatchText -notmatch [regex]::Escape($requiredMarker)) {
+        throw "Playerbot PvP 决斗与控制链补丁缺少标记：$requiredMarker"
+    }
+}
+
 $pvpMeleePatch = Join-Path $repoRoot 'patches\0005-playerbot-pvp-tactical-melee-flanking.patch'
 if (-not (Test-Path -LiteralPath $pvpMeleePatch)) { throw '缺少 Playerbot PvP 近战抓背补丁。' }
 $pvpMeleePatchText = Get-Content -LiteralPath $pvpMeleePatch -Raw
