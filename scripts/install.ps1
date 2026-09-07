@@ -186,6 +186,8 @@ Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.Duel' $(if (Get-SettingValu
 Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.Arena' $(if (Get-SettingValue $settings 'pvpTacticalArena' $true) {'1'} else {'0'})
 Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.Battleground' $(if (Get-SettingValue $settings 'pvpTacticalBattleground' $true) {'1'} else {'0'})
 Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.OpenWorld' $(if (Get-SettingValue $settings 'pvpTacticalOpenWorld' $true) {'1'} else {'0'})
+Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.Debug' $(if (Get-SettingValue $settings 'pvpTacticalDebug' $false) {'1'} else {'0'})
+Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.DebugBot' ([string](Get-SettingValue $settings 'pvpTacticalDebugBot' ''))
 Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.DecisionInterval' ([string](Get-SettingValue $settings 'pvpTacticalDecisionInterval' 200))
 Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.Hunter.MinDistance' ([string](Get-SettingValue $settings 'pvpTacticalHunterMinDistance' 24.0))
 Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.Caster.MinDistance' ([string](Get-SettingValue $settings 'pvpTacticalCasterMinDistance' 18.0))

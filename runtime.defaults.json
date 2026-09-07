@@ -17,6 +17,8 @@
   "pvpTacticalArena": true,
   "pvpTacticalBattleground": true,
   "pvpTacticalOpenWorld": true,
+  "pvpTacticalDebug": false,
+  "pvpTacticalDebugBot": "",
   "pvpTacticalDecisionInterval": 200,
   "pvpTacticalHunterMinDistance": 24.0,
   "pvpTacticalCasterMinDistance": 18.0,

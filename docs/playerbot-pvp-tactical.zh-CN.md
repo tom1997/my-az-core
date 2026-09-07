@@ -1,6 +1,6 @@
 # Playerbot PvP Tactical：空间控制第一阶段
 
-本发行版在 `0004–0008` 的空间控制基础上，新增 `0009–0013` 五层 PvP 框架：共享战术状态、能力检查、控制递减、移动所有权、全部职业控制入口，以及野外/多人 PvP 协同。它不是需要逐个机器人添加的游戏内策略；是否启用、在哪些场景启用以及距离参数全部由 `playerbots.conf` 决定。
+本发行版在 `0004–0008` 的空间控制基础上，新增 `0009–0015` 的分层 PvP 框架：共享战术状态、能力检查、控制递减、移动所有权、全部职业控制入口、野外/多人 PvP 协同，以及受击响应和卡路恢复。它不是需要逐个机器人添加的游戏内策略；是否启用、在哪些场景启用以及距离参数全部由 `playerbots.conf` 决定。
 
 ## 行为范围
 
@@ -24,6 +24,9 @@
 10. 远程对远程不再执行完整拉距，仅在 8 码内紧急脱离到约 12 码；优势明显时法师可主动压进猎人的射击死区。
 11. 开战倒计时中，盗贼准备潜行，战士预留冲锋距离，死亡骑士预留死亡之握距离，猎人和其他远程拉开起手距离。
 12. 决斗对手处于冰箱等完全免疫状态时，优先攻击其镜像、宠物或召唤物；免疫结束后在下一次维护判断切回对手。
+13. 刚被玩家攻击但尚未生成 `current target` 时，直接从战斗系统的即时攻击者中接管威胁，不再等到半血才开始反应。
+14. 拉距路径 700 ms 内没有产生有效位移时，放弃受阻方向并从后方、左右和斜向候选点重新选路；敌人绕到另一侧超过方向阈值时也会重规划。
+15. 德鲁伊坦克起战优先进入熊形态；低血量时进入有迟滞的恢复状态，先尝试缠绕、旋风、自然之握或猛击控制目标，再解除形态并施放回春、愈合或治疗之触，恢复后回到原形态。
 
 贴身时不会无条件逃跑。法师仍优先冰环，并只在 8 码内允许闪现；术士优先暗影之怒/暗影烈焰，牧师优先心灵尖啸，元素萨满优先雷暴，平衡德优先台风；猎人会优先尝试冰冻陷阱或原有伤害陷阱，并允许原职业策略在一对一被追击时使用逃脱。猎人会直接给当前 PvP 目标上震荡射击，法师会用减速/冰箭并在低血量时尝试变羊，术士会在贴近或血量受压时尝试恐惧。需要读条的控制会先停止战术移动，再在下一次决策施放。
 
@@ -39,6 +42,8 @@ AiPlayerbot.PvPTactical.Duel = 1
 AiPlayerbot.PvPTactical.Arena = 1
 AiPlayerbot.PvPTactical.Battleground = 1
 AiPlayerbot.PvPTactical.OpenWorld = 1
+AiPlayerbot.PvPTactical.Debug = 0
+AiPlayerbot.PvPTactical.DebugBot =
 
 AiPlayerbot.PvPTactical.DecisionInterval = 200
 AiPlayerbot.PvPTactical.Hunter.MinDistance = 24.0
@@ -59,6 +64,15 @@ AiPlayerbot.PvPTactical.Melee.FlankDistance = 1.5
 AiPlayerbot.PvPTactical.Melee.MinAngle = 100.0
 AiPlayerbot.PvPTactical.Melee.MaxAngle = 145.0
 ```
+
+需要排查单个机器人为何停顿或换路时，可临时打开调试并填写角色名：
+
+```ini
+AiPlayerbot.PvPTactical.Debug = 1
+AiPlayerbot.PvPTactical.DebugBot = 角色名
+```
+
+日志会记录当前目标、距离、血量、移动所有者，以及卡住换路、德鲁伊开始恢复等关键事件。测试结束后关闭；角色名留空会记录所有战术机器人，不适合 2000 Bot 的常态运行。
 
 这些值由 `runtime.defaults.json` 和安装脚本写入正式配置。`MinDistance` 是开始拉距的危险线，`PreferredDistance` 是本次拉距结束线；两条线形成迟滞区，避免反复启停。`RetreatStep` 是单段路径的最大长度，不是最终停止距离。200 ms 只用于刷新距离与战术状态，已有路径不会被重复下发；服务端最低钳制为 150 ms。修改距离或判断频率只需要编辑配置并重启 worldserver，不需要重新编译。
 
