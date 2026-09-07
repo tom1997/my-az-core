@@ -101,6 +101,7 @@ $mythicUiModule = Join-Path $repoRoot 'modules\custom\mod-mythic-plus-ui'
 foreach ($requiredFile in @(
     'include.sh',
     'src\mod_mythic_plus_ui.cpp',
+    'src\mod_mythic_plus_ui_loader.cpp',
     'client\MythicPlusUI.lua',
     'client\MythicPlusUI.toc',
     'data\sql\db-world\mod_mythic_plus_ui.sql',
@@ -109,6 +110,9 @@ foreach ($requiredFile in @(
     if (-not (Test-Path -LiteralPath (Join-Path $mythicUiModule $requiredFile))) {
         throw "大秘境 UI 模块缺少文件：$requiredFile"
     }
+}
+if ((Get-Item -LiteralPath (Join-Path $mythicUiModule 'include.sh')).Length -ne 0) {
+    throw 'mod-mythic-plus-ui/include.sh 必须为空；C++ 注册代码应位于模块 loader.cpp。'
 }
 
 foreach ($script in @('generate-mythic-items.ps1', 'build-client-compat-patch.ps1', 'package-build.ps1')) {
