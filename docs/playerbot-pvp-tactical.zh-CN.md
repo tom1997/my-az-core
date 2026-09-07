@@ -1,6 +1,6 @@
 # Playerbot PvP Tactical：空间控制第一阶段
 
-本发行版通过 `patches/0004-playerbot-pvp-tactical-ranged.patch`、`0005-playerbot-pvp-tactical-melee-flanking.patch` 增加共享 PvP 空间控制器，并由 `0006-playerbot-pvp-cooperative-scheduling.patch` 修复动作调度和决斗入口。它不是需要逐个机器人添加的游戏内策略；是否启用、在哪些场景启用以及距离参数全部由 `playerbots.conf` 决定。
+本发行版通过 `patches/0004-playerbot-pvp-tactical-ranged.patch`、`0005-playerbot-pvp-tactical-melee-flanking.patch` 增加共享 PvP 空间控制器，由 `0006-playerbot-pvp-cooperative-scheduling.patch` 修复动作调度和决斗入口，并由 `0007-playerbot-pvp-ranged-distance-control.patch` 增加持续拉距和远程职业贴身反制。它不是需要逐个机器人添加的游戏内策略；是否启用、在哪些场景启用以及距离参数全部由 `playerbots.conf` 决定。
 
 ## 行为范围
 
@@ -19,6 +19,9 @@
 5. 战术走位不会主动中断正在读条或引导的技能；需要站定的法术仍遵守 3.3.5a 的原版施法规则。
 6. 已在执行的战斗点移动不会被每次判断重新下发，避免来回改目的地造成木讷和抖动。
 7. 非决斗目标超过追击上限时放弃目标，避免机器人跨地图追逐玩家。
+8. 远程进入危险半径后保持“正在拉距”状态，直到达到首选距离才结束，不会在危险边界每次只挪两三码。
+
+贴身时不会无条件逃跑。法师仍优先冰环/闪现，术士优先暗影之怒/暗影烈焰，牧师优先心灵尖啸，元素萨满优先雷暴，平衡德优先台风；猎人会优先尝试冰冻陷阱或原有伤害陷阱，并允许原职业策略在一对一被追击时使用逃脱。技能未学会、冷却或当前不可施放时，才由移动控制器补位。
 
 ## 等级与技能
 
@@ -37,7 +40,10 @@ AiPlayerbot.PvPTactical.DecisionInterval = 900
 AiPlayerbot.PvPTactical.Hunter.MinDistance = 24.0
 AiPlayerbot.PvPTactical.Caster.MinDistance = 18.0
 AiPlayerbot.PvPTactical.Healer.MinDistance = 22.0
-AiPlayerbot.PvPTactical.RetreatStep = 7.0
+AiPlayerbot.PvPTactical.Hunter.PreferredDistance = 32.0
+AiPlayerbot.PvPTactical.Caster.PreferredDistance = 26.0
+AiPlayerbot.PvPTactical.Healer.PreferredDistance = 30.0
+AiPlayerbot.PvPTactical.RetreatStep = 14.0
 AiPlayerbot.PvPTactical.TargetLeashDistance = 55.0
 
 AiPlayerbot.PvPTactical.Melee.Enable = 1
@@ -47,7 +53,7 @@ AiPlayerbot.PvPTactical.Melee.MinAngle = 100.0
 AiPlayerbot.PvPTactical.Melee.MaxAngle = 145.0
 ```
 
-这些值由 `runtime.defaults.json` 和安装脚本写入正式配置。判断间隔低于 750 ms 会被服务端钳制为 750 ms，防止走位连续占用动作选择。修改距离或判断频率只需要编辑配置并重启 worldserver，不需要重新编译。
+这些值由 `runtime.defaults.json` 和安装脚本写入正式配置。`MinDistance` 是开始拉距的危险线，`PreferredDistance` 是本次拉距结束线；两条线形成迟滞区，避免反复启停。`RetreatStep` 是单段路径的最大长度，不是最终停止距离。判断间隔低于 750 ms 会被服务端钳制为 750 ms，防止走位连续占用动作选择。修改距离或判断频率只需要编辑配置并重启 worldserver，不需要重新编译。
 
 Dungeon Clear 在决斗、竞技场和战场中会让自己的动作失效，并立即释放它设置的 `passive`、`stay` 等站位钉住状态，避免副本自动清理逻辑混入 PvP。
 

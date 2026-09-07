@@ -103,6 +103,22 @@ if ($pvpCooperativePatchText -match '(?s)bool PvpTacticalMeleeFlankAction::isUse
     throw '原版 ranged flee 抑制逻辑被错误放入近战 flank 判断。'
 }
 
+$pvpRangedDistancePatch = Join-Path $repoRoot 'patches\0007-playerbot-pvp-ranged-distance-control.patch'
+if (-not (Test-Path -LiteralPath $pvpRangedDistancePatch)) { throw '缺少 Playerbot PvP 远程持续拉距补丁。' }
+$pvpRangedDistancePatchText = Get-Content -LiteralPath $pvpRangedDistancePatch -Raw
+foreach ($requiredMarker in @(
+    'PreferredDistance',
+    'retreating = false',
+    'pvp freezing trap',
+    'EnemyTooCloseForAutoShotTrigger::IsActive',
+    'shadowfury',
+    'psychic scream'
+)) {
+    if ($pvpRangedDistancePatchText -notmatch [regex]::Escape($requiredMarker)) {
+        throw "Playerbot PvP 远程持续拉距补丁缺少标记：$requiredMarker"
+    }
+}
+
 $sqlFiles = @(Get-ChildItem -LiteralPath (Join-Path $repoRoot 'modules\custom') -Filter '*.sql' -File -Recurse -ErrorAction SilentlyContinue)
 foreach ($file in $sqlFiles) {
     $relative = [IO.Path]::GetRelativePath($repoRoot, $file.FullName).Replace('\', '/')
