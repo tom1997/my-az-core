@@ -31,12 +31,13 @@ new file mode 100644
 index 0000000..081b486
 --- /dev/null
 +++ b/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
-@@ -0,0 +1,63 @@
+@@ -0,0 +1,64 @@
 +/* Class-aware PvP control actions. */
 +#include "PvpTacticalActions.h"
 +#include "AiObjectContext.h"
 +#include "Player.h"
 +#include "PlayerbotAI.h"
++#include "Playerbots.h"
 +#include "PvpTacticalValue.h"
 +#include "SharedDefines.h"
 +#include "Unit.h"
@@ -127,4 +128,3 @@ index 11cf2e3..b803696 100644
      // The pet-attack trigger is commented out because it was forcing the bot's pet to attack, overriding stay and follow commands.
      // Pets will automatically attack the bot's enemy if they are in "defensive" or "aggressive"
      // stance, or if the master issues an attack command.
-

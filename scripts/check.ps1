@@ -90,6 +90,11 @@ foreach ($pvpPatchName in @(
     }
 }
 
+$pvpClassPatchText = Get-Content -LiteralPath (Join-Path $repoRoot 'patches\0010-playerbot-pvp-warrior-paladin-death-knight.patch') -Raw
+if ($pvpClassPatchText -match 'AI_VALUE\(' -and $pvpClassPatchText -notmatch '#include "Playerbots\.h"') {
+    throw '使用 AI_VALUE 的 PvP 动作缺少 Playerbots.h。'
+}
+
 $pvpStatePatchText = Get-Content -LiteralPath (Join-Path $repoRoot 'patches\0009-playerbot-pvp-state-capabilities-dr-movement.patch') -Raw
 foreach ($requiredMarker in @('PvpTacticalState', 'PvpMovementOwner', 'DIMINISHING_LEVEL_IMMUNE', 'DecisionInterval", 200')) {
     if ($pvpStatePatchText -notmatch [regex]::Escape($requiredMarker)) {
