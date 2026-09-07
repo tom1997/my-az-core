@@ -37,6 +37,8 @@
 
 Windows 下也可直接双击仓库根目录的 `启动服务端.cmd` 和 `关闭服务端.cmd`。关闭入口会按 World、Auth、MySQL 的顺序停止服务，并让 MySQL 安全刷盘退出。
 
+以后 GitHub Actions 构建成功后，可直接双击 `自动更新测试版.cmd`。它会自动下载当前分支最新的成功构建，并完成校验、备份、停服、安装、数据库迁移和重新启动。发布到 Releases 的稳定版本则使用 `自动更新正式版.cmd`。详细说明见 [`docs/operations.zh-CN.md`](docs/operations.zh-CN.md)。
+
 ## 开发模块
 
 ```powershell

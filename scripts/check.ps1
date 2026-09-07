@@ -5,6 +5,19 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 
+$githubUpdater = Join-Path $repoRoot 'scripts\update-from-github.ps1'
+if (-not (Test-Path -LiteralPath $githubUpdater)) { throw '缺少 GitHub 自动更新脚本。' }
+$githubUpdaterText = Get-Content -LiteralPath $githubUpdater -Raw
+foreach ($requiredMarker in @('gh run download', 'Get-FileHash', 'update.ps1', 'start.ps1')) {
+    if ($githubUpdaterText -notmatch [regex]::Escape($requiredMarker)) {
+        throw "GitHub 自动更新脚本缺少标记：$requiredMarker"
+    }
+}
+[void][scriptblock]::Create($githubUpdaterText)
+foreach ($launcher in @('自动更新测试版.cmd', '自动更新正式版.cmd')) {
+    if (-not (Test-Path -LiteralPath (Join-Path $repoRoot $launcher))) { throw "缺少一键更新入口：$launcher" }
+}
+
 $lockPath = Join-Path $repoRoot 'upstreams.lock.json'
 $defaultsPath = Join-Path $repoRoot 'runtime.defaults.json'
 $lock = Get-Content -LiteralPath $lockPath -Raw | ConvertFrom-Json
