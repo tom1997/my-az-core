@@ -165,6 +165,27 @@ if ($pvpPhaseOnePolishPatchText -match '(?m)^\+\s*target->HasAuraWithMechanic\(P
     throw '不确定的复杂控制效果不能继续依赖宽泛 mechanic mask 作为可安全输出的兜底。'
 }
 
+$pvpControlWindowPatch = Join-Path $repoRoot 'patches\0021-playerbot-pvp-control-windows.patch'
+if (-not (Test-Path -LiteralPath $pvpControlWindowPatch)) { throw '缺少 Playerbot PvP 控制窗口补丁。' }
+$pvpControlWindowPatchText = Get-Content -LiteralPath $pvpControlWindowPatch -Raw
+foreach ($requiredMarker in @(
+    'PvpCcUsage',
+    'SetupThenBreak',
+    'PvpControlWindow',
+    'EstimatePvpControlWindowRemainingMs',
+    'ShouldStartPvpControlWindowDamage',
+    'CanPrecastPvpControlWindow',
+    'control-window-reposition',
+    'control-window-release',
+    'getStandState()',
+    'ExistingPeriodicDamageShortensBreakableExpectation',
+    'Duel control-window behavior'
+)) {
+    if ($pvpControlWindowPatchText -notmatch [regex]::Escape($requiredMarker)) {
+        throw "Playerbot PvP 控制窗口补丁缺少标记：$requiredMarker"
+    }
+}
+
 $pvpClassPatchText = Get-Content -LiteralPath (Join-Path $repoRoot 'patches\0010-playerbot-pvp-warrior-paladin-death-knight.patch') -Raw
 if ($pvpClassPatchText -match 'AI_VALUE\(' -and $pvpClassPatchText -notmatch '#include "Playerbots\.h"') {
     throw '使用 AI_VALUE 的 PvP 动作缺少 Playerbots.h。'

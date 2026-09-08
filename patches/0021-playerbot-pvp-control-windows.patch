@@ -1,0 +1,675 @@
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
+index af27bc3a..d1ddc671 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
+@@ -61,6 +61,21 @@ bool NeedsSlow(PlayerbotAI* botAI, std::string const& aura, Unit* target)
+     return target && !botAI->HasAura(aura, target);
+ }
+ 
++float GetControlWindowPreferredDistance(PlayerbotAI* botAI, Player* bot, Unit* target)
++{
++    if (target && target->IsPlayer() && botAI->IsRanged(target->ToPlayer(), true))
++        return std::max(sPlayerbotAIConfig.pvpTacticalRangedOpponentEmergencyDistance + 2.0f,
++                        sPlayerbotAIConfig.pvpTacticalRangedOpponentPreferredDistance);
++    if (bot->getClass() == CLASS_HUNTER)
++        return std::max(sPlayerbotAIConfig.pvpTacticalHunterMinDistance + 2.0f,
++                        sPlayerbotAIConfig.pvpTacticalHunterPreferredDistance);
++    if (botAI->IsHeal(bot))
++        return std::max(sPlayerbotAIConfig.pvpTacticalHealerMinDistance + 2.0f,
++                        sPlayerbotAIConfig.pvpTacticalHealerPreferredDistance);
++    return std::max(sPlayerbotAIConfig.pvpTacticalCasterMinDistance + 2.0f,
++                    sPlayerbotAIConfig.pvpTacticalCasterPreferredDistance);
++}
++
+ bool HasArtOfWarProc(Player* bot)
+ {
+     return bot && (bot->HasAura(53489) || bot->HasAura(59578));
+@@ -112,13 +127,13 @@ int32 MechanicControlRemainingMs(Unit* target, Mechanics mechanic)
+     return remaining;
+ }
+ 
+-bool TryControlWindowRecovery(PlayerbotAI* botAI, Unit* target)
++bool TryControlWindowRecovery(PlayerbotAI* botAI, Unit* target, PvpControlWindow const& window)
+ {
+     Player* bot = botAI->GetBot();
+     if (bot->GetHealthPct() >= sPlayerbotAIConfig.pvpTacticalRecoveryHealthPct)
+         return false;
+ 
+-    int32 const remaining = BreakableControlRemainingMs(botAI, target);
++    int32 const remaining = int32(window.expectedRemainingMs);
+     if (remaining < int32(sPlayerbotAIConfig.pvpTacticalRecoveryMinControlMs))
+         return false;
+ 
+@@ -133,6 +148,12 @@ bool TryControlWindowRecovery(PlayerbotAI* botAI, Unit* target)
+     if (bot->IsNonMeleeSpellCast(false))
+         return true;
+ 
++    if (botAI->DoSpecificAction("healthstone", Event(), true))
++    {
++        DebugPvpTactical(botAI, "control-window-healthstone", target);
++        return true;
++    }
++
+     bool healed = false;
+     switch (bot->getClass())
+     {
+@@ -179,10 +200,111 @@ bool TryControlWindowRecovery(PlayerbotAI* botAI, Unit* target)
+             return true;
+         }
+ 
+-    // Do not immediately break a useful recovery control merely because this
+-    // bot has no heal or bandage available. The next tick may gain enough mana
+-    // or finish a global cooldown; resume pressure near the end of the aura.
+-    return true;
++    // No usable recovery remains on this tick. The control-window policy may
++    // now prepare pressure instead of idling for the full aura duration.
++    return false;
++}
++
++void ResetDuelControlWindow(PvpTacticalState& state)
++{
++    state.controlWindowTargetGuid.Clear();
++    state.controlWindowStartedAtMs = 0;
++    state.controlWindowSpellId = 0;
++    state.controlWindowLastRemainingMs = 0;
++    state.controlWindowReadyToBreak = false;
++}
++
++bool TryDuelControlWindow(PlayerbotAI* botAI, Unit* target, PvpSnapshot const& snapshot)
++{
++    Player* bot = botAI->GetBot();
++    PvpTacticalState& state = GetPvpTacticalState(botAI);
++    PvpControlWindow const& window = snapshot.controlWindow;
++    bool const duelPrimary = bot->duel && bot->duel->Opponent == target &&
++                             bot->duel->State == DUEL_STATE_IN_PROGRESS;
++    if (!duelPrimary || !window.active || window.targetGuid != target->GetGUID() ||
++        (window.controlState != PvpControlState::DamageBreakable &&
++         window.controlState != PvpControlState::DamageImmune))
++    {
++        ResetDuelControlWindow(state);
++        return false;
++    }
++
++    uint32 const now = getMSTime();
++    bool const newWindow = state.controlWindowTargetGuid != target->GetGUID() ||
++                           state.controlWindowSpellId != window.controlSpellId ||
++                           window.remainingMs > state.controlWindowLastRemainingMs + 500;
++    if (newWindow)
++    {
++        state.controlWindowTargetGuid = target->GetGUID();
++        state.controlWindowStartedAtMs = now;
++        state.controlWindowSpellId = window.controlSpellId;
++        state.controlWindowReadyToBreak = false;
++        DebugPvpTactical(botAI, "control-window-start", target);
++    }
++    state.controlWindowLastRemainingMs = window.remainingMs;
++
++    bot->AttackStop();
++    botAI->PetFollow();
++
++    if (IsPvpMovementActive(botAI, bot, PvpMovementOwner::Retreat))
++        return true;
++
++    bool const ranged = botAI->IsRanged(bot, true) || botAI->IsHeal(bot);
++    bool positioningComplete = true;
++    if (ranged && window.expectedRemainingMs > 500)
++    {
++        float const preferredDistance = GetControlWindowPreferredDistance(botAI, bot, target);
++        state.desiredDistance = preferredDistance;
++        if (bot->GetDistance2d(target) + 1.0f < preferredDistance)
++        {
++            positioningComplete = false;
++            state.retreating = true;
++            if (botAI->DoSpecificAction("pvp tactical retreat", Event(), true))
++            {
++                DebugPvpTactical(botAI, "control-window-reposition", target);
++                return true;
++            }
++        }
++    }
++
++    if (bot->isMoving())
++    {
++        StopOwnedPvpMovement(botAI);
++        DebugPvpTactical(botAI, "control-window-positioned", target);
++        return true;
++    }
++
++    if (TryControlWindowRecovery(botAI, target, window))
++        return true;
++
++    if (window.usage == PvpCcUsage::Reset && bot->getClass() == CLASS_ROGUE)
++    {
++        if (!botAI->HasAura("stealth", bot) &&
++            (TrySpell(botAI, "vanish", bot, false) ||
++             (!bot->IsInCombat() && TrySpell(botAI, "stealth", bot, false))))
++        {
++            DebugPvpTactical(botAI, "control-window-reset-stealth", target);
++            return true;
++        }
++        if (bot->GetPower(POWER_ENERGY) < 80 && window.expectedRemainingMs > 800)
++        {
++            DebugPvpTactical(botAI, "control-window-pool", target);
++            return true;
++        }
++    }
++
++    if (window.controlState == PvpControlState::DamageBreakable &&
++        (window.usage == PvpCcUsage::SetupThenBreak || window.usage == PvpCcUsage::Reposition))
++    {
++        if (!positioningComplete)
++            return false;
++        if (now - state.controlWindowStartedAtMs < 250)
++            return true;
++        if (!state.controlWindowReadyToBreak)
++            DebugPvpTactical(botAI, "control-window-release", target);
++        state.controlWindowReadyToBreak = true;
++    }
++    return false;
+ }
+ 
+ bool TargetControlled(Unit* target)
+@@ -336,7 +458,7 @@ bool TryRogueReset(PlayerbotAI* botAI, Unit* target)
+     bool const stealthed = botAI->HasAura("stealth", bot);
+     if (!stealthed)
+     {
+-        if (!bot->IsInCombat() && bot->GetStandState() == UNIT_STAND_STATE_SIT && bot->GetHealthPct() < 70.0f)
++        if (!bot->IsInCombat() && bot->getStandState() == UNIT_STAND_STATE_SIT && bot->GetHealthPct() < 70.0f)
+             return true;
+         if (TrySpell(botAI, "vanish", bot, false) || (!bot->IsInCombat() && TrySpell(botAI, "stealth", bot, false)))
+             return true;
+@@ -934,11 +1056,13 @@ bool PvpTacticalClassControlAction::Execute(Event /*event*/)
+     PvpSnapshot const snapshot = GetPvpSnapshot(botAI);
+     if (EnforcePvpDamageGuard(botAI, target))
+         return true;
++    if (TryDuelControlWindow(botAI, target, snapshot))
++        return true;
+     if (TryPvpPetMicro(botAI, target, snapshot))
+         return true;
+     if (TryAntiStealthProbe(botAI, target))
+         return true;
+-    if (TryControlWindowRecovery(botAI, target))
++    if (TryControlWindowRecovery(botAI, target, snapshot.controlWindow))
+         return true;
+     if (TryRogueReset(botAI, target))
+         return true;
+diff --git a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp
+index 480118ed..99ebe620 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp
+@@ -435,6 +435,30 @@ void StartEnemyCastObservation(PlayerbotAI* botAI, Unit* caster, Spell* spell, b
+     state.interruptCommitPct = float(urand(minPct, maxPct)) / 100.0f;
+ }
+ 
++bool IsPeriodicPvpDamageAura(SpellInfo const* spellInfo)
++{
++    if (!spellInfo)
++        return false;
++    for (SpellEffectInfo const& effect : spellInfo->Effects)
++        if (effect.ApplyAuraName == SPELL_AURA_PERIODIC_DAMAGE ||
++            effect.ApplyAuraName == SPELL_AURA_PERIODIC_DAMAGE_PERCENT ||
++            effect.ApplyAuraName == SPELL_AURA_PERIODIC_LEECH)
++            return true;
++    return false;
++}
++
++bool IsPvpAreaOrChainSpell(SpellInfo const* spellInfo)
++{
++    if (!spellInfo)
++        return false;
++    if (spellInfo->IsTargetingArea())
++        return true;
++    for (SpellEffectInfo const& effect : spellInfo->Effects)
++        if (effect.IsTargetingArea() || effect.ChainTarget > 1)
++            return true;
++    return false;
++}
++
+ uint32 FindPetSpell(PlayerbotAI* botAI, Pet* pet, std::initializer_list<char const*> names)
+ {
+     if (!botAI || !pet)
+@@ -503,6 +527,100 @@ PvpControlState GetPvpControlState(Unit* target)
+         target->HasAuraType(SPELL_AURA_MOD_CHARM), target->HasAuraType(SPELL_AURA_AOE_CHARM));
+ }
+ 
++PvpCcUsage ClassifyPvpCcUsage(uint8 playerClass, PvpArchetype archetype, PvpControlState controlState,
++                              uint64 mechanicMask, bool duel, uint32 remainingMs)
++{
++    if (controlState == PvpControlState::None)
++        return PvpCcUsage::None;
++    if (controlState == PvpControlState::DamageSafe)
++        return PvpCcUsage::BreakForKill;
++    if (controlState == PvpControlState::DamageImmune)
++        return PvpCcUsage::Reposition;
++
++    // Until ArenaTeamPlan supplies an explicit reservation, non-duel
++    // breakable control is protected. A solo bot must not guess that a
++    // teammate's off-target CC was meant to be broken.
++    if (!duel)
++        return PvpCcUsage::Preserve;
++
++    switch (playerClass)
++    {
++        case CLASS_WARLOCK:
++        case CLASS_PALADIN:
++            return PvpCcUsage::SetupThenBreak;
++        case CLASS_PRIEST:
++            return archetype == PvpArchetype::DisciplinePriest ? PvpCcUsage::Reposition :
++                                                                 PvpCcUsage::SetupThenBreak;
++        case CLASS_MAGE:
++        case CLASS_SHAMAN:
++        case CLASS_DRUID:
++            return PvpCcUsage::Preserve;
++        case CLASS_HUNTER:
++            return mechanicMask & ((1ULL << MECHANIC_FREEZE) | (1ULL << MECHANIC_SLEEP)) ?
++                PvpCcUsage::Preserve : PvpCcUsage::SetupThenBreak;
++        case CLASS_ROGUE:
++            if ((mechanicMask & (1ULL << MECHANIC_SAPPED)) || remainingMs > 6000)
++                return PvpCcUsage::Reset;
++            return PvpCcUsage::SetupThenBreak;
++        default:
++            return PvpCcUsage::Preserve;
++    }
++}
++
++uint32 EstimatePvpControlWindowRemainingMs(PvpControlState controlState, uint32 remainingMs,
++                                           bool hasPeriodicDamage)
++{
++    if (controlState == PvpControlState::DamageBreakable && hasPeriodicDamage)
++        return std::min<uint32>(remainingMs, 1200);
++    return remainingMs;
++}
++
++PvpControlWindow GetPvpControlWindow(PlayerbotAI* botAI, Unit* target, PvpArchetype archetype)
++{
++    PvpControlWindow result;
++    Player* bot = botAI ? botAI->GetBot() : nullptr;
++    if (!bot || !target)
++        return result;
++
++    result.targetGuid = target->GetGUID();
++    result.controlState = GetPvpControlState(target);
++    if (result.controlState == PvpControlState::None)
++        return result;
++
++    for (auto const& applied : target->GetAppliedAuras())
++    {
++        Aura* aura = applied.second ? applied.second->GetBase() : nullptr;
++        SpellInfo const* info = aura ? aura->GetSpellInfo() : nullptr;
++        if (!info || info->IsPositive() || aura->GetDuration() <= 0)
++            continue;
++
++        if (IsPeriodicPvpDamageAura(info))
++            result.hasPeriodicDamage = true;
++
++        uint64 const mechanicMask = info->GetAllEffectsMechanicMask();
++        PvpControlState const auraControl = ClassifyPvpControlMetadata(
++            mechanicMask, info->AuraInterruptFlags, false);
++        if (auraControl != result.controlState)
++            continue;
++
++        result.mechanicMask |= mechanicMask;
++        uint32 const duration = uint32(aura->GetDuration());
++        if (duration > result.remainingMs)
++        {
++            result.remainingMs = duration;
++            result.controlSpellId = info->Id;
++        }
++    }
++
++    result.active = result.remainingMs > 0;
++    result.expectedRemainingMs = EstimatePvpControlWindowRemainingMs(
++        result.controlState, result.remainingMs, result.hasPeriodicDamage);
++    bool const duel = bot->duel && bot->duel->Opponent == target && bot->duel->State == DUEL_STATE_IN_PROGRESS;
++    result.usage = ClassifyPvpCcUsage(bot->getClass(), archetype, result.controlState,
++                                      result.mechanicMask, duel, result.remainingMs);
++    return result;
++}
++
+ float CalculatePvpControlPressureBonus(bool damageSafe, bool stunned, bool silenced, bool rooted,
+                                        bool casterOrHealer, bool melee)
+ {
+@@ -578,6 +696,53 @@ bool ShouldBlockPvpAreaDamage(bool areaDamage, bool breakableNearTarget, bool br
+     return areaDamage && (breakableNearTarget || breakableNearCaster);
+ }
+ 
++bool ShouldStartPvpControlWindowDamage(PvpControlState control, PvpCcUsage usage, bool duelPrimaryTarget,
++                                       bool setupComplete, bool hardCast, bool channeled, bool areaDamage,
++                                       uint32 expectedRemainingMs, uint32 expectedImpactMs)
++{
++    if (!duelPrimaryTarget || (control != PvpControlState::DamageBreakable &&
++                               control != PvpControlState::DamageImmune) ||
++        !hardCast || channeled || areaDamage || !expectedRemainingMs)
++        return false;
++
++    // Fear, short disorients and similar setup controls may be deliberately
++    // broken by a hard cast after the bot has created distance and exhausted
++    // useful recovery. Damage-immune control can only be timed for expiry.
++    if (control == PvpControlState::DamageBreakable && setupComplete &&
++        (usage == PvpCcUsage::SetupThenBreak || usage == PvpCcUsage::Reposition))
++        return true;
++
++    // Preserve/Reset windows still permit a real precast. The small tolerance
++    // absorbs decision-tick jitter while keeping expected damage arrival at or
++    // after the control expires.
++    return expectedImpactMs + 150 >= expectedRemainingMs;
++}
++
++bool CanPrecastPvpControlWindow(PlayerbotAI* botAI, Unit* target, SpellInfo const* spellInfo)
++{
++    Player* bot = botAI ? botAI->GetBot() : nullptr;
++    if (!bot || !target || !spellInfo || !IsPvpDamageSpell(spellInfo) ||
++        !bot->duel || bot->duel->Opponent != target || bot->duel->State != DUEL_STATE_IN_PROGRESS)
++        return false;
++
++    PvpSnapshot const snapshot = GetPvpSnapshot(botAI);
++    PvpControlWindow const& window = snapshot.controlWindow;
++    if (!window.active || window.targetGuid != target->GetGUID())
++        return false;
++
++    uint32 const castMs = spellInfo->IsChanneled() ? 0 :
++        uint32(std::max<int32>(0, spellInfo->CalcCastTime(bot)));
++    uint32 travelMs = 0;
++    if (spellInfo->Speed > 0.0f)
++        travelMs = uint32(std::max(0.0f, bot->GetDistance(target) / spellInfo->Speed * 1000.0f));
++    bool const setupComplete = GetPvpTacticalState(botAI).controlWindowReadyToBreak &&
++                               GetPvpTacticalState(botAI).controlWindowTargetGuid == target->GetGUID();
++    return ShouldStartPvpControlWindowDamage(
++        window.controlState, window.usage, true, setupComplete, castMs >= 750,
++        spellInfo->IsChanneled(), IsPvpAreaOrChainSpell(spellInfo),
++        window.expectedRemainingMs, castMs + travelMs);
++}
++
+ bool CanDamagePvpTarget(PlayerbotAI* botAI, Unit* target, SpellInfo const* spellInfo)
+ {
+     Player* bot = botAI ? botAI->GetBot() : nullptr;
+@@ -587,7 +752,8 @@ bool CanDamagePvpTarget(PlayerbotAI* botAI, Unit* target, SpellInfo const* spell
+     if (target->IsPlayer() && bot->IsHostileTo(target))
+     {
+         PvpControlState const control = GetPvpControlState(target);
+-        if (ShouldBlockPvpDamage(control, damagingAction))
++        if (ShouldBlockPvpDamage(control, damagingAction) &&
++            !CanPrecastPvpControlWindow(botAI, target, spellInfo))
+             return false;
+     }
+     if (!spellInfo || !damagingAction)
+@@ -636,9 +802,13 @@ void PvpTacticalState::Reset()
+     observedOwnCastSpellId = 0;
+     hunterCcStartedAtMs = 0;
+     lastPetControlAtMs = 0;
++    controlWindowStartedAtMs = 0;
++    controlWindowSpellId = 0;
++    controlWindowLastRemainingMs = 0;
+     trackedPrimaryTarget.Clear();
+     observedEnemyCasterGuid.Clear();
+     hunterCcTargetGuid.Clear();
++    controlWindowTargetGuid.Clear();
+     desiredDistance = 0.0f;
+     movementProgressX = 0.0f;
+     movementProgressY = 0.0f;
+@@ -664,6 +834,7 @@ void PvpTacticalState::Reset()
+     interruptCommitted = false;
+     ownFakeCastPlanned = false;
+     ownFakeCastEvaluated = false;
++    controlWindowReadyToBreak = false;
+     hunterCcStage = PvpHunterCcStage::None;
+     duelOpenerStep = 0;
+     enemyFakeCastStreak = 0;
+@@ -894,6 +1065,7 @@ PvpSnapshot PvpSnapshotValue::Calculate()
+     snapshot.primaryTarget = current->GetGUID();
+     snapshot.targetMajorDefensive = HasMajorDefensive(current);
+     snapshot.targetControlState = GetPvpControlState(current);
++    snapshot.controlWindow = GetPvpControlWindow(botAI, current, snapshot.archetype);
+ 
+     std::vector<Unit*> candidates;
+     std::set<ObjectGuid> seen;
+@@ -1007,6 +1179,12 @@ PvpSnapshot PvpSnapshotValue::Calculate()
+     else if (bot->GetHealthPct() <= sPlayerbotAIConfig.pvpTacticalRecoveryHealthPct &&
+              snapshot.targetControlState != PvpControlState::None)
+         snapshot.intent = PvpIntent::Recover;
++    else if (snapshot.controlWindow.active && snapshot.controlWindow.usage == PvpCcUsage::Reset)
++        snapshot.intent = PvpIntent::Reset;
++    else if (snapshot.controlWindow.active && snapshot.controlWindow.usage == PvpCcUsage::Reposition)
++        snapshot.intent = PvpIntent::Kite;
++    else if (snapshot.controlWindow.active && snapshot.controlWindow.usage != PvpCcUsage::BreakForKill)
++        snapshot.intent = PvpIntent::Control;
+     else if ((botAI->IsRanged(bot, true) || botAI->IsHeal(bot)) && !botAI->IsRanged(enemy, true) &&
+              distance < state.desiredDistance)
+         snapshot.intent = PvpIntent::Kite;
+@@ -1163,12 +1341,14 @@ void DebugPvpTactical(PlayerbotAI* botAI, std::string const& message, Unit* targ
+     LOG_INFO("playerbots",
+              "[PvPTactical] bot={} event={} mode={} intent={} archetype={} owner={} target={} dist={:.1f} hp={:.1f} "
+              "kill={:.2f} burst={:.2f} safety={:.2f} targetScore={:.2f}/{:.2f} control={} "
+-             "interrupt={:.2f} pressure={:.2f}/{:.2f}",
++             "ccUsage={} ccRemaining={} ccDot={} interrupt={:.2f} pressure={:.2f}/{:.2f}",
+              bot->GetName(), message, uint32(state.mode), uint32(snapshot.intent), uint32(snapshot.archetype),
+              uint32(state.movementOwner), target ? target->GetName() : "none",
+              target ? bot->GetDistance2d(target) : 0.0f, bot->GetHealthPct(), snapshot.killWindowScore,
+              snapshot.incomingBurstScore, snapshot.castSafetyScore, snapshot.currentTargetScore,
+              snapshot.recommendedTargetScore, uint32(snapshot.targetControlState),
++             uint32(snapshot.controlWindow.usage), snapshot.controlWindow.expectedRemainingMs,
++             snapshot.controlWindow.hasPeriodicDamage,
+              snapshot.enemyInterruptThreatScore, snapshot.magicPressureScore, snapshot.physicalPressureScore);
+ }
+ 
+@@ -1282,6 +1462,8 @@ bool IsSafeForPvpCast(PlayerbotAI* botAI, Unit* spellTarget, SpellInfo const* sp
+ {
+     if (!botAI || castMs < 1000 || !IsPvpTacticalContextEnabled(botAI->GetBot()))
+         return true;
++    if (CanPrecastPvpControlWindow(botAI, spellTarget, spellInfo))
++        return true;
+     PvpSnapshot const snapshot = GetPvpSnapshot(botAI);
+     PvpCastPurpose const purpose = GetPvpCastPurpose(spellInfo);
+     float minimumSafety = sPlayerbotAIConfig.pvpTacticalCastSafetyMin;
+diff --git a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h
+index f60fd0bc..ac0a8d83 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h
++++ b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h
+@@ -63,6 +63,16 @@ enum class PvpControlState : uint8
+     DamageImmune
+ };
+ 
++enum class PvpCcUsage : uint8
++{
++    None,
++    Preserve,
++    SetupThenBreak,
++    BreakForKill,
++    Reset,
++    Reposition
++};
++
+ enum class PvpCastPurpose : uint8
+ {
+     Damage,
+@@ -126,9 +136,13 @@ struct PvpTacticalState
+     uint32 observedOwnCastSpellId = 0;
+     uint32 hunterCcStartedAtMs = 0;
+     uint32 lastPetControlAtMs = 0;
++    uint32 controlWindowStartedAtMs = 0;
++    uint32 controlWindowSpellId = 0;
++    uint32 controlWindowLastRemainingMs = 0;
+     ObjectGuid trackedPrimaryTarget;
+     ObjectGuid observedEnemyCasterGuid;
+     ObjectGuid hunterCcTargetGuid;
++    ObjectGuid controlWindowTargetGuid;
+     float desiredDistance = 0.0f;
+     float movementProgressX = 0.0f;
+     float movementProgressY = 0.0f;
+@@ -154,6 +168,7 @@ struct PvpTacticalState
+     bool interruptCommitted = false;
+     bool ownFakeCastPlanned = false;
+     bool ownFakeCastEvaluated = false;
++    bool controlWindowReadyToBreak = false;
+     PvpHunterCcStage hunterCcStage = PvpHunterCcStage::None;
+     uint8 duelOpenerStep = 0;
+     uint8 enemyFakeCastStreak = 0;
+@@ -184,6 +199,19 @@ struct PvpPetSnapshot
+     bool defensiveReady = false;
+ };
+ 
++struct PvpControlWindow
++{
++    ObjectGuid targetGuid;
++    PvpControlState controlState = PvpControlState::None;
++    PvpCcUsage usage = PvpCcUsage::None;
++    uint64 mechanicMask = 0;
++    uint32 controlSpellId = 0;
++    uint32 remainingMs = 0;
++    uint32 expectedRemainingMs = 0;
++    bool hasPeriodicDamage = false;
++    bool active = false;
++};
++
+ struct PvpSnapshot
+ {
+     PvpIntent intent = PvpIntent::Pressure;
+@@ -193,6 +221,7 @@ struct PvpSnapshot
+     ObjectGuid ccTarget;
+     PvpAllyTriage triage;
+     PvpPetSnapshot pet;
++    PvpControlWindow controlWindow;
+     uint32 capturedAtMs = 0;
+     uint32 enemyCastSpellId = 0;
+     uint32 enemyCastRemainingMs = 0;
+@@ -243,6 +272,11 @@ PvpControlState ClassifyPvpControlMetadata(uint64 mechanicMask, uint32 auraInter
+ PvpControlState ClassifyPvpControlFallback(bool metadataDamageSafe, bool stunned, bool rooted, bool silenced,
+                                            bool feared, bool confused, bool charmed, bool areaCharmed);
+ PvpControlState GetPvpControlState(Unit* target);
++PvpCcUsage ClassifyPvpCcUsage(uint8 playerClass, PvpArchetype archetype, PvpControlState controlState,
++                              uint64 mechanicMask, bool duel, uint32 remainingMs);
++uint32 EstimatePvpControlWindowRemainingMs(PvpControlState controlState, uint32 remainingMs,
++                                           bool hasPeriodicDamage);
++PvpControlWindow GetPvpControlWindow(PlayerbotAI* botAI, Unit* target, PvpArchetype archetype);
+ float CalculatePvpControlPressureBonus(bool damageSafe, bool stunned, bool silenced, bool rooted,
+                                        bool casterOrHealer, bool melee);
+ float GetPvpControlPressureBonus(PlayerbotAI* botAI, Unit* target);
+@@ -250,6 +284,10 @@ PvpCastPurpose GetPvpCastPurpose(SpellInfo const* spellInfo);
+ bool IsPvpDamageSpell(SpellInfo const* spellInfo);
+ bool ShouldBlockPvpDamage(PvpControlState control, bool damagingAction);
+ bool ShouldBlockPvpAreaDamage(bool areaDamage, bool breakableNearTarget, bool breakableNearCaster);
++bool ShouldStartPvpControlWindowDamage(PvpControlState control, PvpCcUsage usage, bool duelPrimaryTarget,
++                                       bool setupComplete, bool hardCast, bool channeled, bool areaDamage,
++                                       uint32 expectedRemainingMs, uint32 expectedImpactMs);
++bool CanPrecastPvpControlWindow(PlayerbotAI* botAI, Unit* target, SpellInfo const* spellInfo);
+ bool CanDamagePvpTarget(PlayerbotAI* botAI, Unit* target, SpellInfo const* spellInfo = nullptr);
+ bool HasBreakablePvpControlNearby(PlayerbotAI* botAI, Unit* center, float radius);
+ void UpdatePvpTacticalState(PlayerbotAI* botAI, Unit* target);
+diff --git a/modules/mod-playerbots/t/PvpTacticalPolicyTests.cxx b/modules/mod-playerbots/t/PvpTacticalPolicyTests.cxx
+index 87847f7a..c96d0977 100644
+--- a/modules/mod-playerbots/t/PvpTacticalPolicyTests.cxx
++++ b/modules/mod-playerbots/t/PvpTacticalPolicyTests.cxx
+@@ -80,6 +80,84 @@ TEST(PvpControlPolicy, PressureBonusReflectsHowMuchTheTargetLoses)
+     EXPECT_FLOAT_EQ(0.0f, CalculatePvpControlPressureBonus(false, true, true, true, true, true));
+ }
+ 
++TEST(PvpControlWindowPolicy, UsageSeparatesPreserveSetupResetAndKillWindows)
++{
++    EXPECT_EQ(PvpCcUsage::BreakForKill,
++              ClassifyPvpCcUsage(CLASS_ROGUE, PvpArchetype::SubtletyRogue,
++                                 PvpControlState::DamageSafe, 1ULL << MECHANIC_STUN, true, 5000));
++    EXPECT_EQ(PvpCcUsage::Preserve,
++              ClassifyPvpCcUsage(CLASS_WARLOCK, PvpArchetype::AfflictionWarlock,
++                                 PvpControlState::DamageBreakable, 1ULL << MECHANIC_FEAR, false, 7000));
++    EXPECT_EQ(PvpCcUsage::SetupThenBreak,
++              ClassifyPvpCcUsage(CLASS_WARLOCK, PvpArchetype::AfflictionWarlock,
++                                 PvpControlState::DamageBreakable, 1ULL << MECHANIC_FEAR, true, 7000));
++    EXPECT_EQ(PvpCcUsage::Preserve,
++              ClassifyPvpCcUsage(CLASS_MAGE, PvpArchetype::FrostMage,
++                                 PvpControlState::DamageBreakable, 1ULL << MECHANIC_POLYMORPH, true, 7000));
++    EXPECT_EQ(PvpCcUsage::Reset,
++              ClassifyPvpCcUsage(CLASS_ROGUE, PvpArchetype::SubtletyRogue,
++                                 PvpControlState::DamageBreakable, 1ULL << MECHANIC_SAPPED, true, 7000));
++    EXPECT_EQ(PvpCcUsage::SetupThenBreak,
++              ClassifyPvpCcUsage(CLASS_ROGUE, PvpArchetype::SubtletyRogue,
++                                 PvpControlState::DamageBreakable, 1ULL << MECHANIC_DISORIENTED, true, 4000));
++    EXPECT_EQ(PvpCcUsage::Reposition,
++              ClassifyPvpCcUsage(CLASS_DRUID, PvpArchetype::RestorationDruid,
++                                 PvpControlState::DamageImmune, 1ULL << MECHANIC_BANISH, true, 5000));
++}
++
++TEST(PvpControlWindowPolicy, HardCastCanReleaseSetupButPreserveWaitsForArrivalTiming)
++{
++    EXPECT_TRUE(ShouldStartPvpControlWindowDamage(
++        PvpControlState::DamageBreakable, PvpCcUsage::SetupThenBreak, true, true,
++        true, false, false, 6000, 2200));
++    EXPECT_FALSE(ShouldStartPvpControlWindowDamage(
++        PvpControlState::DamageBreakable, PvpCcUsage::SetupThenBreak, true, false,
++        true, false, false, 6000, 2200));
++    EXPECT_TRUE(ShouldStartPvpControlWindowDamage(
++        PvpControlState::DamageBreakable, PvpCcUsage::Preserve, true, false,
++        true, false, false, 1800, 1700));
++    EXPECT_FALSE(ShouldStartPvpControlWindowDamage(
++        PvpControlState::DamageBreakable, PvpCcUsage::Preserve, true, false,
++        true, false, false, 2500, 1700));
++    EXPECT_TRUE(ShouldStartPvpControlWindowDamage(
++        PvpControlState::DamageBreakable, PvpCcUsage::Preserve, true, false,
++        true, false, false, 1200, 1700));
++}
++
++TEST(PvpControlWindowPolicy, ExistingPeriodicDamageShortensBreakableExpectation)
++{
++    EXPECT_EQ(1200u, EstimatePvpControlWindowRemainingMs(
++                         PvpControlState::DamageBreakable, 7000, true));
++    EXPECT_EQ(900u, EstimatePvpControlWindowRemainingMs(
++                        PvpControlState::DamageBreakable, 900, true));
++    EXPECT_EQ(7000u, EstimatePvpControlWindowRemainingMs(
++                         PvpControlState::DamageBreakable, 7000, false));
++    EXPECT_EQ(7000u, EstimatePvpControlWindowRemainingMs(
++                         PvpControlState::DamageImmune, 7000, true));
++}
++
++TEST(PvpControlWindowPolicy, UnsafeWaysToBreakControlStayBlocked)
++{
++    EXPECT_FALSE(ShouldStartPvpControlWindowDamage(
++        PvpControlState::DamageBreakable, PvpCcUsage::SetupThenBreak, false, true,
++        true, false, false, 5000, 2000));
++    EXPECT_FALSE(ShouldStartPvpControlWindowDamage(
++        PvpControlState::DamageBreakable, PvpCcUsage::SetupThenBreak, true, true,
++        false, false, false, 5000, 2000));
++    EXPECT_FALSE(ShouldStartPvpControlWindowDamage(
++        PvpControlState::DamageBreakable, PvpCcUsage::SetupThenBreak, true, true,
++        true, true, false, 5000, 2000));
++    EXPECT_FALSE(ShouldStartPvpControlWindowDamage(
++        PvpControlState::DamageBreakable, PvpCcUsage::SetupThenBreak, true, true,
++        true, false, true, 5000, 2000));
++    EXPECT_FALSE(ShouldStartPvpControlWindowDamage(
++        PvpControlState::DamageImmune, PvpCcUsage::Reposition, true, true,
++        true, false, false, 5000, 2000));
++    EXPECT_TRUE(ShouldStartPvpControlWindowDamage(
++        PvpControlState::DamageImmune, PvpCcUsage::Reposition, true, true,
++        true, false, false, 1800, 1700));
++}
++
+ TEST(PvpDamagePolicy, AreaDamageChecksBothImpactAndCasterVicinity)
+ {
+     EXPECT_TRUE(ShouldBlockPvpAreaDamage(true, true, false));
+diff --git a/modules/mod-playerbots/t/PvpTacticalScenarioMatrix.md b/modules/mod-playerbots/t/PvpTacticalScenarioMatrix.md
+index e3669f67..ffec496d 100644
+--- a/modules/mod-playerbots/t/PvpTacticalScenarioMatrix.md
++++ b/modules/mod-playerbots/t/PvpTacticalScenarioMatrix.md
+@@ -24,6 +24,24 @@ event appears whenever an already-running attack must be stopped.
+ For every breakable case, also verify that Purge, Spellsteal and offensive
+ Dispel Magic are not rejected solely because the target is controlled.
+ 
++## Duel control-window behavior
++
++- Warlock Fear is `SetupThenBreak`: recall the pet, move to preferred casting
++  range, use an available recovery, then permit a direct hard cast to restart
++  pressure. Auto attack, instant damage, channels and area damage stay blocked.
++- Mage Polymorph is `Preserve`: use non-damaging utility and begin Frostbolt
++  only when cast plus projectile travel is expected to land after Polymorph.
++- Hunter Freezing Trap and Shaman Hex are `Preserve`; short Scatter-style
++  setup can become `SetupThenBreak` when it is not part of the trap plan.
++- Rogue Sap/long Blind is `Reset`; a short Gouge-style disorient is setup.
++- Priest fear repositions before pressure. Cyclone is damage immune and only
++  permits an expiry-timed precast, never an early intentional break.
++- Repeat Fear/Polymorph with an existing periodic damage aura. The expected
++  control window must shrink to 1.2 seconds so the bot does not plan a long
++  recovery against a control that the next DoT tick may end.
++- In arena/battleground contexts, the same breakable control stays `Preserve`
++  until ArenaTeamPlan explicitly owns the CC purpose; no solo release applies.
++
+ ## Area and cleave protection
+ 
+ With the protected off-target inside the real effect radius, exercise:
