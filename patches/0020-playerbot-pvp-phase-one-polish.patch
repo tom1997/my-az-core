@@ -81,7 +81,7 @@ index 136a7a41..af27bc3a 100644
      bot->GetMotionMaster()->Clear(false);
      bot->StopMoving();
 diff --git a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp
-index 357be5ab..30536544 100644
+index 357be5ab..480118ed 100644
 --- a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp
 +++ b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp
 @@ -36,6 +36,24 @@ uint32 const MAJOR_OFFENSIVE_AURAS[] = {
@@ -147,7 +147,7 @@ index 357be5ab..30536544 100644
  float ScoreEnemyInterruptThreat(Player* enemy, Player* bot)
  {
      if (!enemy || !bot || !enemy->IsAlive() ||
-@@ -400,74 +449,84 @@ uint32 FindPetSpell(PlayerbotAI* botAI, Pet* pet, std::initializer_list<char con
+@@ -400,74 +449,89 @@ uint32 FindPetSpell(PlayerbotAI* botAI, Pet* pet, std::initializer_list<char con
  }
  }
  
@@ -158,6 +158,16 @@ index 357be5ab..30536544 100644
 +    if ((mechanicMask & PVP_BREAKABLE_CONTROL_MASK) && (auraInterruptFlags & PVP_DAMAGE_BREAK_FLAGS))
 +        return PvpControlState::DamageBreakable;
 +    return mechanicMask & PVP_CONTROL_MASK ? PvpControlState::DamageSafe : PvpControlState::None;
++}
++
++PvpControlState ClassifyPvpControlFallback(bool metadataDamageSafe, bool stunned, bool rooted, bool silenced,
++                                           bool feared, bool confused, bool charmed, bool areaCharmed)
++{
++    if (metadataDamageSafe || stunned || rooted || silenced)
++        return PvpControlState::DamageSafe;
++    if (feared || confused || charmed || areaCharmed)
++        return PvpControlState::DamageBreakable;
++    return PvpControlState::None;
 +}
 +
  PvpControlState GetPvpControlState(Unit* target)
@@ -204,19 +214,21 @@ index 357be5ab..30536544 100644
      }
  
 -    bool const damageSafe = target->HasAuraType(SPELL_AURA_MOD_STUN) ||
-+    bool const damageSafe = hasDamageSafeControl ||
-+                            target->HasAuraType(SPELL_AURA_MOD_STUN) ||
-                             target->HasAuraType(SPELL_AURA_MOD_ROOT) ||
-                             target->HasAuraType(SPELL_AURA_MOD_SILENCE) ||
-                             target->HasAuraType(SPELL_AURA_MOD_FEAR) ||
-                             target->HasAuraType(SPELL_AURA_MOD_CONFUSE) ||
-                             target->HasAuraType(SPELL_AURA_MOD_CHARM) ||
-                             target->HasAuraType(SPELL_AURA_AOE_CHARM) ||
+-                            target->HasAuraType(SPELL_AURA_MOD_ROOT) ||
+-                            target->HasAuraType(SPELL_AURA_MOD_SILENCE) ||
+-                            target->HasAuraType(SPELL_AURA_MOD_FEAR) ||
+-                            target->HasAuraType(SPELL_AURA_MOD_CONFUSE) ||
+-                            target->HasAuraType(SPELL_AURA_MOD_CHARM) ||
+-                            target->HasAuraType(SPELL_AURA_AOE_CHARM) ||
 -                            target->HasAuraWithMechanic(controlMask);
-+                            target->HasAuraWithMechanic(PVP_CONTROL_MASK);
-     return damageSafe ? PvpControlState::DamageSafe : PvpControlState::None;
- }
- 
+-    return damageSafe ? PvpControlState::DamageSafe : PvpControlState::None;
++    return ClassifyPvpControlFallback(
++        hasDamageSafeControl, target->HasAuraType(SPELL_AURA_MOD_STUN),
++        target->HasAuraType(SPELL_AURA_MOD_ROOT), target->HasAuraType(SPELL_AURA_MOD_SILENCE),
++        target->HasAuraType(SPELL_AURA_MOD_FEAR), target->HasAuraType(SPELL_AURA_MOD_CONFUSE),
++        target->HasAuraType(SPELL_AURA_MOD_CHARM), target->HasAuraType(SPELL_AURA_AOE_CHARM));
++}
++
 +float CalculatePvpControlPressureBonus(bool damageSafe, bool stunned, bool silenced, bool rooted,
 +                                       bool casterOrHealer, bool melee)
 +{
@@ -241,8 +253,8 @@ index 357be5ab..30536544 100644
 +        GetPvpControlState(target) == PvpControlState::DamageSafe,
 +        target->HasAuraType(SPELL_AURA_MOD_STUN), target->HasAuraType(SPELL_AURA_MOD_SILENCE),
 +        target->HasAuraType(SPELL_AURA_MOD_ROOT), casterOrHealer, PlayerbotAI::IsMelee(player, true));
-+}
-+
+ }
+ 
  bool IsPvpDamageSpell(SpellInfo const* spellInfo)
  {
 -    if (!spellInfo)
@@ -273,7 +285,7 @@ index 357be5ab..30536544 100644
  }
  
  PvpCastPurpose GetPvpCastPurpose(SpellInfo const* spellInfo)
-@@ -503,44 +562,36 @@ bool HasBreakablePvpControlNearby(PlayerbotAI* botAI, Unit* center, float radius
+@@ -503,44 +567,36 @@ bool HasBreakablePvpControlNearby(PlayerbotAI* botAI, Unit* center, float radius
      return false;
  }
  
@@ -333,7 +345,7 @@ index 357be5ab..30536544 100644
          if (!effect.IsTargetingArea() && effect.ChainTarget <= 1)
              continue;
          areaDamage = true;
-@@ -553,8 +604,9 @@ bool CanDamagePvpTarget(PlayerbotAI* botAI, Unit* target, SpellInfo const* spell
+@@ -553,8 +609,9 @@ bool CanDamagePvpTarget(PlayerbotAI* botAI, Unit* target, SpellInfo const* spell
          return true;
      radius = std::max(radius, 8.0f);
      Unit* center = target == bot ? static_cast<Unit*>(bot) : target;
@@ -345,7 +357,7 @@ index 357be5ab..30536544 100644
  }
  
  void PvpTacticalState::Reset()
-@@ -919,11 +971,8 @@ PvpSnapshot PvpSnapshotValue::Calculate()
+@@ -919,11 +976,8 @@ PvpSnapshot PvpSnapshotValue::Calculate()
                                             (snapshot.enemyCastHighValue ? 0.25f : 0.0f) +
                                             (current->GetHealthPct() <= 30.0f ? 0.20f : 0.0f),
                                         0.0f, 1.0f);
@@ -359,7 +371,7 @@ index 357be5ab..30536544 100644
      snapshot.killWindowScore = snapshot.targetControlState == PvpControlState::DamageImmune ? 0.0f :
          std::clamp((100.0f - current->GetHealthPct()) / 100.0f * 0.55f + controlWindow +
                         (snapshot.targetMajorDefensive ? -0.55f : 0.0f) +
-@@ -1299,6 +1348,9 @@ bool IsPvpTacticalActionAllowed(PlayerbotAI* botAI, std::string const& action, U
+@@ -1299,6 +1353,9 @@ bool IsPvpTacticalActionAllowed(PlayerbotAI* botAI, std::string const& action, U
          return false;
      if (action == "blade flurry" && enemy && HasBreakablePvpControlNearby(botAI, enemy, 12.0f))
          return false;
@@ -370,7 +382,7 @@ index 357be5ab..30536544 100644
      if (action == "charge" || action == "intercept" || action == "shadowstep" || action == "death grip")
          return enemy && ShouldSpendPvpGapCloser(botAI, enemy, action == "death grip" ? 10.0f : 8.0f);
 diff --git a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h
-index c37793cc..b2f45448 100644
+index c37793cc..f60fd0bc 100644
 --- a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h
 +++ b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h
 @@ -75,7 +75,9 @@ enum class PvpHunterCcStage : uint8
@@ -383,11 +395,13 @@ index c37793cc..b2f45448 100644
      Complete
  };
  
-@@ -237,9 +239,15 @@ Unit* ResolvePvpControlTarget(PlayerbotAI* botAI, Unit* primaryTarget = nullptr)
+@@ -237,9 +239,17 @@ Unit* ResolvePvpControlTarget(PlayerbotAI* botAI, Unit* primaryTarget = nullptr)
  bool IsPvpTacticalEligible(Player* bot);
  bool IsPvpTacticalContextEnabled(Player* bot);
  PvpArchetype DetectPvpArchetype(PlayerbotAI* botAI);
 +PvpControlState ClassifyPvpControlMetadata(uint64 mechanicMask, uint32 auraInterruptFlags, bool damageImmune);
++PvpControlState ClassifyPvpControlFallback(bool metadataDamageSafe, bool stunned, bool rooted, bool silenced,
++                                           bool feared, bool confused, bool charmed, bool areaCharmed);
  PvpControlState GetPvpControlState(Unit* target);
 +float CalculatePvpControlPressureBonus(bool damageSafe, bool stunned, bool silenced, bool rooted,
 +                                       bool casterOrHealer, bool melee);
@@ -401,10 +415,10 @@ index c37793cc..b2f45448 100644
  void UpdatePvpTacticalState(PlayerbotAI* botAI, Unit* target);
 diff --git a/modules/mod-playerbots/t/PvpTacticalPolicyTests.cxx b/modules/mod-playerbots/t/PvpTacticalPolicyTests.cxx
 new file mode 100644
-index 00000000..9975c6a8
+index 00000000..87847f7a
 --- /dev/null
 +++ b/modules/mod-playerbots/t/PvpTacticalPolicyTests.cxx
-@@ -0,0 +1,75 @@
+@@ -0,0 +1,91 @@
 +#include "PvpTacticalValue.h"
 +
 +#include "SharedDefines.h"
@@ -450,6 +464,22 @@ index 00000000..9975c6a8
 +    EXPECT_EQ(PvpControlState::None,
 +              ClassifyPvpControlMetadata(1ULL << MECHANIC_SNARE, BreaksOnDamage, false));
 +    EXPECT_EQ(PvpControlState::None, ClassifyPvpControlMetadata(0, 0, false));
++}
++
++TEST(PvpControlPolicy, UncertainComplexControlFallbackFailsClosed)
++{
++    EXPECT_EQ(PvpControlState::DamageBreakable,
++              ClassifyPvpControlFallback(false, false, false, false, true, false, false, false));
++    EXPECT_EQ(PvpControlState::DamageBreakable,
++              ClassifyPvpControlFallback(false, false, false, false, false, true, false, false));
++    EXPECT_EQ(PvpControlState::DamageBreakable,
++              ClassifyPvpControlFallback(false, false, false, false, false, false, true, true));
++    EXPECT_EQ(PvpControlState::DamageSafe,
++              ClassifyPvpControlFallback(true, false, false, false, true, true, true, true));
++    EXPECT_EQ(PvpControlState::DamageSafe,
++              ClassifyPvpControlFallback(false, true, true, true, false, false, false, false));
++    EXPECT_EQ(PvpControlState::None,
++              ClassifyPvpControlFallback(false, false, false, false, false, false, false, false));
 +}
 +
 +TEST(PvpDamagePolicy, UtilityRemainsAvailableOnProtectedTargets)

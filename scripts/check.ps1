@@ -146,6 +146,7 @@ foreach ($requiredMarker in @(
     'freezing arrow',
     'GetPvpControlPressureBonus',
     'ClassifyPvpControlMetadata',
+    'ClassifyPvpControlFallback',
     'ShouldBlockPvpDamage',
     'ShouldBlockPvpAreaDamage',
     'IsPvpDamageSpellInternal',
@@ -153,11 +154,15 @@ foreach ($requiredMarker in @(
     'ACORE_MODULE_TEST_SOURCES',
     'UtilityRemainsAvailableOnProtectedTargets',
     'AreaDamageChecksBothImpactAndCasterVicinity',
+    'UncertainComplexControlFallbackFailsClosed',
     'PvpTacticalScenarioMatrix.md'
 )) {
     if ($pvpPhaseOnePolishPatchText -notmatch [regex]::Escape($requiredMarker)) {
         throw "Playerbot PvP 第一阶段收尾补丁缺少标记：$requiredMarker"
     }
+}
+if ($pvpPhaseOnePolishPatchText -match '(?m)^\+\s*target->HasAuraWithMechanic\(PVP_CONTROL_MASK\)') {
+    throw '不确定的复杂控制效果不能继续依赖宽泛 mechanic mask 作为可安全输出的兜底。'
 }
 
 $pvpClassPatchText = Get-Content -LiteralPath (Join-Path $repoRoot 'patches\0010-playerbot-pvp-warrior-paladin-death-knight.patch') -Raw
