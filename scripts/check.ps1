@@ -113,6 +113,31 @@ if ($pvpPhaseOnePatchText -match '(?m)^\+\s*#include "Aura\.h"') {
     throw 'Playerbot PvP 第一阶段补丁引用了当前核心不存在的 Aura.h。'
 }
 
+$pvpPhaseOneHardeningPatch = Join-Path $repoRoot 'patches\0019-playerbot-pvp-phase-one-hardening.patch'
+if (-not (Test-Path -LiteralPath $pvpPhaseOneHardeningPatch)) { throw '缺少 Playerbot PvP 第一阶段加固补丁。' }
+$pvpPhaseOneHardeningPatchText = Get-Content -LiteralPath $pvpPhaseOneHardeningPatch -Raw
+foreach ($requiredMarker in @(
+    'PvpControlState',
+    'DamageBreakable',
+    'DamageImmune',
+    'CanDamagePvpTarget',
+    'observedEnemyCastExpectedEndAtMs',
+    'targetAcquiredAtMs',
+    'PvpCastPurpose',
+    'enemyInterruptThreatScore',
+    'TryPvpPetMicro',
+    'TryHunterScatterTrapPlan',
+    'magicPressureScore',
+    'PvpPriority::Control'
+)) {
+    if ($pvpPhaseOneHardeningPatchText -notmatch [regex]::Escape($requiredMarker)) {
+        throw "Playerbot PvP 第一阶段加固补丁缺少标记：$requiredMarker"
+    }
+}
+if ($pvpPhaseOneHardeningPatchText -match '(?m)^\+\s*if \(targetCasting && TryInterrupt\(botAI, "spell lock"') {
+    throw 'Spell Lock 必须由宠物执行器施放，不能继续走主人施法路径。'
+}
+
 $pvpClassPatchText = Get-Content -LiteralPath (Join-Path $repoRoot 'patches\0010-playerbot-pvp-warrior-paladin-death-knight.patch') -Raw
 if ($pvpClassPatchText -match 'AI_VALUE\(' -and $pvpClassPatchText -notmatch '#include "Playerbots\.h"') {
     throw '使用 AI_VALUE 的 PvP 动作缺少 Playerbots.h。'
