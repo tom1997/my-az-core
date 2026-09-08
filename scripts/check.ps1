@@ -90,6 +90,29 @@ foreach ($pvpPatchName in @(
     }
 }
 
+$pvpPhaseOnePatch = Join-Path $repoRoot 'patches\0018-playerbot-pvp-phase-one-planners.patch'
+if (-not (Test-Path -LiteralPath $pvpPhaseOnePatch)) { throw '缺少 Playerbot PvP 第一阶段规划器补丁。' }
+$pvpPhaseOnePatchText = Get-Content -LiteralPath $pvpPhaseOnePatch -Raw
+foreach ($requiredMarker in @(
+    'PvpSnapshot',
+    'PvpIntent',
+    'PvpArchetype',
+    'PvpAllyTriage',
+    'ShouldCommitPvpInterrupt',
+    'IsSafeForPvpCast',
+    'CanApplyPvpControl',
+    'pvp tactical fake cast',
+    'pvp tactical target swap',
+    '#include "SpellAuras.h"'
+)) {
+    if ($pvpPhaseOnePatchText -notmatch [regex]::Escape($requiredMarker)) {
+        throw "Playerbot PvP 第一阶段补丁缺少标记：$requiredMarker"
+    }
+}
+if ($pvpPhaseOnePatchText -match '(?m)^\+\s*#include "Aura\.h"') {
+    throw 'Playerbot PvP 第一阶段补丁引用了当前核心不存在的 Aura.h。'
+}
+
 $pvpClassPatchText = Get-Content -LiteralPath (Join-Path $repoRoot 'patches\0010-playerbot-pvp-warrior-paladin-death-knight.patch') -Raw
 if ($pvpClassPatchText -match 'AI_VALUE\(' -and $pvpClassPatchText -notmatch '#include "Playerbots\.h"') {
     throw '使用 AI_VALUE 的 PvP 动作缺少 Playerbots.h。'
