@@ -138,6 +138,28 @@ if ($pvpPhaseOneHardeningPatchText -match '(?m)^\+\s*if \(targetCasting && TryIn
     throw 'Spell Lock 必须由宠物执行器施放，不能继续走主人施法路径。'
 }
 
+$pvpPhaseOnePolishPatch = Join-Path $repoRoot 'patches\0020-playerbot-pvp-phase-one-polish.patch'
+if (-not (Test-Path -LiteralPath $pvpPhaseOnePolishPatch)) { throw '缺少 Playerbot PvP 第一阶段收尾补丁。' }
+$pvpPhaseOnePolishPatchText = Get-Content -LiteralPath $pvpPhaseOnePolishPatch -Raw
+foreach ($requiredMarker in @(
+    'FreezingArrow',
+    'freezing arrow',
+    'GetPvpControlPressureBonus',
+    'ClassifyPvpControlMetadata',
+    'ShouldBlockPvpDamage',
+    'ShouldBlockPvpAreaDamage',
+    'IsPvpDamageSpellInternal',
+    'effect.TriggerSpell',
+    'ACORE_MODULE_TEST_SOURCES',
+    'UtilityRemainsAvailableOnProtectedTargets',
+    'AreaDamageChecksBothImpactAndCasterVicinity',
+    'PvpTacticalScenarioMatrix.md'
+)) {
+    if ($pvpPhaseOnePolishPatchText -notmatch [regex]::Escape($requiredMarker)) {
+        throw "Playerbot PvP 第一阶段收尾补丁缺少标记：$requiredMarker"
+    }
+}
+
 $pvpClassPatchText = Get-Content -LiteralPath (Join-Path $repoRoot 'patches\0010-playerbot-pvp-warrior-paladin-death-knight.patch') -Raw
 if ($pvpClassPatchText -match 'AI_VALUE\(' -and $pvpClassPatchText -notmatch '#include "Playerbots\.h"') {
     throw '使用 AI_VALUE 的 PvP 动作缺少 Playerbots.h。'

@@ -1,0 +1,539 @@
+diff --git a/modules/mod-playerbots/mod-playerbots.cmake b/modules/mod-playerbots/mod-playerbots.cmake
+new file mode 100644
+index 00000000..d9c5b17a
+--- /dev/null
++++ b/modules/mod-playerbots/mod-playerbots.cmake
+@@ -0,0 +1,6 @@
++if (BUILD_TESTING)
++    set_property(GLOBAL APPEND PROPERTY ACORE_MODULE_TEST_SOURCES
++        "${CMAKE_CURRENT_LIST_DIR}/t/PvpTacticalPolicyTests.cxx")
++    set_property(GLOBAL APPEND PROPERTY ACORE_MODULE_TEST_INCLUDES
++        "${CMAKE_CURRENT_LIST_DIR}/src/Ai/Base/Value")
++endif()
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
+index 136a7a41..af27bc3a 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
+@@ -673,7 +673,10 @@ bool TryHunterScatterTrapPlan(PlayerbotAI* botAI, Unit* primaryTarget, PvpSnapsh
+     if (state.hunterCcStage == PvpHunterCcStage::None)
+     {
+         uint32 const trapId = botAI->GetAiObjectContext()->GetValue<uint32>("spell id", "freezing trap")->Get();
+-        if (!trapId || bot->HasSpellCooldown(trapId) || GetPvpControlState(ccTarget) != PvpControlState::None)
++        uint32 const arrowId = botAI->GetAiObjectContext()->GetValue<uint32>("spell id", "freezing arrow")->Get();
++        bool const trapReady = trapId && !bot->HasSpellCooldown(trapId);
++        bool const arrowReady = arrowId && !bot->HasSpellCooldown(arrowId);
++        if ((!trapReady && !arrowReady) || GetPvpControlState(ccTarget) != PvpControlState::None)
+             return false;
+         state.hunterCcStage = PvpHunterCcStage::Scatter;
+         state.hunterCcStartedAtMs = now;
+@@ -688,12 +691,41 @@ bool TryHunterScatterTrapPlan(PlayerbotAI* botAI, Unit* primaryTarget, PvpSnapsh
+             return false;
+         }
+         botAI->PetFollow();
+-        state.hunterCcStage = PvpHunterCcStage::MoveForTrap;
++        uint32 const arrowId = botAI->GetAiObjectContext()->GetValue<uint32>("spell id", "freezing arrow")->Get();
++        state.hunterCcStage = arrowId && !bot->HasSpellCooldown(arrowId) ? PvpHunterCcStage::FreezingArrow :
++                                                                         PvpHunterCcStage::MoveForTrap;
+         DebugPvpTactical(botAI, "scatter-trap-scatter", ccTarget);
+         return true;
+     }
+ 
+-    if (bot->GetDistance2d(ccTarget) > 4.0f)
++    if (state.hunterCcStage == PvpHunterCcStage::FreezingArrow)
++    {
++        uint32 const arrowId = botAI->GetAiObjectContext()->GetValue<uint32>("spell id", "freezing arrow")->Get();
++        if (!arrowId)
++            state.hunterCcStage = PvpHunterCcStage::MoveForTrap;
++        else if (bot->isMoving())
++        {
++            bot->GetMotionMaster()->Clear(false);
++            bot->StopMoving();
++            return true;
++        }
++        else if (!bot->HasSpellCooldown(arrowId) &&
++                 botAI->CanCastSpell(arrowId, ccTarget->GetPositionX(), ccTarget->GetPositionY(),
++                                     ccTarget->GetPositionZ(), true) &&
++                 botAI->CastSpell(arrowId, ccTarget->GetPositionX(), ccTarget->GetPositionY(),
++                                  ccTarget->GetPositionZ()))
++        {
++            state.hunterCcStage = PvpHunterCcStage::Complete;
++            DebugPvpTactical(botAI, "scatter-trap-freezing-arrow", ccTarget);
++            return true;
++        }
++        else if (now - state.hunterCcStartedAtMs < 2500)
++            return true;
++        else
++            state.hunterCcStage = PvpHunterCcStage::MoveForTrap;
++    }
++
++    if (state.hunterCcStage == PvpHunterCcStage::MoveForTrap && bot->GetDistance2d(ccTarget) > 4.0f)
+     {
+         if (IsPvpMovementActive(botAI, bot, PvpMovementOwner::HunterTrap))
+             return true;
+@@ -715,6 +747,9 @@ bool TryHunterScatterTrapPlan(PlayerbotAI* botAI, Unit* primaryTarget, PvpSnapsh
+         return true;
+     }
+ 
++    if (state.hunterCcStage == PvpHunterCcStage::MoveForTrap)
++        state.hunterCcStage = PvpHunterCcStage::GroundTrap;
++
+     ClearPvpMovement(botAI, PvpMovementOwner::HunterTrap);
+     bot->GetMotionMaster()->Clear(false);
+     bot->StopMoving();
+diff --git a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp
+index 357be5ab..30536544 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp
+@@ -36,6 +36,24 @@ uint32 const MAJOR_OFFENSIVE_AURAS[] = {
+     31884, 46924, 12472, 19574, 51713, 47241, 49016, 2825, 32182
+ };
+ 
++constexpr uint64 PVP_DAMAGE_SAFE_CONTROL_MASK = (1ULL << MECHANIC_ROOT) |
++                                                (1ULL << MECHANIC_STUN) |
++                                                (1ULL << MECHANIC_SILENCE);
++constexpr uint64 PVP_BREAKABLE_CONTROL_MASK = (1ULL << MECHANIC_CHARM) |
++                                              (1ULL << MECHANIC_DISORIENTED) |
++                                              (1ULL << MECHANIC_FEAR) |
++                                              (1ULL << MECHANIC_SLEEP) |
++                                              (1ULL << MECHANIC_FREEZE) |
++                                              (1ULL << MECHANIC_KNOCKOUT) |
++                                              (1ULL << MECHANIC_POLYMORPH) |
++                                              (1ULL << MECHANIC_SHACKLE) |
++                                              (1ULL << MECHANIC_TURN) |
++                                              (1ULL << MECHANIC_HORROR) |
++                                              (1ULL << MECHANIC_SAPPED);
++constexpr uint64 PVP_CONTROL_MASK = PVP_DAMAGE_SAFE_CONTROL_MASK | PVP_BREAKABLE_CONTROL_MASK;
++constexpr uint32 PVP_DAMAGE_BREAK_FLAGS = AURA_INTERRUPT_FLAG_TAKE_DAMAGE |
++                                          AURA_INTERRUPT_FLAG_DIRECT_DAMAGE;
++
+ bool HasAnyAura(Unit* unit, uint32 const* spells, size_t count)
+ {
+     if (!unit)
+@@ -152,6 +170,37 @@ bool IsHealingOrHardControlSpell(SpellInfo const* info)
+     return IsHighValueHeal(info) || IsHardCcCast(info);
+ }
+ 
++bool IsPvpDamageSpellInternal(SpellInfo const* spellInfo, uint8 depth)
++{
++    if (!spellInfo || depth > 3)
++        return false;
++    for (SpellEffectInfo const& effect : spellInfo->Effects)
++    {
++        switch (effect.Effect)
++        {
++            case SPELL_EFFECT_INSTAKILL:
++            case SPELL_EFFECT_SCHOOL_DAMAGE:
++            case SPELL_EFFECT_ENVIRONMENTAL_DAMAGE:
++            case SPELL_EFFECT_HEALTH_LEECH:
++            case SPELL_EFFECT_WEAPON_DAMAGE_NOSCHOOL:
++            case SPELL_EFFECT_WEAPON_PERCENT_DAMAGE:
++            case SPELL_EFFECT_WEAPON_DAMAGE:
++            case SPELL_EFFECT_NORMALIZED_WEAPON_DMG:
++                return true;
++            default:
++                break;
++        }
++        if (effect.ApplyAuraName == SPELL_AURA_PERIODIC_DAMAGE ||
++            effect.ApplyAuraName == SPELL_AURA_PERIODIC_DAMAGE_PERCENT ||
++            effect.ApplyAuraName == SPELL_AURA_PERIODIC_LEECH)
++            return true;
++        if (effect.TriggerSpell && effect.TriggerSpell != spellInfo->Id &&
++            IsPvpDamageSpellInternal(sSpellMgr->GetSpellInfo(effect.TriggerSpell), depth + 1))
++            return true;
++    }
++    return false;
++}
++
+ float ScoreEnemyInterruptThreat(Player* enemy, Player* bot)
+ {
+     if (!enemy || !bot || !enemy->IsAlive() ||
+@@ -400,74 +449,84 @@ uint32 FindPetSpell(PlayerbotAI* botAI, Pet* pet, std::initializer_list<char con
+ }
+ }
+ 
++PvpControlState ClassifyPvpControlMetadata(uint64 mechanicMask, uint32 auraInterruptFlags, bool damageImmune)
++{
++    if (damageImmune || (mechanicMask & (1ULL << MECHANIC_BANISH)))
++        return PvpControlState::DamageImmune;
++    if ((mechanicMask & PVP_BREAKABLE_CONTROL_MASK) && (auraInterruptFlags & PVP_DAMAGE_BREAK_FLAGS))
++        return PvpControlState::DamageBreakable;
++    return mechanicMask & PVP_CONTROL_MASK ? PvpControlState::DamageSafe : PvpControlState::None;
++}
++
+ PvpControlState GetPvpControlState(Unit* target)
+ {
+     if (!target)
+         return PvpControlState::None;
+ 
+-    if ((target->IsImmunedToDamage(SPELL_SCHOOL_MASK_NORMAL) &&
+-         target->IsImmunedToDamage(SPELL_SCHOOL_MASK_MAGIC)) ||
+-        target->HasAuraWithMechanic(1ULL << MECHANIC_BANISH))
++    bool const damageImmune = target->IsImmunedToDamage(SPELL_SCHOOL_MASK_NORMAL) &&
++                              target->IsImmunedToDamage(SPELL_SCHOOL_MASK_MAGIC);
++    PvpControlState const immunity = ClassifyPvpControlMetadata(
++        target->HasAuraWithMechanic(1ULL << MECHANIC_BANISH) ? (1ULL << MECHANIC_BANISH) : 0,
++        0, damageImmune);
++    if (immunity == PvpControlState::DamageImmune)
+         return PvpControlState::DamageImmune;
+ 
+-    uint64 const controlMask = (1ULL << MECHANIC_CHARM) | (1ULL << MECHANIC_DISORIENTED) |
+-                               (1ULL << MECHANIC_FEAR) | (1ULL << MECHANIC_ROOT) |
+-                               (1ULL << MECHANIC_SLEEP) | (1ULL << MECHANIC_STUN) |
+-                               (1ULL << MECHANIC_FREEZE) | (1ULL << MECHANIC_KNOCKOUT) |
+-                               (1ULL << MECHANIC_POLYMORPH) | (1ULL << MECHANIC_SHACKLE) |
+-                               (1ULL << MECHANIC_TURN) | (1ULL << MECHANIC_HORROR) |
+-                               (1ULL << MECHANIC_SAPPED) | (1ULL << MECHANIC_SILENCE);
+-    uint64 const breakableMask = controlMask & ~((1ULL << MECHANIC_ROOT) |
+-                                                 (1ULL << MECHANIC_STUN) |
+-                                                 (1ULL << MECHANIC_SILENCE));
++    bool hasDamageSafeControl = false;
+     for (auto const& applied : target->GetAppliedAuras())
+     {
+         Aura* aura = applied.second ? applied.second->GetBase() : nullptr;
+         SpellInfo const* info = aura ? aura->GetSpellInfo() : nullptr;
+         if (!info || info->IsPositive() || aura->GetDuration() <= 0 ||
+-            !(info->GetAllEffectsMechanicMask() & breakableMask))
++            !(info->GetAllEffectsMechanicMask() & PVP_CONTROL_MASK))
+             continue;
+-        if (info->AuraInterruptFlags & (AURA_INTERRUPT_FLAG_TAKE_DAMAGE | AURA_INTERRUPT_FLAG_DIRECT_DAMAGE))
++        PvpControlState const control = ClassifyPvpControlMetadata(
++            info->GetAllEffectsMechanicMask(), info->AuraInterruptFlags, false);
++        if (control == PvpControlState::DamageBreakable)
+             return PvpControlState::DamageBreakable;
++        hasDamageSafeControl = hasDamageSafeControl || control == PvpControlState::DamageSafe;
+     }
+ 
+-    bool const damageSafe = target->HasAuraType(SPELL_AURA_MOD_STUN) ||
++    bool const damageSafe = hasDamageSafeControl ||
++                            target->HasAuraType(SPELL_AURA_MOD_STUN) ||
+                             target->HasAuraType(SPELL_AURA_MOD_ROOT) ||
+                             target->HasAuraType(SPELL_AURA_MOD_SILENCE) ||
+                             target->HasAuraType(SPELL_AURA_MOD_FEAR) ||
+                             target->HasAuraType(SPELL_AURA_MOD_CONFUSE) ||
+                             target->HasAuraType(SPELL_AURA_MOD_CHARM) ||
+                             target->HasAuraType(SPELL_AURA_AOE_CHARM) ||
+-                            target->HasAuraWithMechanic(controlMask);
++                            target->HasAuraWithMechanic(PVP_CONTROL_MASK);
+     return damageSafe ? PvpControlState::DamageSafe : PvpControlState::None;
+ }
+ 
++float CalculatePvpControlPressureBonus(bool damageSafe, bool stunned, bool silenced, bool rooted,
++                                       bool casterOrHealer, bool melee)
++{
++    if (!damageSafe)
++        return 0.0f;
++    if (stunned)
++        return 0.20f;
++    if (silenced && casterOrHealer)
++        return 0.14f;
++    if (rooted && melee)
++        return 0.08f;
++    return 0.02f;
++}
++
++float GetPvpControlPressureBonus(PlayerbotAI* botAI, Unit* target)
++{
++    Player* player = target ? target->ToPlayer() : nullptr;
++    if (!botAI || !player)
++        return 0.0f;
++    bool const casterOrHealer = PlayerbotAI::IsHeal(player, true) || PlayerbotAI::IsRanged(player, true);
++    return CalculatePvpControlPressureBonus(
++        GetPvpControlState(target) == PvpControlState::DamageSafe,
++        target->HasAuraType(SPELL_AURA_MOD_STUN), target->HasAuraType(SPELL_AURA_MOD_SILENCE),
++        target->HasAuraType(SPELL_AURA_MOD_ROOT), casterOrHealer, PlayerbotAI::IsMelee(player, true));
++}
++
+ bool IsPvpDamageSpell(SpellInfo const* spellInfo)
+ {
+-    if (!spellInfo)
+-        return false;
+-    for (SpellEffectInfo const& effect : spellInfo->Effects)
+-    {
+-        switch (effect.Effect)
+-        {
+-            case SPELL_EFFECT_INSTAKILL:
+-            case SPELL_EFFECT_SCHOOL_DAMAGE:
+-            case SPELL_EFFECT_ENVIRONMENTAL_DAMAGE:
+-            case SPELL_EFFECT_HEALTH_LEECH:
+-            case SPELL_EFFECT_WEAPON_DAMAGE_NOSCHOOL:
+-            case SPELL_EFFECT_WEAPON_PERCENT_DAMAGE:
+-            case SPELL_EFFECT_WEAPON_DAMAGE:
+-            case SPELL_EFFECT_NORMALIZED_WEAPON_DMG:
+-                return true;
+-            default:
+-                break;
+-        }
+-        if (effect.ApplyAuraName == SPELL_AURA_PERIODIC_DAMAGE ||
+-            effect.ApplyAuraName == SPELL_AURA_PERIODIC_DAMAGE_PERCENT ||
+-            effect.ApplyAuraName == SPELL_AURA_PERIODIC_LEECH)
+-            return true;
+-    }
+-    return false;
++    return IsPvpDamageSpellInternal(spellInfo, 0);
+ }
+ 
+ PvpCastPurpose GetPvpCastPurpose(SpellInfo const* spellInfo)
+@@ -503,44 +562,36 @@ bool HasBreakablePvpControlNearby(PlayerbotAI* botAI, Unit* center, float radius
+     return false;
+ }
+ 
++bool ShouldBlockPvpDamage(PvpControlState control, bool damagingAction)
++{
++    return damagingAction &&
++           (control == PvpControlState::DamageBreakable || control == PvpControlState::DamageImmune);
++}
++
++bool ShouldBlockPvpAreaDamage(bool areaDamage, bool breakableNearTarget, bool breakableNearCaster)
++{
++    return areaDamage && (breakableNearTarget || breakableNearCaster);
++}
++
+ bool CanDamagePvpTarget(PlayerbotAI* botAI, Unit* target, SpellInfo const* spellInfo)
+ {
+     Player* bot = botAI ? botAI->GetBot() : nullptr;
+     if (!bot || !target || !IsPvpTacticalContextEnabled(bot))
+         return true;
++    bool const damagingAction = !spellInfo || IsPvpDamageSpell(spellInfo);
+     if (target->IsPlayer() && bot->IsHostileTo(target))
+     {
+         PvpControlState const control = GetPvpControlState(target);
+-        if (control == PvpControlState::DamageBreakable || control == PvpControlState::DamageImmune)
++        if (ShouldBlockPvpDamage(control, damagingAction))
+             return false;
+     }
+-    if (!spellInfo || !IsPvpDamageSpell(spellInfo))
++    if (!spellInfo || !damagingAction)
+         return true;
+ 
+-    bool areaDamage = false;
++    bool areaDamage = spellInfo->IsTargetingArea();
+     float radius = 0.0f;
+     for (SpellEffectInfo const& effect : spellInfo->Effects)
+     {
+-        bool damagingEffect = effect.ApplyAuraName == SPELL_AURA_PERIODIC_DAMAGE ||
+-                               effect.ApplyAuraName == SPELL_AURA_PERIODIC_DAMAGE_PERCENT ||
+-                               effect.ApplyAuraName == SPELL_AURA_PERIODIC_LEECH;
+-        switch (effect.Effect)
+-        {
+-            case SPELL_EFFECT_INSTAKILL:
+-            case SPELL_EFFECT_SCHOOL_DAMAGE:
+-            case SPELL_EFFECT_ENVIRONMENTAL_DAMAGE:
+-            case SPELL_EFFECT_HEALTH_LEECH:
+-            case SPELL_EFFECT_WEAPON_DAMAGE_NOSCHOOL:
+-            case SPELL_EFFECT_WEAPON_PERCENT_DAMAGE:
+-            case SPELL_EFFECT_WEAPON_DAMAGE:
+-            case SPELL_EFFECT_NORMALIZED_WEAPON_DMG:
+-                damagingEffect = true;
+-                break;
+-            default:
+-                break;
+-        }
+-        if (!damagingEffect)
+-            continue;
+         if (!effect.IsTargetingArea() && effect.ChainTarget <= 1)
+             continue;
+         areaDamage = true;
+@@ -553,8 +604,9 @@ bool CanDamagePvpTarget(PlayerbotAI* botAI, Unit* target, SpellInfo const* spell
+         return true;
+     radius = std::max(radius, 8.0f);
+     Unit* center = target == bot ? static_cast<Unit*>(bot) : target;
+-    return !HasBreakablePvpControlNearby(botAI, center, radius) &&
+-           (center == bot || !HasBreakablePvpControlNearby(botAI, bot, radius));
++    bool const breakableNearTarget = HasBreakablePvpControlNearby(botAI, center, radius);
++    bool const breakableNearCaster = center != bot && HasBreakablePvpControlNearby(botAI, bot, radius);
++    return !ShouldBlockPvpAreaDamage(areaDamage, breakableNearTarget, breakableNearCaster);
+ }
+ 
+ void PvpTacticalState::Reset()
+@@ -919,11 +971,8 @@ PvpSnapshot PvpSnapshotValue::Calculate()
+                                            (snapshot.enemyCastHighValue ? 0.25f : 0.0f) +
+                                            (current->GetHealthPct() <= 30.0f ? 0.20f : 0.0f),
+                                        0.0f, 1.0f);
+-    float controlWindow = 0.0f;
+-    if (snapshot.targetControlState == PvpControlState::DamageSafe)
+-        controlWindow = 0.20f;
+-    else if (snapshot.targetControlState == PvpControlState::DamageBreakable)
+-        controlWindow = -0.80f;
++    float controlWindow = snapshot.targetControlState == PvpControlState::DamageBreakable ? -0.80f :
++                                                                                           GetPvpControlPressureBonus(botAI, current);
+     snapshot.killWindowScore = snapshot.targetControlState == PvpControlState::DamageImmune ? 0.0f :
+         std::clamp((100.0f - current->GetHealthPct()) / 100.0f * 0.55f + controlWindow +
+                        (snapshot.targetMajorDefensive ? -0.55f : 0.0f) +
+@@ -1299,6 +1348,9 @@ bool IsPvpTacticalActionAllowed(PlayerbotAI* botAI, std::string const& action, U
+         return false;
+     if (action == "blade flurry" && enemy && HasBreakablePvpControlNearby(botAI, enemy, 12.0f))
+         return false;
++    if ((action == "explosive trap" || action == "immolation trap") &&
++        HasBreakablePvpControlNearby(botAI, bot, 12.0f))
++        return false;
+ 
+     if (action == "charge" || action == "intercept" || action == "shadowstep" || action == "death grip")
+         return enemy && ShouldSpendPvpGapCloser(botAI, enemy, action == "death grip" ? 10.0f : 8.0f);
+diff --git a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h
+index c37793cc..b2f45448 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h
++++ b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h
+@@ -75,7 +75,9 @@ enum class PvpHunterCcStage : uint8
+ {
+     None,
+     Scatter,
++    FreezingArrow,
+     MoveForTrap,
++    GroundTrap,
+     Complete
+ };
+ 
+@@ -237,9 +239,15 @@ Unit* ResolvePvpControlTarget(PlayerbotAI* botAI, Unit* primaryTarget = nullptr)
+ bool IsPvpTacticalEligible(Player* bot);
+ bool IsPvpTacticalContextEnabled(Player* bot);
+ PvpArchetype DetectPvpArchetype(PlayerbotAI* botAI);
++PvpControlState ClassifyPvpControlMetadata(uint64 mechanicMask, uint32 auraInterruptFlags, bool damageImmune);
+ PvpControlState GetPvpControlState(Unit* target);
++float CalculatePvpControlPressureBonus(bool damageSafe, bool stunned, bool silenced, bool rooted,
++                                       bool casterOrHealer, bool melee);
++float GetPvpControlPressureBonus(PlayerbotAI* botAI, Unit* target);
+ PvpCastPurpose GetPvpCastPurpose(SpellInfo const* spellInfo);
+ bool IsPvpDamageSpell(SpellInfo const* spellInfo);
++bool ShouldBlockPvpDamage(PvpControlState control, bool damagingAction);
++bool ShouldBlockPvpAreaDamage(bool areaDamage, bool breakableNearTarget, bool breakableNearCaster);
+ bool CanDamagePvpTarget(PlayerbotAI* botAI, Unit* target, SpellInfo const* spellInfo = nullptr);
+ bool HasBreakablePvpControlNearby(PlayerbotAI* botAI, Unit* center, float radius);
+ void UpdatePvpTacticalState(PlayerbotAI* botAI, Unit* target);
+diff --git a/modules/mod-playerbots/t/PvpTacticalPolicyTests.cxx b/modules/mod-playerbots/t/PvpTacticalPolicyTests.cxx
+new file mode 100644
+index 00000000..9975c6a8
+--- /dev/null
++++ b/modules/mod-playerbots/t/PvpTacticalPolicyTests.cxx
+@@ -0,0 +1,75 @@
++#include "PvpTacticalValue.h"
++
++#include "SharedDefines.h"
++#include "SpellDefines.h"
++
++#include <gtest/gtest.h>
++#include <initializer_list>
++
++namespace
++{
++constexpr uint32 BreaksOnDamage = AURA_INTERRUPT_FLAG_TAKE_DAMAGE |
++                                  AURA_INTERRUPT_FLAG_DIRECT_DAMAGE;
++
++TEST(PvpControlPolicy, ClassicBreakableControlUsesDamageInterruptMetadata)
++{
++    for (uint32 mechanic : { MECHANIC_POLYMORPH, MECHANIC_SAPPED, MECHANIC_DISORIENTED,
++                             MECHANIC_FREEZE, MECHANIC_SLEEP, MECHANIC_FEAR })
++    {
++        EXPECT_EQ(PvpControlState::DamageBreakable,
++                  ClassifyPvpControlMetadata(1ULL << mechanic, BreaksOnDamage, false));
++    }
++}
++
++TEST(PvpControlPolicy, StunRootAndSilenceRemainDamageSafe)
++{
++    for (uint32 mechanic : { MECHANIC_STUN, MECHANIC_ROOT, MECHANIC_SILENCE })
++    {
++        EXPECT_EQ(PvpControlState::DamageSafe,
++                  ClassifyPvpControlMetadata(1ULL << mechanic, BreaksOnDamage, false));
++    }
++}
++
++TEST(PvpControlPolicy, BanishAndCompleteDamageImmunityAreDamageImmune)
++{
++    EXPECT_EQ(PvpControlState::DamageImmune,
++              ClassifyPvpControlMetadata(1ULL << MECHANIC_BANISH, 0, false));
++    EXPECT_EQ(PvpControlState::DamageImmune,
++              ClassifyPvpControlMetadata(0, 0, true));
++}
++
++TEST(PvpControlPolicy, NonControlMetadataIsNotProtected)
++{
++    EXPECT_EQ(PvpControlState::None,
++              ClassifyPvpControlMetadata(1ULL << MECHANIC_SNARE, BreaksOnDamage, false));
++    EXPECT_EQ(PvpControlState::None, ClassifyPvpControlMetadata(0, 0, false));
++}
++
++TEST(PvpDamagePolicy, UtilityRemainsAvailableOnProtectedTargets)
++{
++    EXPECT_TRUE(ShouldBlockPvpDamage(PvpControlState::DamageBreakable, true));
++    EXPECT_TRUE(ShouldBlockPvpDamage(PvpControlState::DamageImmune, true));
++    EXPECT_FALSE(ShouldBlockPvpDamage(PvpControlState::DamageBreakable, false));
++    EXPECT_FALSE(ShouldBlockPvpDamage(PvpControlState::DamageImmune, false));
++    EXPECT_FALSE(ShouldBlockPvpDamage(PvpControlState::DamageSafe, true));
++}
++
++TEST(PvpControlPolicy, PressureBonusReflectsHowMuchTheTargetLoses)
++{
++    EXPECT_FLOAT_EQ(0.20f, CalculatePvpControlPressureBonus(true, true, false, false, false, true));
++    EXPECT_FLOAT_EQ(0.14f, CalculatePvpControlPressureBonus(true, false, true, false, true, false));
++    EXPECT_FLOAT_EQ(0.08f, CalculatePvpControlPressureBonus(true, false, false, true, false, true));
++    EXPECT_FLOAT_EQ(0.02f, CalculatePvpControlPressureBonus(true, false, true, false, false, true));
++    EXPECT_FLOAT_EQ(0.02f, CalculatePvpControlPressureBonus(true, false, false, true, true, false));
++    EXPECT_FLOAT_EQ(0.0f, CalculatePvpControlPressureBonus(false, true, true, true, true, true));
++}
++
++TEST(PvpDamagePolicy, AreaDamageChecksBothImpactAndCasterVicinity)
++{
++    EXPECT_TRUE(ShouldBlockPvpAreaDamage(true, true, false));
++    EXPECT_TRUE(ShouldBlockPvpAreaDamage(true, false, true));
++    EXPECT_TRUE(ShouldBlockPvpAreaDamage(true, true, true));
++    EXPECT_FALSE(ShouldBlockPvpAreaDamage(true, false, false));
++    EXPECT_FALSE(ShouldBlockPvpAreaDamage(false, true, true));
++}
++}
+diff --git a/modules/mod-playerbots/t/PvpTacticalScenarioMatrix.md b/modules/mod-playerbots/t/PvpTacticalScenarioMatrix.md
+new file mode 100644
+index 00000000..e3669f67
+--- /dev/null
++++ b/modules/mod-playerbots/t/PvpTacticalScenarioMatrix.md
+@@ -0,0 +1,51 @@
++# Playerbot PvP phase-one regression matrix
++
++Run these scenarios with `AiPlayerbot.PvPTactical.Debug = 1`. Use one protected
++off-target beside the bot's active kill target and confirm the `damage-guard`
++event appears whenever an already-running attack must be stopped.
++
++## Control classification
++
++| Applied effect | Expected state | Expected damage behavior |
++| --- | --- | --- |
++| Polymorph | `DamageBreakable` | Direct, periodic, pet and area damage stop |
++| Sap | `DamageBreakable` | Direct, periodic, pet and area damage stop |
++| Blind | `DamageBreakable` | Direct, periodic, pet and area damage stop |
++| Freezing Trap | `DamageBreakable` | Direct, periodic, pet and area damage stop |
++| Repentance | `DamageBreakable` | Direct, periodic, pet and area damage stop |
++| Kidney Shot | `DamageSafe` | Damage continues; full control pressure bonus |
++| Hammer of Justice | `DamageSafe` | Damage continues; full control pressure bonus |
++| Frost Nova | `DamageSafe` | Damage continues; melee-target pressure bonus |
++| Entangling Roots | `DamageSafe` | Damage continues; melee-target pressure bonus |
++| Silence | `DamageSafe` | Damage continues; caster/healer pressure bonus |
++| Cyclone | `DamageImmune` | All damage stops |
++| Divine Shield | `DamageImmune` | Damage stops; non-damage dispels remain eligible |
++
++For every breakable case, also verify that Purge, Spellsteal and offensive
++Dispel Magic are not rejected solely because the target is controlled.
++
++## Area and cleave protection
++
++With the protected off-target inside the real effect radius, exercise:
++
++- Whirlwind
++- Divine Storm and Consecration
++- Death and Decay
++- Blizzard and Arcane Explosion
++- Rain of Fire
++- Multi-Shot, Volley and Explosive Trap
++- Chain Lightning
++- Blade Flurry
++
++Each action must be suppressed while the off-target has breakable control and
++must become eligible again after that control ends. Repeat once with the
++off-target outside the effect radius to guard against overly broad suppression.
++
++## Hunter and pet execution
++
++- A level-80 hunter that knows Freezing Arrow uses Scatter Shot followed by a
++  ranged Freezing Arrow at the controlled target's position.
++- A hunter without Freezing Arrow falls back to moving into ground-trap range.
++- Pets are recalled from breakable targets.
++- Spell Lock interrupts through the Felhunter; Seduction prefers the off-target;
++  Gnaw remains available as damage-safe control on the primary target.
