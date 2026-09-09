@@ -1670,10 +1670,18 @@ index c2b6f9c..65aa8b4 100644
  
      static UntypedValue* can_loot(PlayerbotAI* botAI) { return new CanLootValue(botAI); }
 diff --git a/modules/mod-playerbots/src/Ai/Class/Dk/DKActions.cpp b/modules/mod-playerbots/src/Ai/Class/Dk/DKActions.cpp
-index d6fd491..ac106a0 100644
+index d6fd491..3428b61 100644
 --- a/modules/mod-playerbots/src/Ai/Class/Dk/DKActions.cpp
 +++ b/modules/mod-playerbots/src/Ai/Class/Dk/DKActions.cpp
-@@ -107,7 +107,7 @@ bool CastPvpDeathGripAction::isUseful()
+@@ -7,6 +7,7 @@
+ #include "DKActions.h"
+ #include "Duration.h"
+ #include "GenericSpellActions.h"
++#include "PvpTacticalValue.h"
+ #include "Playerbots.h"
+ #include "SpellInfo.h"
+ #include "SpellMgr.h"
+@@ -107,7 +108,7 @@ bool CastPvpDeathGripAction::isUseful()
          return false;
  
      float const distance = bot->GetDistance2d(target);

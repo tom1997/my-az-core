@@ -112,6 +112,9 @@ foreach ($requiredMarker in @(
 if ($pvpPhaseOnePatchText -match '(?m)^\+\s*#include "Aura\.h"') {
     throw 'Playerbot PvP 第一阶段补丁引用了当前核心不存在的 Aura.h。'
 }
+if ($pvpPhaseOnePatchText -notmatch '(?s)diff --git a/modules/mod-playerbots/src/Ai/Class/Dk/DKActions\.cpp.{0,700}\+\#include "PvpTacticalValue\.h"') {
+    throw 'DK PvP Death Grip 动作缺少 PvpTacticalValue.h。'
+}
 
 $pvpPhaseOneHardeningPatch = Join-Path $repoRoot 'patches\0019-playerbot-pvp-phase-one-hardening.patch'
 if (-not (Test-Path -LiteralPath $pvpPhaseOneHardeningPatch)) { throw '缺少 Playerbot PvP 第一阶段加固补丁。' }
