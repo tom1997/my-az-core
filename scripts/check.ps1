@@ -192,6 +192,27 @@ foreach ($requiredMarker in @(
     }
 }
 
+$pvpDuelPetPatch = Join-Path $repoRoot 'patches\0022-playerbot-pvp-duel-pet-pressure.patch'
+if (-not (Test-Path -LiteralPath $pvpDuelPetPatch)) { throw '缺少 Playerbot PvP 决斗与宠物压力补丁。' }
+$pvpDuelPetPatchText = Get-Content -LiteralPath $pvpDuelPetPatch -Raw
+foreach ($requiredMarker in @(
+    'PvpHostilePetSnapshot',
+    'PvpHostilePetResponse',
+    'ResolvePvpMovementThreat',
+    'pvp tactical emergency escape',
+    'emergency-blink',
+    'hostile-pet-control',
+    'hostile-pet-kill',
+    'control-window-forced-release',
+    'ShouldBlockPvpDuelInterference',
+    'FailedRepositionCannotConsumeTheWholeControl',
+    'OnlyDuelParticipantsMayAffectAnActiveDuelist'
+)) {
+    if ($pvpDuelPetPatchText -notmatch [regex]::Escape($requiredMarker)) {
+        throw "Playerbot PvP 决斗与宠物压力补丁缺少标记：$requiredMarker"
+    }
+}
+
 $pvpClassPatchText = Get-Content -LiteralPath (Join-Path $repoRoot 'patches\0010-playerbot-pvp-warrior-paladin-death-knight.patch') -Raw
 if ($pvpClassPatchText -match 'AI_VALUE\(' -and $pvpClassPatchText -notmatch '#include "Playerbots\.h"') {
     throw '使用 AI_VALUE 的 PvP 动作缺少 Playerbots.h。'
