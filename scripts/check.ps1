@@ -175,8 +175,11 @@ foreach ($requiredMarker in @(
     'EstimatePvpControlWindowRemainingMs',
     'ShouldStartPvpControlWindowDamage',
     'CanPrecastPvpControlWindow',
+    'TryControlWindowResourcePrep',
     'control-window-reposition',
+    'control-window-life-tap',
     'control-window-release',
+    'PRECAST_SAFETY_MS',
     'getStandState()',
     'ExistingPeriodicDamageShortensBreakableExpectation',
     'Duel control-window behavior'
