@@ -274,6 +274,39 @@ if ($pvpBattlegroundEngagementPatchText -notmatch '(?s)releaseBattlegroundPrimar
     throw '战场唯一主目标的破控必须限定为非引导、非范围的主动硬读条。'
 }
 
+$pvpRangedPressurePatch = Join-Path $repoRoot 'patches\0025-playerbot-pvp-ranged-pressure-and-class-fixes.patch'
+if (-not (Test-Path -LiteralPath $pvpRangedPressurePatch)) {
+    throw '缺少 Playerbot PvP 远程压制与职业修复补丁。'
+}
+$pvpRangedPressurePatchText = Get-Content -LiteralPath $pvpRangedPressurePatch -Raw
+if ($pvpRangedPressurePatchText -match '(?m)^diff --git a/(?!modules/mod-playerbots/)') {
+    throw 'Playerbot PvP 远程压制补丁必须使用 AzerothCore 根目录下的模块路径。'
+}
+foreach ($requiredMarker in @(
+    'ShouldRequestPvpCastPlant',
+    'RequestPvpCastPlant',
+    'IsPvpCastPlantActive',
+    'ranged-cast-plant',
+    'IsInSpec(bot->GetActiveSpec())',
+    'PvpArchetype::ShadowPriest',
+    'SPELL_AURA_MANA_SHIELD',
+    'HasReflectSpellsAura',
+    'SetFacingToObject',
+    'MoveStealthOpenerToTarget(botAI, opponent, false)',
+    'GetPower(POWER_ENERGY) < 70',
+    'PvpMovementOwner::DruidRecovery',
+    'druid-recovery-cat-reposition',
+    'HardCastsCanReserveAnInterruptiblePlantWindow',
+    'Ranged pressure and class recovery'
+)) {
+    if ($pvpRangedPressurePatchText -notmatch [regex]::Escape($requiredMarker)) {
+        throw "Playerbot PvP 远程压制补丁缺少标记：$requiredMarker"
+    }
+}
+if ($pvpRangedPressurePatchText -match '(?m)^\+.*duelPathBecameUnsafe') {
+    throw '决斗环绕路径不能恢复每几百毫秒触发一次的侧向重算。'
+}
+
 $pvpClassPatchText = Get-Content -LiteralPath (Join-Path $repoRoot 'patches\0010-playerbot-pvp-warrior-paladin-death-knight.patch') -Raw
 if ($pvpClassPatchText -match 'AI_VALUE\(' -and $pvpClassPatchText -notmatch '#include "Playerbots\.h"') {
     throw '使用 AI_VALUE 的 PvP 动作缺少 Playerbots.h。'
