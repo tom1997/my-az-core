@@ -198,6 +198,30 @@ $pvpDuelPetPatchText = Get-Content -LiteralPath $pvpDuelPetPatch -Raw
 if ($pvpDuelPetPatchText -match '(?m)^diff --git a/(?!modules/mod-playerbots/)') {
     throw 'Playerbot PvP 决斗与宠物压力补丁必须使用 AzerothCore 根目录下的模块路径。'
 }
+
+$pvpContinuousSpacingPatch = Join-Path $repoRoot 'patches\0023-playerbot-pvp-continuous-spacing-and-rogue-openers.patch'
+if (-not (Test-Path -LiteralPath $pvpContinuousSpacingPatch)) { throw '缺少 Playerbot PvP 连续拉距与盗贼起手补丁。' }
+$pvpContinuousSpacingPatchText = Get-Content -LiteralPath $pvpContinuousSpacingPatch -Raw
+if ($pvpContinuousSpacingPatchText -match '(?m)^diff --git a/(?!modules/mod-playerbots/)') {
+    throw 'Playerbot PvP 连续拉距补丁必须使用 AzerothCore 根目录下的模块路径。'
+}
+foreach ($requiredMarker in @(
+    'PvpRangeMotion',
+    'SelectPvpRangeMotion',
+    'CancelPvpMovement',
+    'retreat-continuous',
+    'retreat-duel-orbit',
+    'paladin-immunity-stop',
+    'rogue-opener-sap',
+    'rogue-five-point-kidney',
+    'druid-hold-bear-under-pressure',
+    'duel-opponent-hidden',
+    'CanSeeOrDetect'
+)) {
+    if ($pvpContinuousSpacingPatchText -notmatch [regex]::Escape($requiredMarker)) {
+        throw "Playerbot PvP 连续拉距补丁缺少标记：$requiredMarker"
+    }
+}
 foreach ($requiredMarker in @(
     'PvpHostilePetSnapshot',
     'PvpHostilePetResponse',
