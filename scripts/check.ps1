@@ -242,6 +242,38 @@ foreach ($requiredMarker in @(
     }
 }
 
+$pvpBattlegroundEngagementPatch = Join-Path $repoRoot 'patches\0024-playerbot-pvp-battleground-engagement.patch'
+if (-not (Test-Path -LiteralPath $pvpBattlegroundEngagementPatch)) {
+    throw '缺少 Playerbot PvP 战场接敌与移动所有权补丁。'
+}
+$pvpBattlegroundEngagementPatchText = Get-Content -LiteralPath $pvpBattlegroundEngagementPatch -Raw
+if ($pvpBattlegroundEngagementPatchText -match '(?m)^diff --git a/(?!modules/mod-playerbots/)') {
+    throw 'Playerbot PvP 战场接敌补丁必须使用 AzerothCore 根目录下的模块路径。'
+}
+foreach ($requiredMarker in @(
+    'PvpBattlegroundEngagement',
+    'PvpBattlegroundPressureBand',
+    'pvp tactical battleground engage',
+    'ResolvePvpBattlegroundEngageTarget',
+    'IsPvpBattlegroundCombatOwned',
+    'SelectPvpBattlegroundRangeMotion',
+    'bg-engage-dismount',
+    'bg-travel-resume',
+    'retreat-heading-replan',
+    'cooperativeRangeMove',
+    'ShouldReleasePvpBattlegroundControl',
+    'OnlyActivePressureStartsDangerMovement',
+    'OnlyDeliberateHardCastMayReleaseTheSolePrimaryTarget',
+    'Battleground engagement and movement ownership'
+)) {
+    if ($pvpBattlegroundEngagementPatchText -notmatch [regex]::Escape($requiredMarker)) {
+        throw "Playerbot PvP 战场接敌补丁缺少标记：$requiredMarker"
+    }
+}
+if ($pvpBattlegroundEngagementPatchText -notmatch '(?s)releaseBattlegroundPrimary.{0,500}castMs >= 750.{0,200}IsChanneled\(\).{0,200}IsPvpAreaOrChainSpell') {
+    throw '战场唯一主目标的破控必须限定为非引导、非范围的主动硬读条。'
+}
+
 $pvpClassPatchText = Get-Content -LiteralPath (Join-Path $repoRoot 'patches\0010-playerbot-pvp-warrior-paladin-death-knight.patch') -Raw
 if ($pvpClassPatchText -match 'AI_VALUE\(' -and $pvpClassPatchText -notmatch '#include "Playerbots\.h"') {
     throw '使用 AI_VALUE 的 PvP 动作缺少 Playerbots.h。'
