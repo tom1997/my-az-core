@@ -215,6 +215,8 @@ foreach ($requiredMarker in @(
     'rogue-opener-sap',
     'rogue-five-point-kidney',
     'druid-hold-bear-under-pressure',
+    'melee-flank-short',
+    'warrior-charge-reset-step',
     'duel-opponent-hidden',
     'CanSeeOrDetect'
 )) {

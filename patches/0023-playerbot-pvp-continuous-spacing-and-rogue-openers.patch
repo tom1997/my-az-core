@@ -48,7 +48,7 @@ index 626516e6..e5c1e65f 100644
  
  # Melee bots move to a target's side/rear when fighting players. The interval
 diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/AttackAction.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/AttackAction.cpp
-index e8bd2573..c8251392 100644
+index e8bd2573..a7ce8756 100644
 --- a/modules/mod-playerbots/src/Ai/Base/Actions/AttackAction.cpp
 +++ b/modules/mod-playerbots/src/Ai/Base/Actions/AttackAction.cpp
 @@ -35,7 +35,7 @@ Unit* GetDuelSecondaryTarget(Player* bot, Player* opponent)
@@ -69,17 +69,24 @@ index e8bd2573..c8251392 100644
      return IsFullyDamageImmune(opponent) ? GetDuelSecondaryTarget(bot, opponent) : opponent;
  }
  }
-@@ -89,6 +91,10 @@ bool AttackMyTargetAction::Execute(Event /*event*/)
+@@ -89,8 +91,16 @@ bool AttackMyTargetAction::Execute(Event /*event*/)
          return false;
      }
  
++    Unit* target = botAI->GetUnit(guid);
++    if (!target)
++        return false;
++
 +    if (target->IsPlayer() && bot->IsHostileTo(target) && IsPvpTacticalContextEnabled(bot) &&
 +        !bot->CanSeeOrDetect(target, false, true))
 +        return false;
 +
      botAI->GetAiObjectContext()->GetValue<GuidVector>("prioritized targets")->Set({guid});
-     bool result = Attack(botAI->GetUnit(guid));
+-    bool result = Attack(botAI->GetUnit(guid));
++    bool result = Attack(target);
      if (result)
+         context->GetValue<ObjectGuid>("pull target")->Set(guid);
+ 
 diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/GenericSpellActions.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/GenericSpellActions.cpp
 index 253cf693..1d9878a8 100644
 --- a/modules/mod-playerbots/src/Ai/Base/Actions/GenericSpellActions.cpp
@@ -95,7 +102,7 @@ index 253cf693..1d9878a8 100644
          return false;
  
 diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp
-index 10555534..f0f63e6f 100644
+index 10555534..657da9ab 100644
 --- a/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp
 +++ b/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp
 @@ -56,12 +56,8 @@ bool IsPvpTacticalMovementContext(Player* bot)
@@ -450,8 +457,85 @@ index 10555534..f0f63e6f 100644
  }
  
  bool PvpTacticalPressureHunterAction::Execute(Event /*event*/)
+@@ -2101,23 +2122,36 @@ bool PvpTacticalMeleeFlankAction::Execute(Event /*event*/)
+     if (!target || !target->IsPlayer() || !botAI->IsMelee(bot, true))
+         return false;
+ 
+-    if (bot->IsNonMeleeSpellCast(false) || IsPvpMovementActive(botAI, bot, PvpMovementOwner::Flank))
++    PvpTacticalState& state = GetPvpTacticalState(botAI);
++    uint32 const now = getMSTime();
++    if (bot->IsNonMeleeSpellCast(false) || !bot->IsWithinMeleeRange(target))
+         return false;
+ 
+-    float minAngle = std::clamp(sPlayerbotAIConfig.pvpTacticalMeleeMinAngle, 90.0f, 175.0f) * M_PI / 180.0f;
+-    float maxAngle = std::clamp(sPlayerbotAIConfig.pvpTacticalMeleeMaxAngle, 90.0f, 175.0f) * M_PI / 180.0f;
+-    if (minAngle > maxAngle)
+-        std::swap(minAngle, maxAngle);
++    if (state.movementOwner == PvpMovementOwner::Flank)
++    {
++        bool const shortStrafeActive = bot->isMoving() && now - state.movementIssuedAtMs < 450 &&
++                                       bot->IsWithinMeleeRange(target) && target->HasInArc(M_PI, bot);
++        if (shortStrafeActive)
++            return false;
++        CancelPvpMovement(botAI, PvpMovementOwner::Flank);
++    }
++    if (state.lastMeleeFlankAtMs && now - state.lastMeleeFlankAtMs < 850)
++        return false;
+ 
+-    // A stable angle prevents left/right destination churn every trigger tick.
+-    float const angle = (minAngle + maxAngle) * 0.5f;
+-    // Stay near the edge of melee range so the path travels around the target
+-    // instead of clipping through its center and producing a slow-looking swap.
+-    float const distance = std::max(1.0f, bot->GetMeleeRange(target) * 0.85f);
++    // Aim at two points just off the rear center. Their radius is deliberately
++    // well inside melee range and the six-yard travel cap prevents a moving
++    // target from turning a local strafe into a large orbit.
++    float const rearAngle = Position::NormalizeOrientation(target->GetOrientation() + M_PI);
++    float const distance = std::clamp(bot->GetMeleeRange(target) * 0.45f, 1.5f, 2.6f);
++    constexpr float REAR_OFFSET = float(M_PI / 9.0);
+     Position left = target->GetPosition();
+     Position right = target->GetPosition();
+-    left.RelocatePolarOffset(angle, distance);
+-    right.RelocatePolarOffset(-angle, distance);
++    left.Relocate(target->GetPositionX() + std::cos(rearAngle + REAR_OFFSET) * distance,
++                  target->GetPositionY() + std::sin(rearAngle + REAR_OFFSET) * distance,
++                  target->GetPositionZ());
++    right.Relocate(target->GetPositionX() + std::cos(rearAngle - REAR_OFFSET) * distance,
++                   target->GetPositionY() + std::sin(rearAngle - REAR_OFFSET) * distance,
++                   target->GetPositionZ());
+ 
+     std::vector<Position> candidates;
+     for (Position const& position : {left, right})
+@@ -2125,7 +2159,8 @@ bool PvpTacticalMeleeFlankAction::Execute(Event /*event*/)
+         float x = position.GetPositionX();
+         float y = position.GetPositionY();
+         float z = position.GetPositionZ();
+-        if (bot->GetMap()->CheckCollisionAndGetValidCoords(bot, bot->GetPositionX(), bot->GetPositionY(),
++        if (bot->GetExactDist2d(position) <= 6.0f &&
++            bot->GetMap()->CheckCollisionAndGetValidCoords(bot, bot->GetPositionX(), bot->GetPositionY(),
+                                                             bot->GetPositionZ(), x, y, z))
+             candidates.emplace_back(x, y, z);
+     }
+@@ -2137,13 +2172,17 @@ bool PvpTacticalMeleeFlankAction::Execute(Event /*event*/)
+     for (Position const& candidate : candidates)
+         if (bot->GetExactDist2d(candidate) < bot->GetExactDist2d(destination))
+             destination = candidate;
++    CancelPvpMovement(botAI);
+     ClaimPvpMovement(botAI, PvpMovementOwner::Flank, target);
+     SetPvpMovementDestination(botAI, destination.GetPositionX(), destination.GetPositionY());
++    state.lastMeleeFlankAtMs = now;
+     bool const moved = MoveTo(bot->GetMapId(), destination.GetPositionX(), destination.GetPositionY(),
+                               destination.GetPositionZ(), false, false, false, true,
+                               MovementPriority::MOVEMENT_COMBAT);
+     if (!moved)
+         ClearPvpMovement(botAI, PvpMovementOwner::Flank);
++    else
++        DebugPvpTactical(botAI, "melee-flank-short", target);
+     return moved;
+ }
+ 
 diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
-index 38024d7f..3ab4d513 100644
+index 38024d7f..86985423 100644
 --- a/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
 +++ b/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
 @@ -44,6 +44,30 @@ bool TrySpell(PlayerbotAI* botAI, std::string const& spell, Unit* target, bool r
@@ -505,15 +589,95 @@ index 38024d7f..3ab4d513 100644
              if (botAI->DoSpecificAction("pvp tactical retreat", Event(), true))
              {
                  DebugPvpTactical(botAI, "control-window-reposition", target);
-@@ -364,16 +386,14 @@ bool RestoreDruidForm(PlayerbotAI* botAI, uint32 spellId)
+@@ -363,17 +385,95 @@ bool RestoreDruidForm(PlayerbotAI* botAI, uint32 spellId)
+ }
  
  void StopOwnedPvpMovement(PlayerbotAI* botAI)
++{
++    CancelPvpMovement(botAI);
++}
++
++bool TryWarriorChargeReset(PlayerbotAI* botAI, Unit* target, PvpSnapshot const& snapshot)
  {
--    Player* bot = botAI->GetBot();
+     Player* bot = botAI->GetBot();
 -    ClearPvpMovement(botAI);
 -    bot->GetMotionMaster()->Clear(false);
 -    bot->StopMoving();
++    PvpTacticalState& state = GetPvpTacticalState(botAI);
++    uint32 const now = getMSTime();
++    float const targetDistance = target ? bot->GetDistance2d(target) : 0.0f;
++
++    if (state.movementOwner == PvpMovementOwner::WarriorChargeReset)
++    {
++        // This is intentionally a brief disengage, not warrior kiting. Charge
++        // as soon as its minimum range opens; if the opponent sticks to the
++        // warrior for about a second, abandon the idea and resume melee.
++        if (target && targetDistance >= 8.0f && targetDistance <= 25.0f)
++        {
++            CancelPvpMovement(botAI, PvpMovementOwner::WarriorChargeReset);
++            if (TrySpell(botAI, "charge", target, false))
++            {
++                DebugPvpTactical(botAI, "warrior-charge-reset-connect", target);
++                return true;
++            }
++            return false;
++        }
++        if (target && bot->isMoving() && now - state.movementIssuedAtMs < 900)
++            return true;
++        CancelPvpMovement(botAI, PvpMovementOwner::WarriorChargeReset);
++        DebugPvpTactical(botAI, "warrior-charge-reset-abort", target);
++        return false;
++    }
++
++    bool const activeDuel = bot->duel && bot->duel->Opponent == target &&
++                            bot->duel->State == DUEL_STATE_IN_PROGRESS;
++    if (!activeDuel || snapshot.archetype != PvpArchetype::ArmsWarrior ||
++        !target || !bot->IsWithinMeleeRange(target) || target->IsNonMeleeSpellCast(false) ||
++        GetPvpControlState(target) != PvpControlState::None ||
++        bot->GetHealthPct() < 65.0f || target->GetHealthPct() <= 45.0f ||
++        snapshot.defensiveNeedScore >= 0.45f || snapshot.killWindowScore >= 0.55f ||
++        !botAI->HasAura("hamstring", target) ||
++        (state.lastWarriorChargeResetAtMs && now - state.lastWarriorChargeResetAtMs < 12000))
++        return false;
++
++    uint32 const chargeId = botAI->GetAiObjectContext()->GetValue<uint32>("spell id", "charge")->Get();
++    if (!chargeId || bot->HasSpellCooldown(chargeId))
++        return false;
++
++    float const step = std::clamp(9.5f - targetDistance, 4.0f, 7.5f);
++    float const awayAngle = target->GetAngle(bot);
++    GameObject* duelFlag = bot->GetMap()->GetGameObject(bot->GetGuidValue(PLAYER_DUEL_ARBITER));
++    bool found = false;
++    Position destination;
++    float bestDistance = targetDistance;
++    for (float const offset : { 0.0f, float(M_PI / 6.0), float(-M_PI / 6.0) })
++    {
++        float x = bot->GetPositionX() + std::cos(awayAngle + offset) * step;
++        float y = bot->GetPositionY() + std::sin(awayAngle + offset) * step;
++        float z = bot->GetPositionZ();
++        if (!bot->GetMap()->CheckCollisionAndGetValidCoords(bot, bot->GetPositionX(), bot->GetPositionY(),
++                                                             bot->GetPositionZ(), x, y, z) ||
++            (duelFlag && duelFlag->GetDistance2d(x, y) > sPlayerbotAIConfig.pvpTacticalDuelSafeRadius))
++            continue;
++        float const candidateDistance = target->GetDistance2d(x, y);
++        if (!found || candidateDistance > bestDistance)
++        {
++            found = true;
++            bestDistance = candidateDistance;
++            destination.Relocate(x, y, z);
++        }
++    }
++    if (!found || bestDistance < targetDistance + 3.0f)
++        return false;
++
 +    CancelPvpMovement(botAI);
++    ClaimPvpMovement(botAI, PvpMovementOwner::WarriorChargeReset, target);
++    SetPvpMovementDestination(botAI, destination.GetPositionX(), destination.GetPositionY());
++    state.lastWarriorChargeResetAtMs = now;
++    bot->GetMotionMaster()->MovePoint(0, destination.GetPositionX(), destination.GetPositionY(),
++                                      destination.GetPositionZ(), FORCED_MOVEMENT_NONE, 0.0f, 0.0f, true, false);
++    DebugPvpTactical(botAI, "warrior-charge-reset-step", target);
++    return true;
  }
  
  bool TryAntiStealthProbe(PlayerbotAI* botAI, Unit* target)
@@ -524,7 +688,7 @@ index 38024d7f..3ab4d513 100644
          bot->GetDistance2d(target) > sPlayerbotAIConfig.pvpTacticalAntiStealthProbeDistance)
          return false;
  
-@@ -418,7 +438,10 @@ bool MoveRogueResetAway(PlayerbotAI* botAI, Unit* target)
+@@ -418,7 +518,10 @@ bool MoveRogueResetAway(PlayerbotAI* botAI, Unit* target)
      if (distance >= desired)
          return false;
  
@@ -536,7 +700,7 @@ index 38024d7f..3ab4d513 100644
      float const baseAngle = target->GetAngle(bot);
      GameObject* duelFlag = bot->duel ? bot->GetMap()->GetGameObject(bot->GetGuidValue(PLAYER_DUEL_ARBITER)) : nullptr;
      bool found = false;
-@@ -445,6 +468,7 @@ bool MoveRogueResetAway(PlayerbotAI* botAI, Unit* target)
+@@ -445,6 +548,7 @@ bool MoveRogueResetAway(PlayerbotAI* botAI, Unit* target)
      if (!found)
          return false;
  
@@ -544,7 +708,7 @@ index 38024d7f..3ab4d513 100644
      ClaimPvpMovement(botAI, PvpMovementOwner::RogueReset, target);
      SetPvpMovementDestination(botAI, best.GetPositionX(), best.GetPositionY());
      bot->GetMotionMaster()->Clear(false);
-@@ -478,7 +502,7 @@ bool TryRogueReset(PlayerbotAI* botAI, Unit* target)
+@@ -478,7 +582,7 @@ bool TryRogueReset(PlayerbotAI* botAI, Unit* target)
      {
          state.rogueResetting = false;
          state.rogueResetStartedAtMs = 0;
@@ -553,7 +717,7 @@ index 38024d7f..3ab4d513 100644
          DebugPvpTactical(botAI, "rogue-reset-reopen", target);
          return false;
      }
-@@ -488,7 +512,16 @@ bool TryRogueReset(PlayerbotAI* botAI, Unit* target)
+@@ -488,7 +592,16 @@ bool TryRogueReset(PlayerbotAI* botAI, Unit* target)
      {
          if (!bot->IsInCombat() && bot->getStandState() == UNIT_STAND_STATE_SIT && bot->GetHealthPct() < 70.0f)
              return true;
@@ -571,7 +735,7 @@ index 38024d7f..3ab4d513 100644
              return true;
          // After bandaging, wait briefly for combat to drop and re-stealth. If
          // the opponent closes to melee, abandon the reset and defend normally.
-@@ -631,16 +664,18 @@ bool TryDuelPreparation(PlayerbotAI* botAI, Player* opponent)
+@@ -631,16 +744,18 @@ bool TryDuelPreparation(PlayerbotAI* botAI, Player* opponent)
      return false;
  }
  
@@ -594,7 +758,7 @@ index 38024d7f..3ab4d513 100644
      float x = opponent->GetPositionX() + std::cos(angle) * stopDistance;
      float y = opponent->GetPositionY() + std::sin(angle) * stopDistance;
      float z = opponent->GetPositionZ();
-@@ -929,6 +964,13 @@ bool PvpTacticalDuelOpenerAction::Execute(Event /*event*/)
+@@ -929,6 +1044,13 @@ bool PvpTacticalDuelOpenerAction::Execute(Event /*event*/)
      if (countdown)
          return TryDuelPreparation(botAI, opponent);
  
@@ -608,7 +772,7 @@ index 38024d7f..3ab4d513 100644
      if (state.duelOpenerComplete)
          return false;
      if (getMSTime() - state.duelOpenerStartedAtMs >= 8000)
-@@ -941,18 +983,26 @@ bool PvpTacticalDuelOpenerAction::Execute(Event /*event*/)
+@@ -941,18 +1063,26 @@ bool PvpTacticalDuelOpenerAction::Execute(Event /*event*/)
  
      if (bot->getClass() == CLASS_ROGUE && botAI->HasAura("stealth", bot))
      {
@@ -643,7 +807,7 @@ index 38024d7f..3ab4d513 100644
              int32 const sapRemaining = MechanicControlRemainingMs(opponent, MECHANIC_SAPPED);
              if (sapRemaining > 1500 && bot->GetPower(POWER_ENERGY) < 80)
              {
-@@ -961,25 +1011,34 @@ bool PvpTacticalDuelOpenerAction::Execute(Event /*event*/)
+@@ -961,25 +1091,34 @@ bool PvpTacticalDuelOpenerAction::Execute(Event /*event*/)
                  DebugPvpTactical(botAI, "rogue-opener-pool-energy", opponent);
                  return true;
              }
@@ -682,7 +846,7 @@ index 38024d7f..3ab4d513 100644
              return true;
          if (!bot->IsWithinMeleeRange(opponent))
              return false;
-@@ -1027,14 +1086,18 @@ bool PvpTacticalEmergencyEscapeAction::isUseful()
+@@ -1027,14 +1166,18 @@ bool PvpTacticalEmergencyEscapeAction::isUseful()
      float const emergencyDistance = bot->getClass() == CLASS_HUNTER ? 10.0f : 8.0f;
      if (bot->GetDistance2d(threat) > emergencyDistance)
          return false;
@@ -705,7 +869,7 @@ index 38024d7f..3ab4d513 100644
  }
  
  bool PvpTacticalEmergencyEscapeAction::Execute(Event /*event*/)
-@@ -1044,7 +1107,6 @@ bool PvpTacticalEmergencyEscapeAction::Execute(Event /*event*/)
+@@ -1044,7 +1187,6 @@ bool PvpTacticalEmergencyEscapeAction::Execute(Event /*event*/)
          return false;
      if (bot->IsNonMeleeSpellCast(false))
          bot->InterruptNonMeleeSpells(false);
@@ -713,7 +877,7 @@ index 38024d7f..3ab4d513 100644
  
      if (bot->getClass() == CLASS_MAGE)
      {
-@@ -1274,6 +1336,24 @@ bool PvpTacticalClassControlAction::Execute(Event /*event*/)
+@@ -1274,6 +1416,24 @@ bool PvpTacticalClassControlAction::Execute(Event /*event*/)
      bool const melee = bot->IsWithinMeleeRange(target);
      bool const targetCasting = target->IsNonMeleeSpellCast(false);
      PvpSnapshot const snapshot = GetPvpSnapshot(botAI);
@@ -738,7 +902,16 @@ index 38024d7f..3ab4d513 100644
      if (EnforcePvpDamageGuard(botAI, target))
          return true;
      if (TryDuelControlWindow(botAI, target, snapshot))
-@@ -1357,21 +1437,84 @@ bool PvpTacticalClassControlAction::Execute(Event /*event*/)
+@@ -1305,6 +1465,8 @@ bool PvpTacticalClassControlAction::Execute(Event /*event*/)
+             if (snapshot.archetype == PvpArchetype::ArmsWarrior && melee &&
+                 !botAI->HasAura("mortal strike", target) && TrySpell(botAI, "mortal strike", target, false))
+                 return true;
++            if (TryWarriorChargeReset(botAI, target, snapshot))
++                return true;
+             if (distance <= 25.0f && ShouldSpendPvpGapCloser(botAI, target) && TrySpell(botAI, "charge", target, false))
+                 return true;
+             return ShouldSpendPvpGapCloser(botAI, target) && TrySpell(botAI, "intercept", target, false);
+@@ -1357,21 +1519,84 @@ bool PvpTacticalClassControlAction::Execute(Event /*event*/)
              return distance <= 35.0f && NeedsSlow(botAI, "concussive shot", target) &&
                     TrySpell(botAI, "concussive shot", target, false);
          case CLASS_ROGUE:
@@ -832,7 +1005,7 @@ index 38024d7f..3ab4d513 100644
          case CLASS_DRUID:
          {
              PvpTacticalState& state = GetPvpTacticalState(botAI);
-@@ -1403,24 +1546,57 @@ bool PvpTacticalClassControlAction::Execute(Event /*event*/)
+@@ -1403,24 +1628,57 @@ bool PvpTacticalClassControlAction::Execute(Event /*event*/)
                  }
  
                  bool const controlled = TargetControlled(target);
@@ -910,7 +1083,7 @@ index c57158f8..b67e876f 100644
          new TriggerNode("pvp tactical melee flank", { NextAction("pvp tactical melee flank", PvpPriority::Position - 1) }));
      triggers.push_back(
 diff --git a/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.cpp b/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.cpp
-index 1a69e914..9c9167f6 100644
+index 1a69e914..6cf5bf05 100644
 --- a/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.cpp
 +++ b/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.cpp
 @@ -36,10 +36,6 @@ float GetPvpTacticalPreferredDistance(PlayerbotAI* botAI, Player* bot)
@@ -999,6 +1172,31 @@ index 1a69e914..9c9167f6 100644
  }
  
  PvpTacticalPlayerTargetTrigger::PvpTacticalPlayerTargetTrigger(PlayerbotAI* botAI)
+@@ -348,13 +344,21 @@ bool PvpTacticalMeleeFlankTrigger::IsActive()
+     if (bot->HasRootAura() || bot->HasStunAura() || bot->HasUnitState(UNIT_STATE_LOST_CONTROL))
+         return false;
+ 
+-    float const engageDistance = bot->GetMeleeRange(target) + sPlayerbotAIConfig.pvpTacticalMeleeFlankDistance;
+-    if (bot->GetDistance2d(target) > engageDistance)
++    // Flank is a short strafe made from contact range. If the target moves out
++    // while a point path is active, discard its now-stale world coordinate so
++    // the stock reach-melee action can immediately take over.
++    if (!bot->IsWithinMeleeRange(target))
++    {
++        CancelPvpMovement(botAI, PvpMovementOwner::Flank);
+         return false;
++    }
+ 
+     // Reposition only while inside the target's front half. Once behind it, the
+     // normal rotation continues until the opponent turns to face the bot again.
+-    return target->HasInArc(M_PI, bot);
++    bool const facingBot = target->HasInArc(M_PI, bot);
++    if (!facingBot)
++        CancelPvpMovement(botAI, PvpMovementOwner::Flank);
++    return facingBot;
+ }
+ 
+ bool OutOfRangeTrigger::IsActive()
 diff --git a/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.h b/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.h
 index 30ad8303..db31e08b 100644
 --- a/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.h
@@ -1014,7 +1212,7 @@ index 30ad8303..db31e08b 100644
  
  class PvpTacticalTargetTooFarTrigger : public Trigger
 diff --git a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp
-index 40bb0dcb..ac95bbde 100644
+index 40bb0dcb..f0061836 100644
 --- a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp
 +++ b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp
 @@ -6,6 +6,7 @@
@@ -1025,15 +1223,17 @@ index 40bb0dcb..ac95bbde 100644
  #include "MotionMaster.h"
  #include "Log.h"
  #include "Pet.h"
-@@ -835,6 +836,7 @@ void PvpTacticalState::Reset()
+@@ -835,6 +836,9 @@ void PvpTacticalState::Reset()
      movementFailedAtMs = 0;
      lastDebugAtMs = 0;
      rogueResetStartedAtMs = 0;
 +    rogueKidneyWindowUntilMs = 0;
++    lastMeleeFlankAtMs = 0;
++    lastWarriorChargeResetAtMs = 0;
      lastAntiStealthProbeAtMs = 0;
      duelOpenerStartedAtMs = 0;
      targetAcquiredAtMs = 0;
-@@ -852,12 +854,15 @@ void PvpTacticalState::Reset()
+@@ -852,12 +856,15 @@ void PvpTacticalState::Reset()
      controlWindowSpellId = 0;
      controlWindowLastRemainingMs = 0;
      trackedPrimaryTarget.Clear();
@@ -1049,7 +1249,7 @@ index 40bb0dcb..ac95bbde 100644
      destinationAngle = 0.0f;
      threatAngleAtIssue = 0.0f;
      failedAngle = 0.0f;
-@@ -868,7 +873,9 @@ void PvpTacticalState::Reset()
+@@ -868,7 +875,9 @@ void PvpTacticalState::Reset()
      ownFakeCastCancelPct = 0.0f;
      observedEnemyCastProgress = 0.0f;
      druidOriginalForm = 0;
@@ -1060,7 +1260,7 @@ index 40bb0dcb..ac95bbde 100644
      hasDestinationAngle = false;
      hasThreatAngle = false;
      druidRecovering = false;
-@@ -959,6 +966,12 @@ Unit* ResolvePvpThreatTarget(PlayerbotAI* botAI, float maxDistance)
+@@ -959,6 +968,12 @@ Unit* ResolvePvpThreatTarget(PlayerbotAI* botAI, float maxDistance)
  
      if (bot->duel && bot->duel->Opponent && bot->duel->Opponent->IsAlive())
      {
@@ -1073,7 +1273,7 @@ index 40bb0dcb..ac95bbde 100644
          // AttackDuelOpponentAction temporarily switches to pets or mirror images
          // while the opponent is completely immune. Tactical player actions must
          // pause instead of immediately overriding that secondary-target window.
-@@ -973,7 +986,7 @@ Unit* ResolvePvpThreatTarget(PlayerbotAI* botAI, float maxDistance)
+@@ -973,7 +988,7 @@ Unit* ResolvePvpThreatTarget(PlayerbotAI* botAI, float maxDistance)
      auto consider = [&](Unit* candidate)
      {
          if (!candidate || !candidate->IsPlayer() || !candidate->IsAlive() || candidate->GetMap() != bot->GetMap() ||
@@ -1082,7 +1282,7 @@ index 40bb0dcb..ac95bbde 100644
              return;
          float const distance = bot->GetDistance2d(candidate);
          if (distance < bestDistance)
-@@ -1154,9 +1167,9 @@ PvpSnapshot PvpSnapshotValue::Calculate()
+@@ -1154,9 +1169,9 @@ PvpSnapshot PvpSnapshotValue::Calculate()
  
      Unit* current = botAI->GetAiObjectContext()->GetValue<Unit*>("current target")->Get();
      if (bot->duel && bot->duel->Opponent)
@@ -1094,7 +1294,7 @@ index 40bb0dcb..ac95bbde 100644
          current = ResolvePvpThreatTarget(botAI);
      if (!current)
      {
-@@ -1342,6 +1355,29 @@ PvpSnapshot PvpSnapshotValue::Calculate()
+@@ -1342,6 +1357,29 @@ PvpSnapshot PvpSnapshotValue::Calculate()
      return snapshot;
  }
  
@@ -1124,7 +1324,7 @@ index 40bb0dcb..ac95bbde 100644
  void UpdatePvpTacticalState(PlayerbotAI* botAI, Unit* target)
  {
      PvpTacticalState& state = GetPvpTacticalState(botAI);
-@@ -1380,10 +1416,12 @@ void ClaimPvpMovement(PlayerbotAI* botAI, PvpMovementOwner owner, Unit* target)
+@@ -1380,10 +1418,12 @@ void ClaimPvpMovement(PlayerbotAI* botAI, PvpMovementOwner owner, Unit* target)
      state.movementProgressAtMs = state.movementIssuedAtMs;
      state.movementProgressX = botAI->GetBot()->GetPositionX();
      state.movementProgressY = botAI->GetBot()->GetPositionY();
@@ -1138,7 +1338,7 @@ index 40bb0dcb..ac95bbde 100644
          state.threatAngleAtIssue = std::atan2(botAI->GetBot()->GetPositionY() - target->GetPositionY(),
                                                botAI->GetBot()->GetPositionX() - target->GetPositionX());
          state.hasThreatAngle = true;
-@@ -1396,7 +1434,10 @@ void SetPvpMovementDestination(PlayerbotAI* botAI, float x, float y)
+@@ -1396,7 +1436,10 @@ void SetPvpMovementDestination(PlayerbotAI* botAI, float x, float y)
  {
      PvpTacticalState& state = GetPvpTacticalState(botAI);
      Player* bot = botAI->GetBot();
@@ -1149,7 +1349,7 @@ index 40bb0dcb..ac95bbde 100644
      state.hasDestinationAngle = true;
  }
  
-@@ -1408,11 +1449,27 @@ void ClearPvpMovement(PlayerbotAI* botAI, PvpMovementOwner owner)
+@@ -1408,11 +1451,27 @@ void ClearPvpMovement(PlayerbotAI* botAI, PvpMovementOwner owner)
          state.movementOwner = PvpMovementOwner::None;
          state.movementIssuedAtMs = 0;
          state.movementProgressAtMs = 0;
@@ -1177,7 +1377,7 @@ index 40bb0dcb..ac95bbde 100644
  bool IsPvpMovementActive(PlayerbotAI* botAI, Player* bot, PvpMovementOwner owner)
  {
      PvpTacticalState& state = GetPvpTacticalState(botAI);
-@@ -1421,10 +1478,22 @@ bool IsPvpMovementActive(PlayerbotAI* botAI, Player* bot, PvpMovementOwner owner
+@@ -1421,10 +1480,22 @@ bool IsPvpMovementActive(PlayerbotAI* botAI, Player* bot, PvpMovementOwner owner
  
      bool active = state.movementOwner != PvpMovementOwner::None && bot->isMoving() &&
                          bot->GetMotionMaster()->GetCurrentMovementGeneratorType() == POINT_MOTION_TYPE &&
@@ -1201,7 +1401,7 @@ index 40bb0dcb..ac95bbde 100644
          float const progress = std::hypot(bot->GetPositionX() - state.movementProgressX,
                                            bot->GetPositionY() - state.movementProgressY);
          if (progress >= 0.75f)
-@@ -1433,33 +1502,36 @@ bool IsPvpMovementActive(PlayerbotAI* botAI, Player* bot, PvpMovementOwner owner
+@@ -1433,33 +1504,36 @@ bool IsPvpMovementActive(PlayerbotAI* botAI, Player* bot, PvpMovementOwner owner
              state.movementProgressY = bot->GetPositionY();
              state.movementProgressAtMs = now;
          }
@@ -1249,32 +1449,37 @@ index 40bb0dcb..ac95bbde 100644
  }
  
 diff --git a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h
-index 3b7a7ce4..287b17f9 100644
+index 3b7a7ce4..5589704d 100644
 --- a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h
 +++ b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h
-@@ -122,6 +122,13 @@ enum class PvpMovementOwner : uint8
-     HunterTrap
- };
- 
+@@ -119,7 +119,15 @@ enum class PvpMovementOwner : uint8
+     DuelPrepare,
+     ReturnToAnchor,
+     RogueReset,
+-    HunterTrap
++    HunterTrap,
++    WarriorChargeReset
++};
++
 +enum class PvpRangeMotion : uint8
 +{
 +    Hold,
 +    Retreat,
 +    Advance
-+};
-+
+ };
+ 
  struct PvpTacticalState
- {
-     PvpTacticalMode mode = PvpTacticalMode::None;
-@@ -133,6 +140,7 @@ struct PvpTacticalState
+@@ -133,6 +141,9 @@ struct PvpTacticalState
      uint32 movementFailedAtMs = 0;
      uint32 lastDebugAtMs = 0;
      uint32 rogueResetStartedAtMs = 0;
 +    uint32 rogueKidneyWindowUntilMs = 0;
++    uint32 lastMeleeFlankAtMs = 0;
++    uint32 lastWarriorChargeResetAtMs = 0;
      uint32 lastAntiStealthProbeAtMs = 0;
      uint32 duelOpenerStartedAtMs = 0;
      uint32 targetAcquiredAtMs = 0;
-@@ -150,12 +158,15 @@ struct PvpTacticalState
+@@ -150,12 +161,15 @@ struct PvpTacticalState
      uint32 controlWindowSpellId = 0;
      uint32 controlWindowLastRemainingMs = 0;
      ObjectGuid trackedPrimaryTarget;
@@ -1290,7 +1495,7 @@ index 3b7a7ce4..287b17f9 100644
      float destinationAngle = 0.0f;
      float threatAngleAtIssue = 0.0f;
      float failedAngle = 0.0f;
-@@ -166,7 +177,9 @@ struct PvpTacticalState
+@@ -166,7 +180,9 @@ struct PvpTacticalState
      float ownFakeCastCancelPct = 0.0f;
      float observedEnemyCastProgress = 0.0f;
      uint32 druidOriginalForm = 0;
@@ -1301,7 +1506,7 @@ index 3b7a7ce4..287b17f9 100644
      bool hasDestinationAngle = false;
      bool hasThreatAngle = false;
      bool druidRecovering = false;
-@@ -320,10 +333,14 @@ bool ShouldStartPvpControlWindowDamage(PvpControlState control, PvpCcUsage usage
+@@ -320,10 +336,14 @@ bool ShouldStartPvpControlWindowDamage(PvpControlState control, PvpCcUsage usage
  bool CanPrecastPvpControlWindow(PlayerbotAI* botAI, Unit* target, SpellInfo const* spellInfo);
  bool CanDamagePvpTarget(PlayerbotAI* botAI, Unit* target, SpellInfo const* spellInfo = nullptr);
  bool HasBreakablePvpControlNearby(PlayerbotAI* botAI, Unit* center, float radius);
@@ -1408,10 +1613,10 @@ index b007253c..fd9689c5 100644
  {
      EXPECT_FALSE(ShouldStartPvpControlWindowDamage(
 diff --git a/modules/mod-playerbots/t/PvpTacticalScenarioMatrix.md b/modules/mod-playerbots/t/PvpTacticalScenarioMatrix.md
-index 4363a59a..a63c1bc6 100644
+index 4363a59a..8a9817aa 100644
 --- a/modules/mod-playerbots/t/PvpTacticalScenarioMatrix.md
 +++ b/modules/mod-playerbots/t/PvpTacticalScenarioMatrix.md
-@@ -92,3 +92,29 @@ off-target outside the effect radius to guard against overly broad suppression.
+@@ -92,3 +92,37 @@ off-target outside the effect radius to guard against overly broad suppression.
  - Add a priest, paladin or other support bot to the duelist's group. During
    countdown and active duel it must not dispel, heal or buff either participant;
    the two participants' self-casts and hostile casts remain allowed.
@@ -1441,3 +1646,11 @@ index 4363a59a..a63c1bc6 100644
 +- Duel a stealthed rogue and repeat with multiple hostile bots nearby. A bot that
 +  cannot personally detect the rogue must not target, move toward, range from, or
 +  place an anti-stealth effect at the rogue's live hidden coordinates.
++- Duel two melee bots while both continually turn and move. A flank may begin
++  only from melee range, travel no more than six yards, and last at most about
++  0.45 seconds. If either bot leaves melee range, the stale flank path must stop
++  immediately and `reach melee` must take over without a wide orbit.
++- Duel an Arms warrior against another melee with Charge ready and Hamstring
++  active while both are healthy. The warrior may take one brief step to open
++  eight yards and Charge back; if the opponent follows, it must abandon the
++  reset within 0.9 seconds and resume ordinary melee instead of kiting.
