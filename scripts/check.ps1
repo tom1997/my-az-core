@@ -195,6 +195,9 @@ foreach ($requiredMarker in @(
 $pvpDuelPetPatch = Join-Path $repoRoot 'patches\0022-playerbot-pvp-duel-pet-pressure.patch'
 if (-not (Test-Path -LiteralPath $pvpDuelPetPatch)) { throw '缺少 Playerbot PvP 决斗与宠物压力补丁。' }
 $pvpDuelPetPatchText = Get-Content -LiteralPath $pvpDuelPetPatch -Raw
+if ($pvpDuelPetPatchText -match '(?m)^diff --git a/(?!modules/mod-playerbots/)') {
+    throw 'Playerbot PvP 决斗与宠物压力补丁必须使用 AzerothCore 根目录下的模块路径。'
+}
 foreach ($requiredMarker in @(
     'PvpHostilePetSnapshot',
     'PvpHostilePetResponse',

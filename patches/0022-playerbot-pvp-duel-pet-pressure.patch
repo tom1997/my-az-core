@@ -1,7 +1,7 @@
-diff --git a/src/Ai/Base/ActionContext.h b/src/Ai/Base/ActionContext.h
+diff --git a/modules/mod-playerbots/src/Ai/Base/ActionContext.h b/modules/mod-playerbots/src/Ai/Base/ActionContext.h
 index 1525eb59..d70b2c80 100644
---- a/src/Ai/Base/ActionContext.h
-+++ b/src/Ai/Base/ActionContext.h
+--- a/modules/mod-playerbots/src/Ai/Base/ActionContext.h
++++ b/modules/mod-playerbots/src/Ai/Base/ActionContext.h
 @@ -102,6 +102,8 @@ public:
          creators["pvp tactical retreat"] = &ActionContext::pvp_tactical_retreat;
          creators["pvp tactical pressure hunter"] = &ActionContext::pvp_tactical_pressure_hunter;
@@ -26,10 +26,10 @@ index 1525eb59..d70b2c80 100644
      static Action* pvp_tactical_class_control(PlayerbotAI* botAI) { return new PvpTacticalClassControlAction(botAI); }
      static Action* pvp_tactical_fake_cast(PlayerbotAI* botAI) { return new PvpTacticalFakeCastAction(botAI); }
      static Action* pvp_tactical_target_swap(PlayerbotAI* botAI) { return new PvpTacticalTargetSwapAction(botAI); }
-diff --git a/src/Ai/Base/Actions/AttackAction.cpp b/src/Ai/Base/Actions/AttackAction.cpp
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/AttackAction.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/AttackAction.cpp
 index 35a3247d..e8bd2573 100644
---- a/src/Ai/Base/Actions/AttackAction.cpp
-+++ b/src/Ai/Base/Actions/AttackAction.cpp
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/AttackAction.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/AttackAction.cpp
 @@ -47,6 +47,18 @@ Unit* GetDuelSecondaryTarget(Player* bot, Player* opponent)
      }
      return best;
@@ -71,10 +71,10 @@ index 35a3247d..e8bd2573 100644
      if (IsFullyDamageImmune(opponent))
      {
          if (Unit* secondary = GetDuelSecondaryTarget(bot, opponent))
-diff --git a/src/Ai/Base/Actions/GenericSpellActions.cpp b/src/Ai/Base/Actions/GenericSpellActions.cpp
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/GenericSpellActions.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/GenericSpellActions.cpp
 index 3cf2a763..253cf693 100644
---- a/src/Ai/Base/Actions/GenericSpellActions.cpp
-+++ b/src/Ai/Base/Actions/GenericSpellActions.cpp
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/GenericSpellActions.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/GenericSpellActions.cpp
 @@ -180,6 +180,8 @@ bool CastSpellAction::Execute(Event /*event*/)
      }
  
@@ -103,10 +103,10 @@ index 3cf2a763..253cf693 100644
  
      if (IsPvpTacticalContextEnabled(bot))
      {
-diff --git a/src/Ai/Base/Actions/MovementActions.cpp b/src/Ai/Base/Actions/MovementActions.cpp
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp
 index 2955fdf6..10555534 100644
---- a/src/Ai/Base/Actions/MovementActions.cpp
-+++ b/src/Ai/Base/Actions/MovementActions.cpp
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp
 @@ -1864,12 +1864,9 @@ bool FleeAction::Execute(Event /*event*/)
  
  bool PvpTacticalRetreatAction::Execute(Event /*event*/)
@@ -160,10 +160,10 @@ index 2955fdf6..10555534 100644
  }
  
  bool PvpTacticalMeleeFlankAction::Execute(Event /*event*/)
-diff --git a/src/Ai/Base/Actions/PvpTacticalActions.cpp b/src/Ai/Base/Actions/PvpTacticalActions.cpp
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
 index 768ec497..38024d7f 100644
---- a/src/Ai/Base/Actions/PvpTacticalActions.cpp
-+++ b/src/Ai/Base/Actions/PvpTacticalActions.cpp
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
 @@ -27,6 +27,7 @@
  
  #include <algorithm>
@@ -444,10 +444,10 @@ index 768ec497..38024d7f 100644
              return NeedsSlow(botAI, "slow", target) && TrySpell(botAI, "slow", target, false);
          case CLASS_WARLOCK:
              if (melee && TrySpell(botAI, "death coil", target))
-diff --git a/src/Ai/Base/Actions/PvpTacticalActions.h b/src/Ai/Base/Actions/PvpTacticalActions.h
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.h b/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.h
 index aed8208d..3dcedbca 100644
---- a/src/Ai/Base/Actions/PvpTacticalActions.h
-+++ b/src/Ai/Base/Actions/PvpTacticalActions.h
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.h
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.h
 @@ -13,6 +13,22 @@ public:
      bool isUseful() override;
  };
@@ -471,10 +471,10 @@ index aed8208d..3dcedbca 100644
  class PvpTacticalFakeCastAction : public Action
  {
  public:
-diff --git a/src/Ai/Base/Strategy/CombatStrategy.cpp b/src/Ai/Base/Strategy/CombatStrategy.cpp
+diff --git a/modules/mod-playerbots/src/Ai/Base/Strategy/CombatStrategy.cpp b/modules/mod-playerbots/src/Ai/Base/Strategy/CombatStrategy.cpp
 index ac4d3baa..c57158f8 100644
---- a/src/Ai/Base/Strategy/CombatStrategy.cpp
-+++ b/src/Ai/Base/Strategy/CombatStrategy.cpp
+--- a/modules/mod-playerbots/src/Ai/Base/Strategy/CombatStrategy.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Strategy/CombatStrategy.cpp
 @@ -61,6 +61,8 @@ void CombatStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
          new TriggerNode("pvp tactical melee flank", { NextAction("pvp tactical melee flank", PvpPriority::Position - 1) }));
      triggers.push_back(
@@ -484,10 +484,10 @@ index ac4d3baa..c57158f8 100644
                                                           NextAction("pvp tactical class control", PvpPriority::Control),
                                                           NextAction("pvp tactical target swap", PvpPriority::Pressure + 2) }));
      // The pet-attack trigger is commented out because it was forcing the bot's pet to attack, overriding stay and follow commands.
-diff --git a/src/Ai/Base/Trigger/RangeTriggers.cpp b/src/Ai/Base/Trigger/RangeTriggers.cpp
+diff --git a/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.cpp b/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.cpp
 index f91d0584..1a69e914 100644
---- a/src/Ai/Base/Trigger/RangeTriggers.cpp
-+++ b/src/Ai/Base/Trigger/RangeTriggers.cpp
+--- a/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.cpp
 @@ -202,8 +202,8 @@ bool PvpTacticalRangedTooCloseTrigger::IsActive()
          GetPvpTacticalState(botAI).retreating = false;
          return false;
@@ -530,10 +530,10 @@ index f91d0584..1a69e914 100644
  
      // Hysteresis turns retreat into a state instead of a series of tiny
      // corrections: enter when pressured inside the danger radius and keep
-diff --git a/src/Ai/Base/Value/PvpTacticalValue.cpp b/src/Ai/Base/Value/PvpTacticalValue.cpp
+diff --git a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp
 index 42f59af8..40bb0dcb 100644
---- a/src/Ai/Base/Value/PvpTacticalValue.cpp
-+++ b/src/Ai/Base/Value/PvpTacticalValue.cpp
+--- a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp
 @@ -492,6 +492,49 @@ PvpControlState ClassifyPvpControlFallback(bool metadataDamageSafe, bool stunned
      return PvpControlState::None;
  }
@@ -735,10 +735,10 @@ index 42f59af8..40bb0dcb 100644
      uint32 const actionSpellId = botAI->GetAiObjectContext()->GetValue<uint32>("spell id", action)->Get();
      SpellInfo const* actionSpellInfo = actionSpellId ? sSpellMgr->GetSpellInfo(actionSpellId) : nullptr;
      if (actionSpellInfo && IsPvpDamageSpell(actionSpellInfo) &&
-diff --git a/src/Ai/Base/Value/PvpTacticalValue.h b/src/Ai/Base/Value/PvpTacticalValue.h
+diff --git a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h
 index ac0a8d83..3b7a7ce4 100644
---- a/src/Ai/Base/Value/PvpTacticalValue.h
-+++ b/src/Ai/Base/Value/PvpTacticalValue.h
+--- a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h
++++ b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h
 @@ -81,6 +81,14 @@ enum class PvpCastPurpose : uint8
      Utility
  };
@@ -820,10 +820,10 @@ index ac0a8d83..3b7a7ce4 100644
  bool CanApplyPvpControl(PlayerbotAI* botAI, std::string const& spell, Unit* target);
  float GetPvpDrWeight(Unit* target, uint32 spellId);
  bool IsHighValuePvpCast(Unit* caster);
-diff --git a/src/Ai/Class/Mage/MageActions.cpp b/src/Ai/Class/Mage/MageActions.cpp
+diff --git a/modules/mod-playerbots/src/Ai/Class/Mage/MageActions.cpp b/modules/mod-playerbots/src/Ai/Class/Mage/MageActions.cpp
 index 889d6f57..cca6f903 100644
---- a/src/Ai/Class/Mage/MageActions.cpp
-+++ b/src/Ai/Class/Mage/MageActions.cpp
+--- a/modules/mod-playerbots/src/Ai/Class/Mage/MageActions.cpp
++++ b/modules/mod-playerbots/src/Ai/Class/Mage/MageActions.cpp
 @@ -196,6 +196,10 @@ bool CastPvpPolymorphAction::isUseful()
      float const distance = bot->GetDistance2d(target);
      if (distance < 8.0f || distance > 30.0f || bot->GetHealthPct() > 60.0f)
@@ -856,10 +856,10 @@ index 889d6f57..cca6f903 100644
  }
  
  bool HoldPvpPolymorphAction::Execute(Event /*event*/)
-diff --git a/t/PvpTacticalPolicyTests.cxx b/t/PvpTacticalPolicyTests.cxx
+diff --git a/modules/mod-playerbots/t/PvpTacticalPolicyTests.cxx b/modules/mod-playerbots/t/PvpTacticalPolicyTests.cxx
 index 3869a557..b007253c 100644
---- a/t/PvpTacticalPolicyTests.cxx
-+++ b/t/PvpTacticalPolicyTests.cxx
+--- a/modules/mod-playerbots/t/PvpTacticalPolicyTests.cxx
++++ b/modules/mod-playerbots/t/PvpTacticalPolicyTests.cxx
 @@ -142,6 +142,36 @@ TEST(PvpControlWindowPolicy, ExistingPeriodicDamageShortensBreakableExpectation)
                           PvpControlState::DamageImmune, 7000, true));
  }
@@ -897,10 +897,10 @@ index 3869a557..b007253c 100644
  TEST(PvpControlWindowPolicy, UnsafeWaysToBreakControlStayBlocked)
  {
      EXPECT_FALSE(ShouldStartPvpControlWindowDamage(
-diff --git a/t/PvpTacticalScenarioMatrix.md b/t/PvpTacticalScenarioMatrix.md
+diff --git a/modules/mod-playerbots/t/PvpTacticalScenarioMatrix.md b/modules/mod-playerbots/t/PvpTacticalScenarioMatrix.md
 index 89e63a3b..4363a59a 100644
---- a/t/PvpTacticalScenarioMatrix.md
-+++ b/t/PvpTacticalScenarioMatrix.md
+--- a/modules/mod-playerbots/t/PvpTacticalScenarioMatrix.md
++++ b/modules/mod-playerbots/t/PvpTacticalScenarioMatrix.md
 @@ -41,6 +41,9 @@ Dispel Magic are not rejected solely because the target is controlled.
  - Repeat Fear/Polymorph with an existing periodic damage aura. The expected
    control window must shrink to 1.2 seconds so the bot does not plan a long
