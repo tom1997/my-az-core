@@ -396,6 +396,29 @@ if ($pvpMaintainedEffectsPatchText -notmatch '(?s)for \(char const\* spell : \{ 
     throw '有伤害价值的持续技能不能被维持型减速策略一并禁止。'
 }
 
+$pvpPetRoutingPatch = Join-Path $repoRoot 'patches\0029-playerbot-pvp-pet-action-routing.patch'
+if (-not (Test-Path -LiteralPath $pvpPetRoutingPatch)) {
+    throw '缺少 Playerbot PvP 宠物动作路由补丁。'
+}
+$pvpPetRoutingPatchText = Get-Content -LiteralPath $pvpPetRoutingPatch -Raw
+if ($pvpPetRoutingPatchText -match '(?m)^diff --git a/(?!modules/mod-playerbots/)') {
+    throw 'Playerbot PvP 宠物动作路由补丁必须使用 AzerothCore 根目录下的模块路径。'
+}
+foreach ($requiredMarker in @(
+    'creators["pvp tactical pet attack"]',
+    'PetAttackAction(ai, "pvp tactical pet attack")',
+    'NextAction("pvp tactical pet attack"',
+    'DoSpecificAction("pvp tactical pet attack"',
+    'pet_invalid_target_error'
+)) {
+    if ($pvpPetRoutingPatchText -notmatch [regex]::Escape($requiredMarker)) {
+        throw "Playerbot PvP 宠物动作路由补丁缺少标记：$requiredMarker"
+    }
+}
+if ($pvpPetRoutingPatchText -match '(?m)^\+.*(?:NextAction|DoSpecificAction)\("pet attack"') {
+    throw 'PvP 战术层不能调用与聊天命令冲突的 pet attack 动作名。'
+}
+
 $pvpClassPatchText = Get-Content -LiteralPath (Join-Path $repoRoot 'patches\0010-playerbot-pvp-warrior-paladin-death-knight.patch') -Raw
 if ($pvpClassPatchText -match 'AI_VALUE\(' -and $pvpClassPatchText -notmatch '#include "Playerbots\.h"') {
     throw '使用 AI_VALUE 的 PvP 动作缺少 Playerbots.h。'
