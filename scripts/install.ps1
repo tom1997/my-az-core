@@ -21,7 +21,14 @@ if ($versionText -notmatch '3\s*[,\.]\s*3\s*[,\.]\s*5' -or $versionText -notmatc
 }
 
 $drive = Get-PSDrive -Name ([IO.Path]::GetPathRoot($paths.Root).TrimEnd(':\'))
-if ($drive.Free -lt 45GB) { throw "安装盘可用空间不足 45 GB：$([math]::Round($drive.Free / 1GB, 1)) GB" }
+$isRuntimeUpdate = $SkipMySqlSetup -and
+    (Test-Path -LiteralPath (Join-Path $paths.Data 'dbc')) -and
+    (Test-Path -LiteralPath (Join-Path $paths.MySqlBin 'mysqld.exe'))
+$minimumFreeSpace = if ($isRuntimeUpdate) { 5GB } else { 45GB }
+$minimumFreeSpaceGB = [math]::Round($minimumFreeSpace / 1GB, 0)
+if ($drive.Free -lt $minimumFreeSpace) {
+    throw "安装盘可用空间不足 $minimumFreeSpaceGB GB：$([math]::Round($drive.Free / 1GB, 1)) GB"
+}
 
 foreach ($dir in @($paths.Root, $paths.Releases, $paths.Runtime, $paths.Configs, $paths.Data, $paths.Logs, $paths.State, $paths.Backups, $paths.MySql)) {
     New-Item -ItemType Directory -Path $dir -Force | Out-Null
