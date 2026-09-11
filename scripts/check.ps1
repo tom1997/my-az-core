@@ -341,6 +341,35 @@ if ($pvpControlOwnershipPatchText -notmatch '(?s)ownedByBot && setupComplete.{0,
     throw '自己的主目标控制必须在准备完成后允许主动破控。'
 }
 
+$pvpFlowPatch = Join-Path $repoRoot 'patches\0027-playerbot-pvp-immunity-target-and-battleground-flow.patch'
+if (-not (Test-Path -LiteralPath $pvpFlowPatch)) {
+    throw '缺少 Playerbot PvP 免疫、目标稳定与战场流畅度补丁。'
+}
+$pvpFlowPatchText = Get-Content -LiteralPath $pvpFlowPatch -Raw
+if ($pvpFlowPatchText -match '(?m)^diff --git a/(?!modules/mod-playerbots/)') {
+    throw 'Playerbot PvP 流畅度补丁必须使用 AzerothCore 根目录下的模块路径。'
+}
+foreach ($requiredMarker in @(
+    'ShouldUsePvpImmunityRecovery',
+    'mage-ice-block-release',
+    'enemy-immunity-heal',
+    'PvpArchetype::SurvivalHunter',
+    'InvalidTargetTrigger::IsActive',
+    'CanCastSpell(spell, target)',
+    'ShouldKeepPvpBattlegroundCombat',
+    'combatSpacing',
+    'M_PI * 2.0 / 3.0',
+    'VisibleTargetKeepsCombatOwnershipAcrossCoreFlagDelay',
+    'stock possible-target cache'
+)) {
+    if ($pvpFlowPatchText -notmatch [regex]::Escape($requiredMarker)) {
+        throw "Playerbot PvP 流畅度补丁缺少标记：$requiredMarker"
+    }
+}
+if ($pvpFlowPatchText -match '(?m)^\+.*battlegroundReengageAtMs') {
+    throw '战场重新接战不能再保留会造成五秒挂机的冷却门。'
+}
+
 $pvpClassPatchText = Get-Content -LiteralPath (Join-Path $repoRoot 'patches\0010-playerbot-pvp-warrior-paladin-death-knight.patch') -Raw
 if ($pvpClassPatchText -match 'AI_VALUE\(' -and $pvpClassPatchText -notmatch '#include "Playerbots\.h"') {
     throw '使用 AI_VALUE 的 PvP 动作缺少 Playerbots.h。'

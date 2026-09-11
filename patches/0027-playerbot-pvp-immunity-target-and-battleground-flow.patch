@@ -1,0 +1,683 @@
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/GenericSpellActions.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/GenericSpellActions.cpp
+index 5a3595b57aac480895dc4ec32690dafad543d6ab..c0be5fea624448eb0fc164fa8ad0c852ceae0360 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/GenericSpellActions.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/GenericSpellActions.cpp
+@@ -280,8 +280,12 @@ bool CastSpellAction::isPossible()
+     // because the bot was moving. Reserve a short, interruptible plant window
+     // so the next decision can actually begin the cast. Face-hug pressure
+     // cancels the reservation in IsPvpCastPlantActive.
+-    if (IsPvpTacticalContextEnabled(bot) && bot->duel && bot->isMoving() &&
+-        GetPvpTacticalState(botAI).movementOwner == PvpMovementOwner::Retreat)
++    PvpTacticalState& tacticalState = GetPvpTacticalState(botAI);
++    bool const combatSpacing = bot->duel ||
++        (bot->InBattleground() && IsPvpBattlegroundCombatOwned(botAI) &&
++         tacticalState.battlegroundPressureBand != PvpBattlegroundPressureBand::Emergency);
++    if (IsPvpTacticalContextEnabled(bot) && combatSpacing && bot->isMoving() &&
++        tacticalState.movementOwner == PvpMovementOwner::Retreat)
+     {
+         Unit* target = GetTarget();
+         uint32 const spellId = AI_VALUE2(uint32, "spell id", spell);
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp
+index 5da1776611ee0833dfd754d2a51b19b9a512c17b..782b39c6cc7bc46fe8a584bf7905521d36cdd649 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp
+@@ -1874,7 +1874,7 @@ bool PvpTacticalRetreatAction::Execute(Event /*event*/)
+     if (!primaryTarget || !target || !botAI->IsRanged(bot, true) || bot->IsMounted() ||
+         state.rangeMotion == PvpRangeMotion::Hold)
+         return false;
+-    if (bot->duel && IsPvpCastPlantActive(botAI))
++    if (IsPvpCastPlantActive(botAI))
+         return false;
+ 
+     // Hard casts deliberately plant inside the stable band. Emergency escape
+@@ -1901,7 +1901,12 @@ bool PvpTacticalRetreatAction::Execute(Event /*event*/)
+             float const currentThreatAngle = target->GetAngle(bot);
+             float const headingDelta = std::abs(std::remainder(
+                 currentThreatAngle - state.threatAngleAtIssue, float(2.0 * M_PI)));
+-            bool const worldHeadingChanged = !bot->duel && headingDelta > float(M_PI / 3.0);
++            // Battleground targets weave around other players constantly. A
++            // sixty-degree threshold recreated the spline every few decisions;
++            // tolerate a broad turn and only replan before it becomes a near
++            // reversal. Open-world behavior keeps its tighter correction.
++            float const replanAngle = bot->InBattleground() ? float(M_PI * 2.0 / 3.0) : float(M_PI / 3.0);
++            bool const worldHeadingChanged = !bot->duel && headingDelta > replanAngle;
+             if (worldHeadingChanged)
+             {
+                 CancelPvpMovement(botAI, PvpMovementOwner::Retreat);
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
+index f802166425b841b1f09a6fccccae231fe05409c1..0a2625c1371c8e0a7e483dd308cfe8fa07dbc77f 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
+@@ -230,6 +230,174 @@ bool TryControlWindowRecovery(PlayerbotAI* botAI, Unit* target, PvpControlWindow
+     return false;
+ }
+ 
++bool TryOpponentImmunityRecovery(PlayerbotAI* botAI, Unit* target, PvpSnapshot const& snapshot)
++{
++    Player* bot = botAI->GetBot();
++    if (!ShouldUsePvpImmunityRecovery(snapshot.targetControlState, bot->GetHealthPct()))
++        return false;
++
++    // Ice Block and Divine Shield cannot be pressured. Spend that otherwise
++    // dead duel time on real recovery, without repeatedly refreshing an aura
++    // that is already present.
++    bot->AttackStop();
++    if (bot->IsNonMeleeSpellCast(false))
++        return true;
++
++    if (bot->GetHealthPct() < 85.0f && botAI->DoSpecificAction("healthstone", Event(), true))
++    {
++        DebugPvpTactical(botAI, "enemy-immunity-healthstone", target);
++        return true;
++    }
++
++    bool recovered = false;
++    switch (bot->getClass())
++    {
++        case CLASS_DRUID:
++            if (bot->GetShapeshiftForm() != FORM_NONE)
++            {
++                botAI->RemoveShapeshift();
++                DebugPvpTactical(botAI, "enemy-immunity-leave-form", target);
++                return true;
++            }
++            recovered = !botAI->HasAura("rejuvenation", bot) &&
++                        TrySpell(botAI, "rejuvenation", bot, false);
++            break;
++        case CLASS_PRIEST:
++            recovered = (!botAI->HasAura("renew", bot) && TrySpell(botAI, "renew", bot, false)) ||
++                        (!botAI->HasAura("power word: shield", bot) &&
++                         TrySpell(botAI, "power word: shield", bot, false));
++            break;
++        case CLASS_SHAMAN:
++            recovered = !botAI->HasAura("riptide", bot) && TrySpell(botAI, "riptide", bot, false);
++            break;
++        case CLASS_DEATH_KNIGHT:
++            recovered = TrySpell(botAI, "rune tap", bot, false) || TrySpell(botAI, "death pact", bot, false);
++            break;
++        case CLASS_WARRIOR:
++            recovered = !botAI->HasAura("enraged regeneration", bot) &&
++                        TrySpell(botAI, "enraged regeneration", bot, false);
++            break;
++        default:
++            break;
++    }
++    if (recovered)
++    {
++        DebugPvpTactical(botAI, "enemy-immunity-instant-recovery", target);
++        return true;
++    }
++
++    auto ready = [&](char const* spell)
++    {
++        uint32 const spellId = botAI->GetAiObjectContext()->GetValue<uint32>("spell id", spell)->Get();
++        return spellId && !bot->HasSpellCooldown(spellId);
++    };
++    bool const hasHardHeal =
++        (bot->getClass() == CLASS_DRUID && (ready("regrowth") || ready("healing touch"))) ||
++        (bot->getClass() == CLASS_PALADIN && (ready("flash of light") || ready("holy light"))) ||
++        (bot->getClass() == CLASS_PRIEST && (ready("flash heal") || ready("greater heal"))) ||
++        (bot->getClass() == CLASS_SHAMAN && (ready("lesser healing wave") || ready("healing wave")));
++    if (hasHardHeal && bot->isMoving())
++    {
++        StopOwnedPvpMovement(botAI);
++        DebugPvpTactical(botAI, "enemy-immunity-heal-plant", target);
++        return true;
++    }
++
++    switch (bot->getClass())
++    {
++        case CLASS_DRUID:
++            recovered = TrySpell(botAI, "regrowth", bot, false) || TrySpell(botAI, "healing touch", bot, false);
++            break;
++        case CLASS_PALADIN:
++            recovered = TrySpell(botAI, "flash of light", bot, false) || TrySpell(botAI, "holy light", bot, false);
++            break;
++        case CLASS_PRIEST:
++            recovered = TrySpell(botAI, "flash heal", bot, false) || TrySpell(botAI, "greater heal", bot, false);
++            break;
++        case CLASS_SHAMAN:
++            recovered = TrySpell(botAI, "lesser healing wave", bot, false) || TrySpell(botAI, "healing wave", bot, false);
++            break;
++        default:
++            break;
++    }
++    if (recovered)
++    {
++        DebugPvpTactical(botAI, "enemy-immunity-heal", target);
++        return true;
++    }
++
++    if (bot->getClass() == CLASS_MAGE && bot->GetHealthPct() >= 85.0f &&
++        bot->GetPowerPct(POWER_MANA) < 70.0f && ready("evocation"))
++    {
++        if (bot->isMoving())
++        {
++            StopOwnedPvpMovement(botAI);
++            return true;
++        }
++        if (TrySpell(botAI, "evocation", bot, false))
++        {
++            DebugPvpTactical(botAI, "enemy-immunity-evocation", target);
++            return true;
++        }
++    }
++
++    if (!bot->HasAura(11196))
++        if (Item* bandage = botAI->FindBandage())
++        {
++            if (bot->isMoving())
++            {
++                StopOwnedPvpMovement(botAI);
++                return true;
++            }
++            botAI->ImbueItem(bandage, bot);
++            DebugPvpTactical(botAI, "enemy-immunity-bandage", target);
++            return true;
++        }
++    return false;
++}
++
++bool HandlePvpMageIceBlock(PlayerbotAI* botAI, Unit* target, PvpSnapshot const& snapshot)
++{
++    Player* bot = botAI->GetBot();
++    PvpTacticalState& state = GetPvpTacticalState(botAI);
++    if (bot->getClass() != CLASS_MAGE || !botAI->HasAura("ice block", bot))
++    {
++        state.mageIceBlockStartedAtMs = 0;
++        return false;
++    }
++
++    uint32 const now = getMSTime();
++    if (!state.mageIceBlockStartedAtMs)
++        state.mageIceBlockStartedAtMs = now;
++    uint32 const elapsed = now - state.mageIceBlockStartedAtMs;
++    bool const threatMovementDenied = target->HasUnitState(UNIT_STATE_ROOT) || target->HasRootAura() ||
++                                      target->isFrozen() || target->HasAuraType(SPELL_AURA_MOD_STUN);
++    if (ShouldReleasePvpIceBlock(elapsed, snapshot.incomingBurstScore, bot->GetDistance2d(target),
++                                 threatMovementDenied, target->GetHealthPct()))
++    {
++        botAI->RemoveAura("ice block");
++        state.mageIceBlockStartedAtMs = 0;
++        state.rangedCastPlantUntilMs = 0;
++        DebugPvpTactical(botAI, "mage-ice-block-release", target);
++        return true;
++    }
++
++    bot->AttackStop();
++    return true;
++}
++
++Unit* ResolvePvpClassActionTarget(PlayerbotAI* botAI)
++{
++    if (Unit* target = ResolvePvpThreatTarget(botAI))
++        return target;
++    Player* bot = botAI->GetBot();
++    Player* opponent = bot->duel ? bot->duel->Opponent : nullptr;
++    if (opponent && bot->duel->State == DUEL_STATE_IN_PROGRESS && opponent->IsAlive() &&
++        bot->CanSeeOrDetect(opponent, false, true))
++        return opponent;
++    return nullptr;
++}
++
+ bool TryControlWindowResourcePrep(PlayerbotAI* botAI, Unit* target, PvpControlWindow const& window)
+ {
+     Player* bot = botAI->GetBot();
+@@ -1256,9 +1424,6 @@ bool PvpTacticalBattlegroundEngageAction::isUseful()
+         !IsPvpTacticalEligible(bot) || !bot->InBattleground())
+         return false;
+     PvpTacticalState& state = GetPvpTacticalState(botAI);
+-    if (state.battlegroundEngagement == PvpBattlegroundEngagement::Travel &&
+-        state.battlegroundReengageAtMs > getMSTime() && bot->getAttackers().empty())
+-        return false;
+     return state.battlegroundEngagement != PvpBattlegroundEngagement::Travel ||
+            ResolvePvpBattlegroundEngageTarget(botAI, 50.0f);
+ }
+@@ -1276,9 +1441,6 @@ bool PvpTacticalBattlegroundEngageAction::Execute(Event /*event*/)
+     }
+ 
+     uint32 const now = getMSTime();
+-    if (state.battlegroundEngagement == PvpBattlegroundEngagement::Travel &&
+-        state.battlegroundReengageAtMs > now && bot->getAttackers().empty())
+-        return false;
+     Unit* target = botAI->GetUnit(state.battlegroundTargetGuid);
+     auto validTarget = [&](Unit* candidate, float maxDistance)
+     {
+@@ -1300,26 +1462,33 @@ bool PvpTacticalBattlegroundEngageAction::Execute(Event /*event*/)
+     if (state.battlegroundEngagement == PvpBattlegroundEngagement::Combat)
+     {
+         bool const engageGrace = state.battlegroundEngagedAtMs && now - state.battlegroundEngagedAtMs < 3000;
+-        if (target && (bot->IsInCombat() || underPressure || engageGrace))
++        bool const recentlyInCombat = state.battlegroundLastCombatAtMs &&
++                                      now - state.battlegroundLastCombatAtMs < 2500;
++        if (ShouldKeepPvpBattlegroundCombat(target != nullptr, bot->IsInCombat(), underPressure,
++                                            engageGrace, recentlyInCombat))
+         {
+-            state.battlegroundTargetGuid = target->GetGUID();
+-            Unit* current = context->GetValue<Unit*>("current target")->Get();
+-            if (!current || !current->IsAlive() || !bot->IsHostileTo(current))
++            if (target)
+             {
+-                bot->SetSelection(target->GetGUID());
+-                context->GetValue<Unit*>("current target")->Set(target);
++                state.battlegroundTargetGuid = target->GetGUID();
++                Unit* current = context->GetValue<Unit*>("current target")->Get();
++                if (!current || !current->IsAlive() || !bot->IsHostileTo(current))
++                {
++                    bot->SetSelection(target->GetGUID());
++                    context->GetValue<Unit*>("current target")->Set(target);
++                    current = target;
++                }
++                // Opening casts do not always set the core combat flag at once.
++                // Reassert attack ownership without waiting for travel AI to
++                // rediscover the same target, but never punch protected CC.
++                if (current == target && bot->GetVictim() != target && CanDamagePvpTarget(botAI, target))
++                    bot->Attack(target, botAI->IsMelee(bot, true));
+             }
+             return false;
+         }
+ 
+-        if (bot->IsInCombat() || !bot->getAttackers().empty() ||
+-            (state.battlegroundLastCombatAtMs && now - state.battlegroundLastCombatAtMs < 2500))
+-            return false;
+-
+         state.battlegroundEngagement = PvpBattlegroundEngagement::Travel;
+         state.battlegroundPressureBand = PvpBattlegroundPressureBand::None;
+         state.battlegroundTargetGuid.Clear();
+-        state.battlegroundReengageAtMs = now + 5000;
+         state.rangeMotion = PvpRangeMotion::Hold;
+         if (state.movementOwner != PvpMovementOwner::None)
+             CancelPvpMovement(botAI);
+@@ -1397,6 +1566,16 @@ bool PvpTacticalEmergencyEscapeAction::Execute(Event /*event*/)
+         bot->SetOrientation(bot->GetAngle(threat) + float(M_PI));
+         if (TrySpell(botAI, "blink", bot, false))
+         {
++            // Blink invalidates the old point spline. Hand a fresh long
++            // retreat destination to MotionMaster immediately so the mage does
++            // not spend the next decision interval standing at the landing
++            // point. This is movement-only and does not consume another GCD.
++            PvpTacticalState& state = GetPvpTacticalState(botAI);
++            if (state.rangeMotion == PvpRangeMotion::Retreat)
++            {
++                ClearPvpMovement(botAI, PvpMovementOwner::Retreat);
++                botAI->DoSpecificAction("pvp tactical retreat", Event(), true);
++            }
+             DebugPvpTactical(botAI, "emergency-blink", threat);
+             return true;
+         }
+@@ -1566,7 +1745,7 @@ bool PvpTacticalHostilePetAction::Execute(Event /*event*/)
+ 
+ bool PvpTacticalClassControlAction::isUseful()
+ {
+-    Unit* target = ResolvePvpThreatTarget(botAI);
++    Unit* target = ResolvePvpClassActionTarget(botAI);
+     return target && target->IsPlayer() && target->IsAlive() && bot->IsAlive();
+ }
+ 
+@@ -1625,25 +1804,27 @@ bool PvpTacticalTargetSwapAction::Execute(Event /*event*/)
+ 
+ bool PvpTacticalClassControlAction::Execute(Event /*event*/)
+ {
+-    Unit* target = ResolvePvpThreatTarget(botAI);
++    Unit* target = ResolvePvpClassActionTarget(botAI);
+     if (!target || !target->IsPlayer())
+         return false;
+     float const distance = bot->GetDistance2d(target);
+     bool const melee = bot->IsWithinMeleeRange(target);
+     bool const targetCasting = target->IsNonMeleeSpellCast(false);
+     PvpSnapshot const snapshot = GetPvpSnapshot(botAI);
++    if (HandlePvpMageIceBlock(botAI, target, snapshot))
++        return true;
+     if (bot->getClass() == CLASS_PALADIN && botAI->HasAura("divine shield", bot))
+     {
+         // Immunity is a protected cast/pressure window, not a reason to keep
+-        // executing an old flee spline. Plant immediately, heal while needed,
+-        // then let the normal melee rotation resume for the rest of the shield.
+-        if (bot->isMoving())
++        // executing an old flee spline. Plant only while a heal is actually
++        // needed, top off, then use the rest of the shield for pressure.
++        if (bot->GetHealthPct() < 92.0f && bot->isMoving())
+         {
+             StopOwnedPvpMovement(botAI);
+             DebugPvpTactical(botAI, "paladin-immunity-stop", target);
+             return true;
+         }
+-        if (bot->GetHealthPct() < 80.0f &&
++        if (bot->GetHealthPct() < 92.0f &&
+             (TrySpell(botAI, "flash of light", bot, false) || TrySpell(botAI, "holy light", bot, false)))
+         {
+             DebugPvpTactical(botAI, "paladin-immunity-heal", target);
+@@ -1652,6 +1833,8 @@ bool PvpTacticalClassControlAction::Execute(Event /*event*/)
+     }
+     if (EnforcePvpDamageGuard(botAI, target))
+         return true;
++    if (TryOpponentImmunityRecovery(botAI, target, snapshot))
++        return true;
+     if (TryPvpControlWindow(botAI, target, snapshot))
+         return true;
+     if (TryPvpPetMicro(botAI, target, snapshot))
+@@ -1736,6 +1919,19 @@ bool PvpTacticalClassControlAction::Execute(Event /*event*/)
+                 return true;
+             if (melee && TrySpell(botAI, "disengage", bot, false))
+                 return true;
++            if (snapshot.archetype == PvpArchetype::SurvivalHunter)
++            {
++                // Survival's core pressure is instant and should fire while a
++                // retreat spline continues. This also gives the tactical layer
++                // a direct recovery path after the stock invalid-target trigger
++                // briefly loses its normal rotation candidate.
++                if (!botAI->HasAura("explosive shot", target) &&
++                    TrySpell(botAI, "explosive shot", target, false))
++                    return true;
++                if (!botAI->HasAura("black arrow", target) &&
++                    TrySpell(botAI, "black arrow", target, false))
++                    return true;
++            }
+             if (snapshot.archetype == PvpArchetype::MarksmanshipHunter &&
+                 (PlayerbotAI::IsHeal(target->ToPlayer(), true) || target->GetHealthPct() <= 60.0f) &&
+                 !botAI->HasAura("aimed shot", target) && TrySpell(botAI, "aimed shot", target, false))
+diff --git a/modules/mod-playerbots/src/Ai/Base/Trigger/GenericTriggers.cpp b/modules/mod-playerbots/src/Ai/Base/Trigger/GenericTriggers.cpp
+index d2c29c1de53476fe0c15dd3125da4af7648b4932..b1898fdc2506ac97b14d718697d2f19ebc88f55e 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Trigger/GenericTriggers.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Trigger/GenericTriggers.cpp
+@@ -199,7 +199,25 @@ bool NoAttackersTrigger::IsActive()
+     return !AI_VALUE(Unit*, "current target") && AI_VALUE(uint8, "my attacker count") > 0;
+ }
+ 
+-bool InvalidTargetTrigger::IsActive() { return AI_VALUE2(bool, "invalid target", "current target"); }
++bool InvalidTargetTrigger::IsActive()
++{
++    Unit* target = AI_VALUE(Unit*, "current target");
++    if (target && IsPvpTacticalContextEnabled(bot) && target->IsAlive() && target->IsInWorld() &&
++        bot->IsHostileTo(target))
++    {
++        if (bot->duel && bot->duel->State == DUEL_STATE_IN_PROGRESS)
++        {
++            Player* opponent = bot->duel->Opponent;
++            if ((target == opponent || target->GetOwner() == opponent) &&
++                bot->CanSeeOrDetect(target, false, true))
++                return false;
++        }
++        if (bot->InBattleground() && IsPvpBattlegroundCombatOwned(botAI) &&
++            target->GetMap() == bot->GetMap() && bot->CanSeeOrDetect(target, false, true))
++            return false;
++    }
++    return AI_VALUE2(bool, "invalid target", "current target");
++}
+ 
+ bool NoTargetTrigger::IsActive() { return !AI_VALUE(Unit*, "current target"); }
+ 
+diff --git a/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.cpp b/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.cpp
+index 26bb514db7b1652fee40b3b9e2d52b15f59ea381..b94a2a21ebc270cab5363aff0d7ae4d1fc39fb88 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.cpp
+@@ -54,7 +54,11 @@ bool HasReadyHunterMobilePressure(PlayerbotAI* botAI, Player* bot, Unit* target)
+     auto ready = [&](char const* spell)
+     {
+         uint32 const spellId = botAI->GetAiObjectContext()->GetValue<uint32>("spell id", spell)->Get();
+-        return spellId && !bot->HasSpellCooldown(spellId);
++        // Cooldown-ready is not the same as usable. Dead-zone, range, facing,
++        // resource and immunity failures used to make Survival hunters run as
++        // if an instant shot were available, while every shot actually failed.
++        return spellId && !bot->HasSpellCooldown(spellId) && CanDamagePvpTarget(botAI, target) &&
++               botAI->CanCastSpell(spell, target);
+     };
+     if (!botAI->HasAura("concussive shot", target) && ready("concussive shot"))
+         return true;
+@@ -226,10 +230,6 @@ bool PvpTacticalBattlegroundEngageTrigger::IsActive()
+     if (!sPlayerbotAIConfig.pvpTacticalEnabled || !sPlayerbotAIConfig.pvpTacticalBattleground ||
+         !IsPvpTacticalEligible(bot) || !bot->InBattleground())
+         return false;
+-    PvpTacticalState& state = GetPvpTacticalState(botAI);
+-    if (state.battlegroundEngagement == PvpBattlegroundEngagement::Travel &&
+-        state.battlegroundReengageAtMs > getMSTime() && bot->getAttackers().empty())
+-        return false;
+     return IsPvpBattlegroundCombatOwned(botAI) || ResolvePvpBattlegroundEngageTarget(botAI, 50.0f);
+ }
+ 
+@@ -278,7 +278,7 @@ bool PvpTacticalRangedTooCloseTrigger::IsActive()
+ 
+     UpdatePvpTacticalState(botAI, primaryTarget);
+ 
+-    if (!bot->InBattleground() && IsPvpCastPlantActive(botAI))
++    if (IsPvpCastPlantActive(botAI))
+     {
+         state.rangeMotion = PvpRangeMotion::Hold;
+         CancelPvpMovement(botAI, PvpMovementOwner::Retreat);
+diff --git a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp
+index 7ed4e1a3393cf3d0f8904af0f2d756ca301209a6..4453ad6a781c52d85625120cd8c257c9fec7857a 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp
+@@ -850,7 +850,6 @@ void PvpTacticalState::Reset()
+     lastWarriorChargeResetAtMs = 0;
+     battlegroundEngagedAtMs = 0;
+     battlegroundLastCombatAtMs = 0;
+-    battlegroundReengageAtMs = 0;
+     lastAntiStealthProbeAtMs = 0;
+     duelOpenerStartedAtMs = 0;
+     targetAcquiredAtMs = 0;
+@@ -869,6 +868,7 @@ void PvpTacticalState::Reset()
+     controlWindowLastRemainingMs = 0;
+     rangedCastPlantUntilMs = 0;
+     lastRangedCastPlantAtMs = 0;
++    mageIceBlockStartedAtMs = 0;
+     druidRecoveryMoveStartedAtMs = 0;
+     trackedPrimaryTarget.Clear();
+     movementTargetGuid.Clear();
+@@ -948,8 +948,10 @@ PvpArchetype DetectPvpArchetype(PlayerbotAI* botAI)
+             return HasPvpSpell(botAI, "scourge strike") || HasPvpSpell(botAI, "summon gargoyle") ?
+                        PvpArchetype::UnholyDeathKnight : PvpArchetype::Generic;
+         case CLASS_HUNTER:
+-            return HasPvpSpell(botAI, "chimera shot") && HasPvpSpell(botAI, "aimed shot") ?
+-                       PvpArchetype::MarksmanshipHunter : PvpArchetype::Generic;
++            if (HasPvpSpell(botAI, "chimera shot") && HasPvpSpell(botAI, "aimed shot"))
++                return PvpArchetype::MarksmanshipHunter;
++            return HasPvpSpell(botAI, "explosive shot") || HasPvpSpell(botAI, "black arrow") ?
++                       PvpArchetype::SurvivalHunter : PvpArchetype::Generic;
+         case CLASS_ROGUE:
+             return HasPvpSpell(botAI, "shadowstep") || HasPvpSpell(botAI, "shadow dance") ?
+                        PvpArchetype::SubtletyRogue : PvpArchetype::Generic;
+@@ -1515,6 +1517,37 @@ bool ShouldMaintainPvpRetreat(bool mobilePressure, bool threatMovementDenied,
+     return botRunSpeed > threatRunSpeed + 0.10f;
+ }
+ 
++bool ShouldUsePvpImmunityRecovery(PvpControlState targetControl, float botHealthPct)
++{
++    // An enemy Ice Block or Divine Shield is free recovery time. Continue
++    // normal utility at high health, but do not stand idle while wounded.
++    return targetControl == PvpControlState::DamageImmune && botHealthPct < 95.0f;
++}
++
++bool ShouldReleasePvpIceBlock(uint32 elapsedMs, float incomingBurstScore, float threatDistance,
++                              bool threatMovementDenied, float targetHealthPct)
++{
++    // Keep a short guaranteed cleanse/burst-denial window, then leave early as
++    // soon as the opponent can no longer punish the release. Never consume the
++    // full ten seconds while a safe counter-pressure window already exists.
++    if (elapsedMs < 1200)
++        return false;
++    if (elapsedMs >= 5500 || targetHealthPct <= 25.0f)
++        return true;
++    if (threatMovementDenied || threatDistance >= 18.0f)
++        return true;
++    return elapsedMs >= 2500 && incomingBurstScore <= 0.45f;
++}
++
++bool ShouldKeepPvpBattlegroundCombat(bool targetValid, bool coreCombat, bool underPressure,
++                                     bool engageGrace, bool recentlyInCombat)
++{
++    // A live visible engagement target is itself combat ownership. Core combat
++    // flags are delayed around opening casts, which previously made bots hand
++    // control back to objective travel every three seconds.
++    return targetValid || coreCombat || underPressure || engageGrace || recentlyInCombat;
++}
++
+ bool ShouldAttemptPvpRecoveryReset(float botHealthPct, float targetHealthPct,
+                                    float defensiveNeedScore, float killWindowScore)
+ {
+@@ -1708,11 +1741,11 @@ bool IsPvpMovementActive(PlayerbotAI* botAI, Player* bot, PvpMovementOwner owner
+     return active;
+ }
+ 
+-bool ShouldRequestPvpCastPlant(bool duel, bool ranged, bool moving, bool retreatOwned, bool hardCast,
++bool ShouldRequestPvpCastPlant(bool combatSpacing, bool ranged, bool moving, bool retreatOwned, bool hardCast,
+                               bool targetControlled, bool recentlyPlanted, float threatDistance,
+                               float minimumPlantDistance, float emergencyDistance, float castSafety)
+ {
+-    return duel && ranged && moving && retreatOwned && hardCast && !recentlyPlanted &&
++    return combatSpacing && ranged && moving && retreatOwned && hardCast && !recentlyPlanted &&
+            threatDistance >= minimumPlantDistance && threatDistance > emergencyDistance &&
+            (targetControlled || castSafety >= 0.55f);
+ }
+@@ -1736,8 +1769,11 @@ bool RequestPvpCastPlant(PlayerbotAI* botAI, uint32 castMs)
+     bool const targetControlled = threat && GetPvpControlState(threat) != PvpControlState::None;
+     bool const recentlyPlanted = state.lastRangedCastPlantAtMs &&
+                                  now - state.lastRangedCastPlantAtMs < 2500;
++    bool const combatSpacing = (bot->duel && bot->duel->State == DUEL_STATE_IN_PROGRESS) ||
++        (bot->InBattleground() && IsPvpBattlegroundCombatOwned(botAI) &&
++         state.battlegroundPressureBand != PvpBattlegroundPressureBand::Emergency);
+     if (!ShouldRequestPvpCastPlant(
+-            bot->duel && bot->duel->State == DUEL_STATE_IN_PROGRESS,
++            combatSpacing,
+             botAI->IsRanged(bot, true) || botAI->IsHeal(bot), bot->isMoving(),
+             state.movementOwner == PvpMovementOwner::Retreat, true, targetControlled,
+             recentlyPlanted, threatDistance, minimumPlantDistance, emergencyDistance,
+@@ -1920,6 +1956,8 @@ bool IsSafeForPvpCast(PlayerbotAI* botAI, Unit* spellTarget, SpellInfo const* sp
+ {
+     if (!botAI || castMs < 1000 || !IsPvpTacticalContextEnabled(botAI->GetBot()))
+         return true;
++    if (GetPvpControlState(botAI->GetBot()) == PvpControlState::DamageImmune)
++        return true;
+     if (CanPrecastPvpControlWindow(botAI, spellTarget, spellInfo))
+         return true;
+     PvpSnapshot const snapshot = GetPvpSnapshot(botAI);
+diff --git a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h
+index 0afaeb24d3d75c26214b28a29a0e3fb5d184c698..2149b4e7fb68a37511c50719471f645d18450dd8 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h
++++ b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h
+@@ -46,6 +46,7 @@ enum class PvpArchetype : uint8
+     RetributionPaladin,
+     UnholyDeathKnight,
+     MarksmanshipHunter,
++    SurvivalHunter,
+     SubtletyRogue,
+     DisciplinePriest,
+     ShadowPriest,
+@@ -166,7 +167,6 @@ struct PvpTacticalState
+     uint32 lastWarriorChargeResetAtMs = 0;
+     uint32 battlegroundEngagedAtMs = 0;
+     uint32 battlegroundLastCombatAtMs = 0;
+-    uint32 battlegroundReengageAtMs = 0;
+     uint32 lastAntiStealthProbeAtMs = 0;
+     uint32 duelOpenerStartedAtMs = 0;
+     uint32 targetAcquiredAtMs = 0;
+@@ -185,6 +185,7 @@ struct PvpTacticalState
+     uint32 controlWindowLastRemainingMs = 0;
+     uint32 rangedCastPlantUntilMs = 0;
+     uint32 lastRangedCastPlantAtMs = 0;
++    uint32 mageIceBlockStartedAtMs = 0;
+     uint32 druidRecoveryMoveStartedAtMs = 0;
+     ObjectGuid trackedPrimaryTarget;
+     ObjectGuid movementTargetGuid;
+@@ -370,6 +371,11 @@ PvpRangeMotion SelectPvpRangeMotion(PvpRangeMotion current, float closestThreatD
+                                     float preferredDistance, float maximumDistance);
+ bool ShouldMaintainPvpRetreat(bool mobilePressure, bool threatMovementDenied,
+                               float botRunSpeed, float threatRunSpeed);
++bool ShouldUsePvpImmunityRecovery(PvpControlState targetControl, float botHealthPct);
++bool ShouldReleasePvpIceBlock(uint32 elapsedMs, float incomingBurstScore, float threatDistance,
++                              bool threatMovementDenied, float targetHealthPct);
++bool ShouldKeepPvpBattlegroundCombat(bool targetValid, bool coreCombat, bool underPressure,
++                                     bool engageGrace, bool recentlyInCombat);
+ bool ShouldAttemptPvpRecoveryReset(float botHealthPct, float targetHealthPct,
+                                    float defensiveNeedScore, float killWindowScore);
+ PvpRangeMotion SelectPvpBattlegroundRangeMotion(PvpRangeMotion current, bool activePressure,
+@@ -385,7 +391,7 @@ void SetPvpMovementDestination(PlayerbotAI* botAI, float x, float y);
+ void ClearPvpMovement(PlayerbotAI* botAI, PvpMovementOwner owner = PvpMovementOwner::None);
+ void CancelPvpMovement(PlayerbotAI* botAI, PvpMovementOwner owner = PvpMovementOwner::None);
+ bool IsPvpMovementActive(PlayerbotAI* botAI, Player* bot, PvpMovementOwner owner = PvpMovementOwner::None);
+-bool ShouldRequestPvpCastPlant(bool duel, bool ranged, bool moving, bool retreatOwned, bool hardCast,
++bool ShouldRequestPvpCastPlant(bool combatSpacing, bool ranged, bool moving, bool retreatOwned, bool hardCast,
+                               bool targetControlled, bool recentlyPlanted, float threatDistance,
+                               float minimumPlantDistance, float emergencyDistance, float castSafety);
+ bool RequestPvpCastPlant(PlayerbotAI* botAI, uint32 castMs);
+diff --git a/modules/mod-playerbots/t/PvpTacticalPolicyTests.cxx b/modules/mod-playerbots/t/PvpTacticalPolicyTests.cxx
+index 3d02cd614cf9553171c37aa574f8d0e24c52cb8f..19817d57236813fcf6dbd1992effdc174d7c58c4 100644
+--- a/modules/mod-playerbots/t/PvpTacticalPolicyTests.cxx
++++ b/modules/mod-playerbots/t/PvpTacticalPolicyTests.cxx
+@@ -272,6 +272,31 @@ TEST(PvpRangePolicy, RetreatNeedsMobilityValueUnlessClassCanAttackWhileMoving)
+     EXPECT_TRUE(ShouldMaintainPvpRetreat(true, false, 7.0f, 7.0f));
+ }
+ 
++TEST(PvpImmunityPolicy, EnemyImmunityCreatesRecoveryInsteadOfIdleTime)
++{
++    EXPECT_TRUE(ShouldUsePvpImmunityRecovery(PvpControlState::DamageImmune, 94.0f));
++    EXPECT_FALSE(ShouldUsePvpImmunityRecovery(PvpControlState::DamageImmune, 95.0f));
++    EXPECT_FALSE(ShouldUsePvpImmunityRecovery(PvpControlState::DamageBreakable, 20.0f));
++}
++
++TEST(PvpImmunityPolicy, MageLeavesIceBlockWhenCounterPressureIsSafe)
++{
++    EXPECT_FALSE(ShouldReleasePvpIceBlock(1199, 0.0f, 40.0f, true, 10.0f));
++    EXPECT_TRUE(ShouldReleasePvpIceBlock(1200, 0.9f, 20.0f, false, 90.0f));
++    EXPECT_TRUE(ShouldReleasePvpIceBlock(1200, 0.9f, 5.0f, true, 90.0f));
++    EXPECT_FALSE(ShouldReleasePvpIceBlock(2499, 0.8f, 5.0f, false, 90.0f));
++    EXPECT_TRUE(ShouldReleasePvpIceBlock(2500, 0.4f, 5.0f, false, 90.0f));
++    EXPECT_TRUE(ShouldReleasePvpIceBlock(5500, 1.0f, 5.0f, false, 90.0f));
++}
++
++TEST(PvpBattlegroundEngagementPolicy, VisibleTargetKeepsCombatOwnershipAcrossCoreFlagDelay)
++{
++    EXPECT_TRUE(ShouldKeepPvpBattlegroundCombat(true, false, false, false, false));
++    EXPECT_TRUE(ShouldKeepPvpBattlegroundCombat(false, true, false, false, false));
++    EXPECT_TRUE(ShouldKeepPvpBattlegroundCombat(false, false, false, false, true));
++    EXPECT_FALSE(ShouldKeepPvpBattlegroundCombat(false, false, false, false, false));
++}
++
+ TEST(PvpRecoveryPolicy, KillPressureCanOverrideOptionalResetButNotCriticalSurvival)
+ {
+     EXPECT_FALSE(ShouldAttemptPvpRecoveryReset(55.0f, 90.0f, 0.8f, 0.1f));
+diff --git a/modules/mod-playerbots/t/PvpTacticalScenarioMatrix.md b/modules/mod-playerbots/t/PvpTacticalScenarioMatrix.md
+index 00a326d832f3f199eeb1f691d2476309901092f7..dc1d1665b2dc1adfd7532f19cf830d09fac91488 100644
+--- a/modules/mod-playerbots/t/PvpTacticalScenarioMatrix.md
++++ b/modules/mod-playerbots/t/PvpTacticalScenarioMatrix.md
+@@ -150,9 +150,17 @@ off-target outside the effect radius to guard against overly broad suppression.
+   single-target rotation. Repeat with a teammate's Polymorph: all damage must
+   remain protected, apart from a hard precast that lands after the aura expires.
+ - During a long retreat, move the pressure source across the bot by more than
+-  60 degrees. The old spline must be replaced once; smaller heading changes must
+-  not cause repeated path rebuilds. Root the pursuer and verify a caster plants
+-  at the reduced safe distance to begin hard casting.
++  120 degrees. The old spline must be replaced once; smaller heading changes
++  must not cause repeated path rebuilds. Root the pursuer and verify a caster
++  plants at the reduced safe distance to begin hard casting.
++- Open with a ranged spell that has not yet set the core combat flag. While the
++  selected hostile remains alive, visible and within 65 yards, BG combat
++  ownership must remain stable and must not alternate `bg-engage` with
++  `bg-travel-resume`. Lose the target and clear combat for 2.5 seconds to resume
++  objective travel.
++- Begin a safe hard cast during an ordinary BG danger retreat. The bot must
++  reserve one cast-plant window and cast; instant spells continue on the active
++  spline. Face-hug emergency pressure may still cancel the cast window.
+ 
+ ## Ranged pressure and class recovery
+ 
+@@ -175,6 +183,19 @@ off-target outside the effect radius to guard against overly broad suppression.
+ - Keep Turn Evil active on an undead/demon pet. The paladin must not refresh it
+   until the aura ends. Add owner plus pet pressure in melee and verify the hunter
+   can choose Frost Trap for the shared slow instead of always using Freezing Trap.
++- Duel a Survival hunter against another hunter. The duel opponent must not be
++  dropped merely because the stock possible-target cache briefly reports it as
++  invalid. Explosive Shot and Black Arrow count as mobile pressure only while
++  they can actually be cast at the live target; otherwise the hunter plants for
++  Steady Shot instead of running while reporting no target.
++- Have the opponent use Divine Shield or Ice Block while the bot is wounded.
++  With no valid secondary target, the bot should stop damage and recover toward
++  95% health rather than idle. A mage in its own Ice Block holds at least 1.2
++  seconds, then cancels early when the opponent is rooted, safely distant, low,
++  or no longer applying burst; it never waits the full ten seconds by default.
++- Cast Blink and Frost Nova during an active mage retreat. Frost Nova must leave
++  the existing spline intact; Blink must immediately replace its now-stale
++  landing path. Neither instant spell may request a hard-cast plant window.
+ 
+ - In a mage or shadow-priest duel, begin a hard cast while a tactical retreat
+   spline is active and the pursuer is at least 18 yards away. Movement must stop
