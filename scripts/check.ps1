@@ -419,6 +419,36 @@ if ($pvpPetRoutingPatchText -match '(?m)^\+.*(?:NextAction|DoSpecificAction)\("p
     throw 'PvP 战术层不能调用与聊天命令冲突的 pet attack 动作名。'
 }
 
+$pvpShadowBgHandoffPatch = Join-Path $repoRoot 'patches\0030-playerbot-pvp-shadow-and-bg-handoff.patch'
+if (-not (Test-Path -LiteralPath $pvpShadowBgHandoffPatch)) {
+    throw '缺少 Playerbot PvP 暗牧循环与战场交接补丁。'
+}
+$pvpShadowBgHandoffPatchText = Get-Content -LiteralPath $pvpShadowBgHandoffPatch -Raw
+if ($pvpShadowBgHandoffPatchText -match '(?m)^diff --git a/(?!modules/mod-playerbots/)') {
+    throw 'Playerbot PvP 暗牧循环与战场交接补丁必须使用 AzerothCore 根目录下的模块路径。'
+}
+foreach ($requiredMarker in @(
+    'PvpShadowDebuffTrigger',
+    'target->IsPlayer() && IsPvpTacticalContextEnabled(bot)',
+    'NextAction("shadow word: death", ACTION_DEFAULT + 0.2f)',
+    'NextAction("mind flay", ACTION_DEFAULT + 0.1f)',
+    'ActionableContactKeepsOwnershipButAStaleCoreFlagDoesNot',
+    'if (bot->InBattleground() && IsPvpBattlegroundCombatOwned(botAI))',
+    'botAI->ChangeEngine(BOT_STATE_NON_COMBAT)',
+    'current != target',
+    'bg-travel-resume'
+)) {
+    if ($pvpShadowBgHandoffPatchText -notmatch [regex]::Escape($requiredMarker)) {
+        throw "Playerbot PvP 暗牧循环与战场交接补丁缺少标记：$requiredMarker"
+    }
+}
+if ($pvpShadowBgHandoffPatchText -match '(?m)^\+.*NextAction\("mind flay", ACTION_DEFAULT \+ 0\.2f\)') {
+    throw '精神鞭打必须只高于魔杖，不能重新高于暗言术：灭。'
+}
+if ($pvpShadowBgHandoffPatchText -match '(?m)^\+.*ShouldKeepPvpBattlegroundCombat\(bool targetValid, bool coreCombat') {
+    throw '战场战斗所有权不能由可能残留的核心战斗标记续住。'
+}
+
 $pvpClassPatchText = Get-Content -LiteralPath (Join-Path $repoRoot 'patches\0010-playerbot-pvp-warrior-paladin-death-knight.patch') -Raw
 if ($pvpClassPatchText -match 'AI_VALUE\(' -and $pvpClassPatchText -notmatch '#include "Playerbots\.h"') {
     throw '使用 AI_VALUE 的 PvP 动作缺少 Playerbots.h。'
