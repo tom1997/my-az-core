@@ -307,6 +307,40 @@ if ($pvpRangedPressurePatchText -match '(?m)^\+.*duelPathBecameUnsafe') {
     throw '决斗环绕路径不能恢复每几百毫秒触发一次的侧向重算。'
 }
 
+$pvpControlOwnershipPatch = Join-Path $repoRoot 'patches\0026-playerbot-pvp-control-ownership-and-kite-value.patch'
+if (-not (Test-Path -LiteralPath $pvpControlOwnershipPatch)) {
+    throw '缺少 Playerbot PvP 控制归属与风筝收益补丁。'
+}
+$pvpControlOwnershipPatchText = Get-Content -LiteralPath $pvpControlOwnershipPatch -Raw
+if ($pvpControlOwnershipPatchText -match '(?m)^diff --git a/(?!modules/mod-playerbots/)') {
+    throw 'Playerbot PvP 控制归属补丁必须使用 AzerothCore 根目录下的模块路径。'
+}
+foreach ($requiredMarker in @(
+    'ownedByBot',
+    'GetCasterGUID',
+    'OwnedSetupResumesRotationButForeignControlOnlyAllowsTimedPrecast',
+    'ShouldMaintainPvpRetreat',
+    'HasReadyHunterMobilePressure',
+    'range-plant-no-speed-advantage',
+    'rogue-reset-detected-abort',
+    'ShouldAttemptPvpRecoveryReset',
+    'catSpeedWindow',
+    'turn evil',
+    'frost trap',
+    'NextAction("pet attack"',
+    'A hunter may keep moving while a useful instant shot is'
+)) {
+    if ($pvpControlOwnershipPatchText -notmatch [regex]::Escape($requiredMarker)) {
+        throw "Playerbot PvP 控制归属补丁缺少标记：$requiredMarker"
+    }
+}
+if ($pvpControlOwnershipPatchText -notmatch '(?s)!ownedByBot.{0,200}PvpCcUsage::Preserve') {
+    throw '他人施加的破伤控制必须保持保护状态。'
+}
+if ($pvpControlOwnershipPatchText -notmatch '(?s)ownedByBot && setupComplete.{0,150}PvpCcUsage::SetupThenBreak') {
+    throw '自己的主目标控制必须在准备完成后允许主动破控。'
+}
+
 $pvpClassPatchText = Get-Content -LiteralPath (Join-Path $repoRoot 'patches\0010-playerbot-pvp-warrior-paladin-death-knight.patch') -Raw
 if ($pvpClassPatchText -match 'AI_VALUE\(' -and $pvpClassPatchText -notmatch '#include "Playerbots\.h"') {
     throw '使用 AI_VALUE 的 PvP 动作缺少 Playerbots.h。'
