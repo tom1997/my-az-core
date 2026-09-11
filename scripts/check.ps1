@@ -370,6 +370,32 @@ if ($pvpFlowPatchText -match '(?m)^\+.*battlegroundReengageAtMs') {
     throw '战场重新接战不能再保留会造成五秒挂机的冷却门。'
 }
 
+$pvpMaintainedEffectsPatch = Join-Path $repoRoot 'patches\0028-playerbot-pvp-maintained-effects-and-range-band.patch'
+if (-not (Test-Path -LiteralPath $pvpMaintainedEffectsPatch)) {
+    throw '缺少 Playerbot PvP 持续效果与距离区间补丁。'
+}
+$pvpMaintainedEffectsPatchText = Get-Content -LiteralPath $pvpMaintainedEffectsPatch -Raw
+if ($pvpMaintainedEffectsPatchText -match '(?m)^diff --git a/(?!modules/mod-playerbots/)') {
+    throw 'Playerbot PvP 持续效果补丁必须使用 AzerothCore 根目录下的模块路径。'
+}
+foreach ($requiredMarker in @(
+    'ShouldSkipPvpMaintainedEffect',
+    'chains of ice',
+    'hunter''s mark',
+    'retreatExit',
+    'advanceExit',
+    'CorrectionsEnterTheUsefulBandWithoutChasingOneExactDistance',
+    'player tactical trigger must remain active',
+    'hostile-pet action must yield'
+)) {
+    if ($pvpMaintainedEffectsPatchText -notmatch [regex]::Escape($requiredMarker)) {
+        throw "Playerbot PvP 持续效果与距离区间补丁缺少标记：$requiredMarker"
+    }
+}
+if ($pvpMaintainedEffectsPatchText -notmatch '(?s)for \(char const\* spell : \{ "black arrow", "explosive shot", "frost shock" \}\).{0,100}EXPECT_FALSE') {
+    throw '有伤害价值的持续技能不能被维持型减速策略一并禁止。'
+}
+
 $pvpClassPatchText = Get-Content -LiteralPath (Join-Path $repoRoot 'patches\0010-playerbot-pvp-warrior-paladin-death-knight.patch') -Raw
 if ($pvpClassPatchText -match 'AI_VALUE\(' -and $pvpClassPatchText -notmatch '#include "Playerbots\.h"') {
     throw '使用 AI_VALUE 的 PvP 动作缺少 Playerbots.h。'
