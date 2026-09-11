@@ -188,6 +188,7 @@ Set-ConfigValue $playerbots 'AiPlayerbot.DisabledWithoutRealPlayer' $(if ($setti
 Set-ConfigValue $playerbots 'AiPlayerbot.BotActiveAlone' ([string]$settings.botActiveAlonePercent)
 Set-ConfigValue $playerbots 'AiPlayerbot.botActiveAloneSmartScale' '1'
 Set-ConfigValue $playerbots 'AiPlayerbot.CommandServerPort' '0'
+Set-ConfigValue $playerbots 'AiPlayerbot.RandomGearLoweringChance' ([string](Get-SettingValue $settings 'randomGearLoweringChance' 0.35))
 Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.Enable' $(if (Get-SettingValue $settings 'pvpTacticalEnabled' $true) {'1'} else {'0'})
 Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.Duel' $(if (Get-SettingValue $settings 'pvpTacticalDuel' $true) {'1'} else {'0'})
 Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.Arena' $(if (Get-SettingValue $settings 'pvpTacticalArena' $true) {'1'} else {'0'})

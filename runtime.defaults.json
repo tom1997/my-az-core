@@ -12,6 +12,7 @@
   "randomBots": 2000,
   "botActiveAlonePercent": 10,
   "disableBotsWithoutPlayers": true,
+  "randomGearLoweringChance": 0.35,
   "pvpTacticalEnabled": true,
   "pvpTacticalDuel": true,
   "pvpTacticalArena": true,

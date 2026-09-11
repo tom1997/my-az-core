@@ -449,6 +449,38 @@ if ($pvpShadowBgHandoffPatchText -match '(?m)^\+.*ShouldKeepPvpBattlegroundComba
     throw '战场战斗所有权不能由可能残留的核心战斗标记续住。'
 }
 
+$pvpBattlegroundPressurePatch = Join-Path $repoRoot 'patches\0031-playerbot-pvp-battleground-pressure-and-setup.patch'
+if (-not (Test-Path -LiteralPath $pvpBattlegroundPressurePatch)) {
+    throw '缺少 Playerbot PvP 战场进攻与配置补丁。'
+}
+$pvpBattlegroundPressurePatchText = Get-Content -LiteralPath $pvpBattlegroundPressurePatch -Raw
+if ($pvpBattlegroundPressurePatchText -match '(?m)^diff --git a/(?!modules/mod-playerbots/)') {
+    throw 'Playerbot PvP 战场进攻与配置补丁必须使用 AzerothCore 根目录下的模块路径。'
+}
+foreach ($requiredMarker in @(
+    'RemoteTargetsAdvanceIntoTheUsefulBandWithoutPressure',
+    'prepared PvP spec',
+    'HasActivePvpAuraOwnedByBot',
+    'bg-rogue-prestealth',
+    'bg-rogue-stealth-opener',
+    'GetTargetName() override { return "self target"; }',
+    'RandomGearLoweringChance = 0.35',
+    'NeedsSlow(botAI, "chains of ice", owner)',
+    'getName() == "reach spell"'
+)) {
+    if ($pvpBattlegroundPressurePatchText -notmatch [regex]::Escape($requiredMarker)) {
+        throw "Playerbot PvP 战场进攻与配置补丁缺少标记：$requiredMarker"
+    }
+}
+if ([double]$defaults.randomGearLoweringChance -lt 0.0 -or
+    [double]$defaults.randomGearLoweringChance -gt 1.0) {
+    throw 'randomGearLoweringChance 必须在 0 到 1 之间。'
+}
+$installerText = Get-Content -LiteralPath (Join-Path $repoRoot 'scripts\install.ps1') -Raw
+if ($installerText -notmatch [regex]::Escape("Set-ConfigValue `$playerbots 'AiPlayerbot.RandomGearLoweringChance'")) {
+    throw '安装脚本没有写入随机机器人装备差异配置。'
+}
+
 $pvpClassPatchText = Get-Content -LiteralPath (Join-Path $repoRoot 'patches\0010-playerbot-pvp-warrior-paladin-death-knight.patch') -Raw
 if ($pvpClassPatchText -match 'AI_VALUE\(' -and $pvpClassPatchText -notmatch '#include "Playerbots\.h"') {
     throw '使用 AI_VALUE 的 PvP 动作缺少 Playerbots.h。'
