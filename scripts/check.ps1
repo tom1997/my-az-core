@@ -514,6 +514,35 @@ if ($pvpCasterFlowPatchText -match '(?m)^\+.*ShouldUsePvpImmunityRecovery\(snaps
     throw '控制免伤不能再直接触发对手防御免疫恢复逻辑。'
 }
 
+$pvpInstantFlowPatch = Join-Path $repoRoot 'patches\0033-playerbot-pvp-instant-flow-and-arcane-cycle.patch'
+if (-not (Test-Path -LiteralPath $pvpInstantFlowPatch)) {
+    throw '缺少 Playerbot PvP 瞬发移动与奥法循环补丁。'
+}
+$pvpInstantFlowPatchText = Get-Content -LiteralPath $pvpInstantFlowPatch -Raw
+if ($pvpInstantFlowPatchText -match '(?m)^diff --git a/(?!modules/mod-playerbots/)') {
+    throw 'Playerbot PvP 瞬发移动补丁必须使用 AzerothCore 根目录下的模块路径。'
+}
+foreach ($requiredMarker in @(
+    'every zero-cast-time class spell (shields included)',
+    'ContinuePvpKiteAfterInstant',
+    'instantKiteThreatGuid',
+    'InstantDisplacementContinuesUntilTheStableBand',
+    'control-window-pressure',
+    'control-window-evocation',
+    'ShouldRepeatPvpControl',
+    'ShouldUsePvpPrimaryControlWindow',
+    'stacks < 3',
+    'HasAura("deep freeze", target, false, true)',
+    'anti-magic shell'
+)) {
+    if ($pvpInstantFlowPatchText -notmatch [regex]::Escape($requiredMarker)) {
+        throw "Playerbot PvP 瞬发移动与奥法循环补丁缺少标记：$requiredMarker"
+    }
+}
+if ($pvpInstantFlowPatchText -match '(?m)^\+\s*return moved && !cooperativeRangeMove') {
+    throw '战术距离移动不能继续占用瞬发技能的动作选择位。'
+}
+
 $pvpClassPatchText = Get-Content -LiteralPath (Join-Path $repoRoot 'patches\0010-playerbot-pvp-warrior-paladin-death-knight.patch') -Raw
 if ($pvpClassPatchText -match 'AI_VALUE\(' -and $pvpClassPatchText -notmatch '#include "Playerbots\.h"') {
     throw '使用 AI_VALUE 的 PvP 动作缺少 Playerbots.h。'
