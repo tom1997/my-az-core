@@ -1,0 +1,323 @@
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
+index c690602b..1e63c60f 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
+@@ -1432,12 +1432,30 @@ bool PvpTacticalBattlegroundEngageAction::Execute(Event /*event*/)
+ {
+     Battleground* battleground = bot->GetBattleground();
+     PvpTacticalState& state = GetPvpTacticalState(botAI);
+-    if (!battleground || battleground->GetStatus() != STATUS_IN_PROGRESS)
++    auto resumeTravel = [&](bool logTransition)
+     {
+         state.battlegroundEngagement = PvpBattlegroundEngagement::Travel;
+         state.battlegroundPressureBand = PvpBattlegroundPressureBand::None;
+         state.battlegroundTargetGuid.Clear();
+-        return false;
++        state.battlegroundEngagedAtMs = 0;
++        state.battlegroundLastCombatAtMs = 0;
++        state.rangeMotion = PvpRangeMotion::Hold;
++        if (state.movementOwner != PvpMovementOwner::None)
++            CancelPvpMovement(botAI);
++        bot->AttackStop();
++        bot->SetTarget(ObjectGuid::Empty);
++        bot->SetSelection(ObjectGuid::Empty);
++        context->GetValue<Unit*>("current target")->Set(nullptr);
++        context->GetValue<Unit*>("enemy player target")->Set(nullptr);
++        context->GetValue<GuidVector>("prioritized targets")->Set(GuidVector());
++        if (logTransition)
++            DebugPvpTactical(botAI, "bg-travel-resume", nullptr);
++        botAI->ChangeEngine(BOT_STATE_NON_COMBAT);
++    };
++    if (!battleground || battleground->GetStatus() != STATUS_IN_PROGRESS)
++    {
++        resumeTravel(false);
++        return true;
+     }
+ 
+     uint32 const now = getMSTime();
+@@ -1456,7 +1474,10 @@ bool PvpTacticalBattlegroundEngageAction::Execute(Event /*event*/)
+ 
+     bool const underPressure = !bot->getAttackers().empty() ||
+         (target && (target->GetVictim() == bot || target->GetTarget() == bot->GetGUID()));
+-    if (bot->IsInCombat() || underPressure)
++    // Record actionable contact, not a possibly stale core combat flag. The
++    // latter can survive after the last visible target and previously renewed
++    // this grace timer forever.
++    if (target || underPressure)
+         state.battlegroundLastCombatAtMs = now;
+ 
+     if (state.battlegroundEngagement == PvpBattlegroundEngagement::Combat)
+@@ -1464,14 +1485,15 @@ bool PvpTacticalBattlegroundEngageAction::Execute(Event /*event*/)
+         bool const engageGrace = state.battlegroundEngagedAtMs && now - state.battlegroundEngagedAtMs < 3000;
+         bool const recentlyInCombat = state.battlegroundLastCombatAtMs &&
+                                       now - state.battlegroundLastCombatAtMs < 2500;
+-        if (ShouldKeepPvpBattlegroundCombat(target != nullptr, bot->IsInCombat(), underPressure,
++        if (ShouldKeepPvpBattlegroundCombat(target != nullptr, underPressure,
+                                             engageGrace, recentlyInCombat))
+         {
+             if (target)
+             {
+                 state.battlegroundTargetGuid = target->GetGUID();
+                 Unit* current = context->GetValue<Unit*>("current target")->Get();
+-                if (!current || !current->IsAlive() || !bot->IsHostileTo(current))
++                if (current != target || !current->IsAlive() || !bot->IsHostileTo(current) ||
++                    !bot->CanSeeOrDetect(current, false, true))
+                 {
+                     bot->SetSelection(target->GetGUID());
+                     context->GetValue<Unit*>("current target")->Set(target);
+@@ -1486,14 +1508,8 @@ bool PvpTacticalBattlegroundEngageAction::Execute(Event /*event*/)
+             return false;
+         }
+ 
+-        state.battlegroundEngagement = PvpBattlegroundEngagement::Travel;
+-        state.battlegroundPressureBand = PvpBattlegroundPressureBand::None;
+-        state.battlegroundTargetGuid.Clear();
+-        state.rangeMotion = PvpRangeMotion::Hold;
+-        if (state.movementOwner != PvpMovementOwner::None)
+-            CancelPvpMovement(botAI);
+-        DebugPvpTactical(botAI, "bg-travel-resume", nullptr);
+-        return false;
++        resumeTravel(true);
++        return true;
+     }
+ 
+     if (!target)
+diff --git a/modules/mod-playerbots/src/Ai/Base/Trigger/GenericTriggers.cpp b/modules/mod-playerbots/src/Ai/Base/Trigger/GenericTriggers.cpp
+index b1898fdc..9a39612c 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Trigger/GenericTriggers.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Trigger/GenericTriggers.cpp
+@@ -202,6 +202,13 @@ bool NoAttackersTrigger::IsActive()
+ bool InvalidTargetTrigger::IsActive()
+ {
+     Unit* target = AI_VALUE(Unit*, "current target");
++    // The battleground engagement state machine owns target replacement and
++    // the final combat-to-travel handoff. Letting the generic invalid-target
++    // action switch engines first leaves the tactical state in Combat, where
++    // it then suppresses all noncombat objective movement indefinitely.
++    if (bot->InBattleground() && IsPvpBattlegroundCombatOwned(botAI))
++        return false;
++
+     if (target && IsPvpTacticalContextEnabled(bot) && target->IsAlive() && target->IsInWorld() &&
+         bot->IsHostileTo(target))
+     {
+@@ -212,9 +219,6 @@ bool InvalidTargetTrigger::IsActive()
+                 bot->CanSeeOrDetect(target, false, true))
+                 return false;
+         }
+-        if (bot->InBattleground() && IsPvpBattlegroundCombatOwned(botAI) &&
+-            target->GetMap() == bot->GetMap() && bot->CanSeeOrDetect(target, false, true))
+-            return false;
+     }
+     return AI_VALUE2(bool, "invalid target", "current target");
+ }
+diff --git a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp
+index 5525c5f7..d178772e 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp
+@@ -1545,13 +1545,14 @@ bool ShouldReleasePvpIceBlock(uint32 elapsedMs, float incomingBurstScore, float
+     return elapsedMs >= 2500 && incomingBurstScore <= 0.45f;
+ }
+ 
+-bool ShouldKeepPvpBattlegroundCombat(bool targetValid, bool coreCombat, bool underPressure,
++bool ShouldKeepPvpBattlegroundCombat(bool targetValid, bool underPressure,
+                                      bool engageGrace, bool recentlyInCombat)
+ {
+     // A live visible engagement target is itself combat ownership. Core combat
+-    // flags are delayed around opening casts, which previously made bots hand
+-    // control back to objective travel every three seconds.
+-    return targetValid || coreCombat || underPressure || engageGrace || recentlyInCombat;
++    // flags are delayed around opening casts, but they can also remain set
++    // after every actionable target has disappeared. A bare core flag must not
++    // orphan the bot in the combat engine and suppress BG navigation forever.
++    return targetValid || underPressure || engageGrace || recentlyInCombat;
+ }
+ 
+ bool ShouldAttemptPvpRecoveryReset(float botHealthPct, float targetHealthPct,
+diff --git a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h
+index afeddb38..e0547f10 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h
++++ b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h
+@@ -374,7 +374,7 @@ bool ShouldMaintainPvpRetreat(bool mobilePressure, bool threatMovementDenied,
+ bool ShouldUsePvpImmunityRecovery(PvpControlState targetControl, float botHealthPct);
+ bool ShouldReleasePvpIceBlock(uint32 elapsedMs, float incomingBurstScore, float threatDistance,
+                               bool threatMovementDenied, float targetHealthPct);
+-bool ShouldKeepPvpBattlegroundCombat(bool targetValid, bool coreCombat, bool underPressure,
++bool ShouldKeepPvpBattlegroundCombat(bool targetValid, bool underPressure,
+                                      bool engageGrace, bool recentlyInCombat);
+ bool ShouldAttemptPvpRecoveryReset(float botHealthPct, float targetHealthPct,
+                                    float defensiveNeedScore, float killWindowScore);
+diff --git a/modules/mod-playerbots/src/Ai/Class/Priest/PriestTriggers.cpp b/modules/mod-playerbots/src/Ai/Class/Priest/PriestTriggers.cpp
+index e8271bbc..0923c22a 100644
+--- a/modules/mod-playerbots/src/Ai/Class/Priest/PriestTriggers.cpp
++++ b/modules/mod-playerbots/src/Ai/Class/Priest/PriestTriggers.cpp
+@@ -8,6 +8,23 @@
+ #include "Player.h"
+ #include "PlayerbotAI.h"
+ #include "Playerbots.h"
++#include "PvpTacticalValue.h"
++
++bool PvpShadowDebuffTrigger::IsActive()
++{
++    Unit* target = GetTarget();
++    if (!target || !target->IsAlive() || !target->IsInWorld())
++        return false;
++
++    // The generic debuff trigger requires an estimated eight-second target
++    // lifetime, which is useful for short PvE trash but suppresses the entire
++    // shadow DoT package against players. In tactical PvP, aura ownership and
++    // refresh state are the useful gate; the rotation itself decides priority.
++    if (target->IsPlayer() && IsPvpTacticalContextEnabled(bot))
++        return AI_VALUE2(uint32, "spell id", spell) && BuffTrigger::IsActive();
++
++    return DebuffTrigger::IsActive();
++}
+ 
+ bool ShadowProtectionTrigger::IsActive()
+ {
+diff --git a/modules/mod-playerbots/src/Ai/Class/Priest/PriestTriggers.h b/modules/mod-playerbots/src/Ai/Class/Priest/PriestTriggers.h
+index 13d35e49..80f22580 100644
+--- a/modules/mod-playerbots/src/Ai/Class/Priest/PriestTriggers.h
++++ b/modules/mod-playerbots/src/Ai/Class/Priest/PriestTriggers.h
+@@ -15,9 +15,29 @@
+ class PlayerbotAI;
+ 
+ DEBUFF_CHECKISOWNER_TRIGGER(HolyFireTrigger, "holy fire");
+-DEBUFF_CHECKISOWNER_TRIGGER(ShadowWordPainTrigger, "shadow word: pain");
++
++class PvpShadowDebuffTrigger : public DebuffTrigger
++{
++public:
++    PvpShadowDebuffTrigger(PlayerbotAI* botAI, std::string const& spell)
++        : DebuffTrigger(botAI, spell, 1, true) {}
++
++    bool IsActive() override;
++};
++
++class ShadowWordPainTrigger : public PvpShadowDebuffTrigger
++{
++public:
++    ShadowWordPainTrigger(PlayerbotAI* botAI) : PvpShadowDebuffTrigger(botAI, "shadow word: pain") {}
++};
++
+ DEBUFF_ENEMY_TRIGGER(ShadowWordPainOnAttackerTrigger, "shadow word: pain");
+-DEBUFF_CHECKISOWNER_TRIGGER(VampiricTouchTrigger, "vampiric touch");
++class VampiricTouchTrigger : public PvpShadowDebuffTrigger
++{
++public:
++    VampiricTouchTrigger(PlayerbotAI* botAI) : PvpShadowDebuffTrigger(botAI, "vampiric touch") {}
++};
++
+ DEBUFF_ENEMY_TRIGGER(VampiricTouchOnAttackerTrigger, "vampiric touch on attacker");
+ BUFF_TRIGGER(VampiricEmbraceTrigger, "vampiric embrace");
+ CURE_TRIGGER(DispelMagicTrigger, "dispel magic", DISPEL_MAGIC);
+@@ -31,7 +51,11 @@ BUFF_TRIGGER(InnerFocusTrigger, "inner focus");
+ CC_TRIGGER(ShackleUndeadTrigger, "shackle undead");
+ INTERRUPT_TRIGGER(SilenceTrigger, "silence");
+ INTERRUPT_HEALER_TRIGGER(SilenceEnemyHealerTrigger, "silence");
+-DEBUFF_CHECKISOWNER_TRIGGER(DevouringPlagueTrigger, "devouring plague");
++class DevouringPlagueTrigger : public PvpShadowDebuffTrigger
++{
++public:
++    DevouringPlagueTrigger(PlayerbotAI* botAI) : PvpShadowDebuffTrigger(botAI, "devouring plague") {}
++};
+ BUFF_TRIGGER(TouchOfWeaknessTrigger, "touch of weakness");
+ DEBUFF_TRIGGER(HexOfWeaknessTrigger, "hex of weakness");
+ BUFF_TRIGGER(ShadowguardTrigger, "shadowguard");
+diff --git a/modules/mod-playerbots/src/Ai/Class/Priest/Strategy/ShadowPriestStrategy.cpp b/modules/mod-playerbots/src/Ai/Class/Priest/Strategy/ShadowPriestStrategy.cpp
+index 57d0550b..094f2ffa 100644
+--- a/modules/mod-playerbots/src/Ai/Class/Priest/Strategy/ShadowPriestStrategy.cpp
++++ b/modules/mod-playerbots/src/Ai/Class/Priest/Strategy/ShadowPriestStrategy.cpp
+@@ -17,8 +17,8 @@ std::vector<NextAction> ShadowPriestStrategy::getDefaultActions()
+ {
+     return {
+         NextAction("mind blast", ACTION_DEFAULT + 0.3f),
+-        NextAction("mind flay", ACTION_DEFAULT + 0.2f),
+-        NextAction("shadow word: death", ACTION_DEFAULT + 0.1f), // cast during movement
++        NextAction("shadow word: death", ACTION_DEFAULT + 0.2f), // cast during movement
++        NextAction("mind flay", ACTION_DEFAULT + 0.1f),
+         NextAction("shoot", ACTION_DEFAULT)
+     };
+ }
+diff --git a/modules/mod-playerbots/src/Ai/Class/Priest/Strategy/ShadowPriestStrategyActionNodeFactory.h b/modules/mod-playerbots/src/Ai/Class/Priest/Strategy/ShadowPriestStrategyActionNodeFactory.h
+index 9f0ad6d0..c2398e33 100644
+--- a/modules/mod-playerbots/src/Ai/Class/Priest/Strategy/ShadowPriestStrategyActionNodeFactory.h
++++ b/modules/mod-playerbots/src/Ai/Class/Priest/Strategy/ShadowPriestStrategyActionNodeFactory.h
+@@ -18,8 +18,8 @@ public:
+     ShadowPriestStrategyActionNodeFactory()
+     {
+         creators["mind blast"] = &mind_blast;
++        creators["shadow word: death"] = &shadow_word_death;
+         creators["mind flay"] = &mind_flay;
+-        creators["smite"] = &smite;
+     }
+ 
+ private:
+@@ -27,21 +27,21 @@ private:
+     {
+         return new ActionNode("mind blast",
+                               /*P*/ {},
+-                              /*A*/ { NextAction("mind flay") },
++                              /*A*/ { NextAction("shadow word: death") },
+                               /*C*/ {});
+     }
+ 
+-    static ActionNode* mind_flay([[maybe_unused]] PlayerbotAI* botAI)
++    static ActionNode* shadow_word_death([[maybe_unused]] PlayerbotAI* botAI)
+     {
+-        return new ActionNode("mind flay",
++        return new ActionNode("shadow word: death",
+                               /*P*/ {},
+-                              /*A*/ { NextAction("smite") },
++                              /*A*/ { NextAction("mind flay") },
+                               /*C*/ {});
+     }
+ 
+-    static ActionNode* smite([[maybe_unused]] PlayerbotAI* botAI)
++    static ActionNode* mind_flay([[maybe_unused]] PlayerbotAI* botAI)
+     {
+-        return new ActionNode("smite",
++        return new ActionNode("mind flay",
+                               /*P*/ {},
+                               /*A*/ { NextAction("shoot") },
+                               /*C*/ {});
+diff --git a/modules/mod-playerbots/t/PvpTacticalPolicyTests.cxx b/modules/mod-playerbots/t/PvpTacticalPolicyTests.cxx
+index 17eb62ed..234510f5 100644
+--- a/modules/mod-playerbots/t/PvpTacticalPolicyTests.cxx
++++ b/modules/mod-playerbots/t/PvpTacticalPolicyTests.cxx
+@@ -302,12 +302,13 @@ TEST(PvpImmunityPolicy, MageLeavesIceBlockWhenCounterPressureIsSafe)
+     EXPECT_TRUE(ShouldReleasePvpIceBlock(5500, 1.0f, 5.0f, false, 90.0f));
+ }
+ 
+-TEST(PvpBattlegroundEngagementPolicy, VisibleTargetKeepsCombatOwnershipAcrossCoreFlagDelay)
++TEST(PvpBattlegroundEngagementPolicy, ActionableContactKeepsOwnershipButAStaleCoreFlagDoesNot)
+ {
+-    EXPECT_TRUE(ShouldKeepPvpBattlegroundCombat(true, false, false, false, false));
+-    EXPECT_TRUE(ShouldKeepPvpBattlegroundCombat(false, true, false, false, false));
+-    EXPECT_TRUE(ShouldKeepPvpBattlegroundCombat(false, false, false, false, true));
+-    EXPECT_FALSE(ShouldKeepPvpBattlegroundCombat(false, false, false, false, false));
++    EXPECT_TRUE(ShouldKeepPvpBattlegroundCombat(true, false, false, false));
++    EXPECT_TRUE(ShouldKeepPvpBattlegroundCombat(false, true, false, false));
++    EXPECT_TRUE(ShouldKeepPvpBattlegroundCombat(false, false, true, false));
++    EXPECT_TRUE(ShouldKeepPvpBattlegroundCombat(false, false, false, true));
++    EXPECT_FALSE(ShouldKeepPvpBattlegroundCombat(false, false, false, false));
+ }
+ 
+ TEST(PvpRecoveryPolicy, KillPressureCanOverrideOptionalResetButNotCriticalSurvival)
+diff --git a/modules/mod-playerbots/t/PvpTacticalScenarioMatrix.md b/modules/mod-playerbots/t/PvpTacticalScenarioMatrix.md
+index 15d2ddb7..1e70cf78 100644
+--- a/modules/mod-playerbots/t/PvpTacticalScenarioMatrix.md
++++ b/modules/mod-playerbots/t/PvpTacticalScenarioMatrix.md
+@@ -241,3 +241,13 @@ off-target outside the effect radius to guard against overly broad suppression.
+   friendly unit selected. Tactical pet pressure must resolve the bot's current
+   duel opponent through `PetAttackAction`; it must never execute the colliding
+   `pet attack` chat command or emit `pet_invalid_target_error`.
++- Fight a player as a shadow priest whose estimated lifetime is below the
++  generic PvE eight-second debuff threshold. Vampiric Touch, Devouring Plague
++  and Shadow Word: Pain must still enter the PvP action list in that order;
++  Mind Blast and Shadow Word: Death precede Mind Flay, and wand is last.
++- In a battleground, lose the selected enemy while the core combat flag remains
++  set but no visible target or attacker remains. The engagement state must age
++  out, clear stale target ownership, switch back to the noncombat engine and
++  resume objective movement. Replacing a lost target with another visible
++  enemy must also update the AI current target rather than keep attacking the
++  old out-of-range player.

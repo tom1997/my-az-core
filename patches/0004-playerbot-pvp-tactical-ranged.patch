@@ -1,0 +1,392 @@
+diff --git a/modules/mod-playerbots/conf/playerbots.conf.dist b/modules/mod-playerbots/conf/playerbots.conf.dist
+index bcf2600f..5f6424f9 100644
+--- a/modules/mod-playerbots/conf/playerbots.conf.dist
++++ b/modules/mod-playerbots/conf/playerbots.conf.dist
+@@ -528,6 +528,29 @@ AiPlayerbot.ForceRebuffMarginSecs = 60
+ # Bots can flee from enemies
+ AiPlayerbot.FleeingEnabled = 1
+ 
++# Enable the shared PvP positioning controller. It is disabled upstream by default so
++# administrators can opt in after testing their maps and bot population.
++AiPlayerbot.PvPTactical.Enable = 0
++
++# PvP contexts in which the controller may run.
++AiPlayerbot.PvPTactical.Duel = 1
++AiPlayerbot.PvPTactical.Arena = 1
++AiPlayerbot.PvPTactical.Battleground = 1
++AiPlayerbot.PvPTactical.OpenWorld = 0
++
++# Milliseconds between positioning decisions. Values below 100 are clamped to 100.
++AiPlayerbot.PvPTactical.DecisionInterval = 250
++
++# Preferred lower range boundary in yards. The active specialization determines
++# whether the hunter, caster, or healer value is used.
++AiPlayerbot.PvPTactical.Hunter.MinDistance = 24.0
++AiPlayerbot.PvPTactical.Caster.MinDistance = 18.0
++AiPlayerbot.PvPTactical.Healer.MinDistance = 22.0
++
++# Distance moved per retreat decision and maximum distance for pursuing a PvP target.
++AiPlayerbot.PvPTactical.RetreatStep = 7.0
++AiPlayerbot.PvPTactical.TargetLeashDistance = 55.0
++
+ #
+ #
+ ####################################################################################################
+diff --git a/modules/mod-playerbots/src/Ai/Base/ActionContext.h b/modules/mod-playerbots/src/Ai/Base/ActionContext.h
+index aa5e4175..9d290c80 100644
+--- a/modules/mod-playerbots/src/Ai/Base/ActionContext.h
++++ b/modules/mod-playerbots/src/Ai/Base/ActionContext.h
+@@ -98,6 +98,7 @@ public:
+         creators["reach party member to resurrect"] = &ActionContext::reach_party_member_to_resurrect;
+         creators["flee"] = &ActionContext::flee;
+         creators["flee with pet"] = &ActionContext::flee_with_pet;
++        creators["pvp tactical retreat"] = &ActionContext::pvp_tactical_retreat;
+         creators["avoid aoe"] = &ActionContext::avoid_aoe;
+         creators["combat formation move"] = &ActionContext::combat_formation_move;
+         creators["tank face"] = &ActionContext::tank_face;
+@@ -316,6 +317,7 @@ private:
+     static Action* reach_party_member_to_resurrect(PlayerbotAI* botAI) { return new ReachPartyMemberToResurrectAction(botAI); }
+     static Action* flee(PlayerbotAI* botAI) { return new FleeAction(botAI); }
+     static Action* flee_with_pet(PlayerbotAI* botAI) { return new FleeWithPetAction(botAI); }
++    static Action* pvp_tactical_retreat(PlayerbotAI* botAI) { return new PvpTacticalRetreatAction(botAI); }
+     static Action* avoid_aoe(PlayerbotAI* botAI) { return new AvoidAoeAction(botAI); }
+     static Action* combat_formation_move(PlayerbotAI* botAI) { return new CombatFormationMoveAction(botAI); }
+     static Action* tank_face(PlayerbotAI* botAI) { return new TankFaceAction(botAI); }
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp
+index 4ea6cbdb..187f3c10 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp
+@@ -1828,6 +1828,103 @@ bool FleeAction::Execute(Event /*event*/)
+     return MoveAway(AI_VALUE(Unit*, "current target"), sPlayerbotAIConfig.fleeDistance, true);
+ }
+ 
++bool PvpTacticalRetreatAction::TryClassPeel(Unit* target, float distance)
++{
++    auto tryCast = [this](char const* spell, Unit* spellTarget)
++    {
++        return botAI->HasSpell(spell) && !botAI->HasAura(spell, spellTarget) &&
++               botAI->CanCastSpell(spell, spellTarget) &&
++               botAI->CastSpell(spell, spellTarget);
++    };
++
++    // Each branch is naturally level-aware: an option is considered only after
++    // the character has actually learned that spell.
++    switch (bot->getClass())
++    {
++        case CLASS_HUNTER:
++            if (distance < 9.0f && tryCast("freezing trap", bot))
++                return true;
++            if (distance < 6.0f && tryCast("wing clip", target))
++                return true;
++            if (distance < 7.0f && botAI->HasSpell("disengage") && botAI->CanCastSpell("disengage", bot))
++            {
++                bot->SetOrientation(bot->GetAngle(target));
++                return botAI->CastSpell("disengage", bot);
++            }
++            return tryCast("concussive shot", target);
++        case CLASS_MAGE:
++            if (distance < 10.0f && tryCast("frost nova", bot))
++                return true;
++            if (distance < 7.0f && botAI->HasSpell("blink") && botAI->CanCastSpell("blink", bot))
++            {
++                bot->SetOrientation(bot->GetAngle(target) + M_PI);
++                return botAI->CastSpell("blink", bot);
++            }
++            return tryCast("cone of cold", target);
++        case CLASS_WARLOCK:
++            if (distance < 12.0f && tryCast("death coil", target))
++                return true;
++            if (tryCast("curse of exhaustion", target))
++                return true;
++            return distance < 10.0f && tryCast("fear", target);
++        case CLASS_PRIEST:
++            return distance < 8.0f && tryCast("psychic scream", bot);
++        case CLASS_SHAMAN:
++            if (distance < 10.0f && tryCast("thunderstorm", bot))
++                return true;
++            if (tryCast("frost shock", target))
++                return true;
++            return distance < 9.0f && tryCast("earthbind totem", bot);
++        case CLASS_DRUID:
++            if (tryCast("entangling roots", target))
++                return true;
++            return distance < 10.0f && tryCast("cyclone", target);
++        case CLASS_PALADIN:
++            if ((bot->HasRootAura() || bot->HasAuraType(SPELL_AURA_MOD_DECREASE_SPEED)) &&
++                tryCast("hand of freedom", bot))
++                return true;
++            return distance < 10.0f && tryCast("hammer of justice", target);
++        default:
++            return false;
++    }
++}
++
++bool PvpTacticalRetreatAction::Execute(Event /*event*/)
++{
++    Unit* target = AI_VALUE(Unit*, "current target");
++    if (!target || !target->IsPlayer() || !botAI->IsRanged(bot, true))
++        return false;
++
++    float const distance = bot->GetDistance2d(target);
++    if (TryClassPeel(target, distance))
++        return true;
++
++    // Finish safe casts when possible, but do not stand still once the enemy has
++    // reached the normal melee danger zone.
++    if (bot->IsNonMeleeSpellCast(false))
++    {
++        if (distance > sPlayerbotAIConfig.tooCloseDistance)
++            return false;
++        bot->InterruptNonMeleeSpells(true);
++    }
++
++    float minimumDistance = sPlayerbotAIConfig.pvpTacticalCasterMinDistance;
++    if (bot->getClass() == CLASS_HUNTER)
++        minimumDistance = sPlayerbotAIConfig.pvpTacticalHunterMinDistance;
++    else if (botAI->IsHeal(bot))
++        minimumDistance = sPlayerbotAIConfig.pvpTacticalHealerMinDistance;
++
++    float const missingDistance = std::max(2.0f, minimumDistance - distance + 1.0f);
++    float const step = std::min(sPlayerbotAIConfig.pvpTacticalRetreatStep, missingDistance);
++    return MoveAway(target, step, false);
++}
++
++bool PvpTacticalRetreatAction::isUseful()
++{
++    Unit* target = AI_VALUE(Unit*, "current target");
++    return sPlayerbotAIConfig.pvpTacticalEnabled && target && target->IsPlayer() && botAI->IsRanged(bot, true);
++}
++
+ bool FleeAction::isUseful()
+ {
+     if (bot->GetCurrentSpell(CURRENT_CHANNELED_SPELL) != nullptr)
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.h b/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.h
+index 842bdd80..1792509d 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.h
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.h
+@@ -102,6 +102,18 @@ public:
+     bool Execute(Event event) override;
+ };
+ 
++class PvpTacticalRetreatAction : public MovementAction
++{
++public:
++    PvpTacticalRetreatAction(PlayerbotAI* botAI) : MovementAction(botAI, "pvp tactical retreat") {}
++
++    bool Execute(Event event) override;
++    bool isUseful() override;
++
++private:
++    bool TryClassPeel(Unit* target, float distance);
++};
++
+ class AvoidAoeAction : public MovementAction
+ {
+ public:
+diff --git a/modules/mod-playerbots/src/Ai/Base/Strategy/CombatStrategy.cpp b/modules/mod-playerbots/src/Ai/Base/Strategy/CombatStrategy.cpp
+index 6d14608f..5a454ee6 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Strategy/CombatStrategy.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Strategy/CombatStrategy.cpp
+@@ -50,6 +50,10 @@ void CombatStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
+             }
+         )
+     );
++    triggers.push_back(new TriggerNode(
++        "pvp tactical ranged too close", { NextAction("pvp tactical retreat", ACTION_MOVE + 8) }));
++    triggers.push_back(
++        new TriggerNode("pvp tactical target too far", { NextAction("drop target", ACTION_HIGH + 1) }));
+     // The pet-attack trigger is commented out because it was forcing the bot's pet to attack, overriding stay and follow commands.
+     // Pets will automatically attack the bot's enemy if they are in "defensive" or "aggressive"
+     // stance, or if the master issues an attack command.
+diff --git a/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.cpp b/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.cpp
+index 758363d9..16cadcea 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.cpp
+@@ -11,6 +11,37 @@
+ #include "ServerFacade.h"
+ #include "SharedDefines.h"
+ 
++namespace
++{
++bool IsPvpTacticalContextEnabled(Player* bot)
++{
++    if (!sPlayerbotAIConfig.pvpTacticalEnabled)
++        return false;
++
++    if (bot->duel && bot->duel->Opponent)
++        return sPlayerbotAIConfig.pvpTacticalDuel;
++
++    if (bot->InArena())
++        return sPlayerbotAIConfig.pvpTacticalArena;
++
++    if (bot->InBattleground())
++        return sPlayerbotAIConfig.pvpTacticalBattleground;
++
++    return sPlayerbotAIConfig.pvpTacticalOpenWorld;
++}
++
++float GetPvpTacticalMinimumDistance(PlayerbotAI* botAI, Player* bot)
++{
++    if (bot->getClass() == CLASS_HUNTER)
++        return sPlayerbotAIConfig.pvpTacticalHunterMinDistance;
++
++    if (botAI->IsHeal(bot))
++        return sPlayerbotAIConfig.pvpTacticalHealerMinDistance;
++
++    return sPlayerbotAIConfig.pvpTacticalCasterMinDistance;
++}
++}
++
+ bool EnemyTooCloseForSpellTrigger::IsActive()
+ {
+     Unit* target = AI_VALUE(Unit*, "current target");
+@@ -152,6 +183,44 @@ bool EnemyWithinMeleeTrigger::IsActive()
+     return target && bot->IsWithinMeleeRange(target);
+ }
+ 
++PvpTacticalRangedTooCloseTrigger::PvpTacticalRangedTooCloseTrigger(PlayerbotAI* botAI)
++    : Trigger(botAI, "pvp tactical ranged too close", sPlayerbotAIConfig.pvpTacticalDecisionInterval)
++{
++}
++
++bool PvpTacticalRangedTooCloseTrigger::IsActive()
++{
++    Unit* target = AI_VALUE(Unit*, "current target");
++    if (!target || !target->IsPlayer() || !IsPvpTacticalContextEnabled(bot) || !botAI->IsRanged(bot, true))
++        return false;
++
++    // Do not kite a player who is currently pressuring somebody else. This keeps
++    // ranged bots from needlessly cancelling casts in group PvP.
++    if (target->GetVictim() != bot && !(bot->duel && bot->duel->Opponent == target))
++        return false;
++
++    float const minimumDistance = GetPvpTacticalMinimumDistance(botAI, bot);
++    return bot->GetDistance2d(target) < minimumDistance;
++}
++
++PvpTacticalTargetTooFarTrigger::PvpTacticalTargetTooFarTrigger(PlayerbotAI* botAI)
++    : Trigger(botAI, "pvp tactical target too far", sPlayerbotAIConfig.pvpTacticalDecisionInterval)
++{
++}
++
++bool PvpTacticalTargetTooFarTrigger::IsActive()
++{
++    Unit* target = AI_VALUE(Unit*, "current target");
++    if (!target || !target->IsPlayer() || !IsPvpTacticalContextEnabled(bot))
++        return false;
++
++    // A duel already has its own boundary and must not lose its opponent.
++    if (bot->duel && bot->duel->Opponent == target)
++        return false;
++
++    return bot->GetDistance2d(target) > sPlayerbotAIConfig.pvpTacticalTargetLeashDistance;
++}
++
+ bool OutOfRangeTrigger::IsActive()
+ {
+     Unit* target = AI_VALUE(Unit*, GetTargetName());
+diff --git a/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.h b/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.h
+index 64cbe140..7d632bd1 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.h
++++ b/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.h
+@@ -60,6 +60,22 @@ public:
+     bool IsActive() override;
+ };
+ 
++class PvpTacticalRangedTooCloseTrigger : public Trigger
++{
++public:
++    PvpTacticalRangedTooCloseTrigger(PlayerbotAI* botAI);
++
++    bool IsActive() override;
++};
++
++class PvpTacticalTargetTooFarTrigger : public Trigger
++{
++public:
++    PvpTacticalTargetTooFarTrigger(PlayerbotAI* botAI);
++
++    bool IsActive() override;
++};
++
+ class OutOfRangeTrigger : public Trigger
+ {
+ public:
+diff --git a/modules/mod-playerbots/src/Ai/Base/TriggerContext.h b/modules/mod-playerbots/src/Ai/Base/TriggerContext.h
+index 5219992e..bb8567be 100644
+--- a/modules/mod-playerbots/src/Ai/Base/TriggerContext.h
++++ b/modules/mod-playerbots/src/Ai/Base/TriggerContext.h
+@@ -115,6 +115,8 @@ public:
+         creators["enemy too close for melee"] = &TriggerContext::enemy_too_close_for_melee;
+         creators["enemy is close"] = &TriggerContext::enemy_is_close;
+         creators["enemy within melee"] = &TriggerContext::enemy_within_melee;
++        creators["pvp tactical ranged too close"] = &TriggerContext::pvp_tactical_ranged_too_close;
++        creators["pvp tactical target too far"] = &TriggerContext::pvp_tactical_target_too_far;
+         creators["party member to heal out of spell range"] = &TriggerContext::party_member_to_heal_out_of_spell_range;
+ 
+         creators["combo points 5 available"] = &TriggerContext::ComboPoints5Available;
+@@ -359,6 +361,14 @@ private:
+     static Trigger* enemy_too_close_for_melee(PlayerbotAI* botAI) { return new EnemyTooCloseForMeleeTrigger(botAI); }
+     static Trigger* enemy_is_close(PlayerbotAI* botAI) { return new EnemyIsCloseTrigger(botAI); }
+     static Trigger* enemy_within_melee(PlayerbotAI* botAI) { return new EnemyWithinMeleeTrigger(botAI); }
++    static Trigger* pvp_tactical_ranged_too_close(PlayerbotAI* botAI)
++    {
++        return new PvpTacticalRangedTooCloseTrigger(botAI);
++    }
++    static Trigger* pvp_tactical_target_too_far(PlayerbotAI* botAI)
++    {
++        return new PvpTacticalTargetTooFarTrigger(botAI);
++    }
+     static Trigger* party_member_to_heal_out_of_spell_range(PlayerbotAI* botAI)
+     {
+         return new PartyMemberToHealOutOfSpellRangeTrigger(botAI);
+diff --git a/modules/mod-playerbots/src/PlayerbotAIConfig.cpp b/modules/mod-playerbots/src/PlayerbotAIConfig.cpp
+index 98678a25..d7490e84 100644
+--- a/modules/mod-playerbots/src/PlayerbotAIConfig.cpp
++++ b/modules/mod-playerbots/src/PlayerbotAIConfig.cpp
+@@ -123,6 +123,23 @@ bool PlayerbotAIConfig::Initialize()
+     grindDistance = sConfigMgr->GetOption<float>("AiPlayerbot.GrindDistance", 75.0f);
+     reactDistance = sConfigMgr->GetOption<float>("AiPlayerbot.ReactDistance", 150.0f);
+ 
++    pvpTacticalEnabled = sConfigMgr->GetOption<bool>("AiPlayerbot.PvPTactical.Enable", false);
++    pvpTacticalDuel = sConfigMgr->GetOption<bool>("AiPlayerbot.PvPTactical.Duel", true);
++    pvpTacticalArena = sConfigMgr->GetOption<bool>("AiPlayerbot.PvPTactical.Arena", true);
++    pvpTacticalBattleground = sConfigMgr->GetOption<bool>("AiPlayerbot.PvPTactical.Battleground", true);
++    pvpTacticalOpenWorld = sConfigMgr->GetOption<bool>("AiPlayerbot.PvPTactical.OpenWorld", false);
++    pvpTacticalDecisionInterval =
++        std::max<uint32>(100, sConfigMgr->GetOption<uint32>("AiPlayerbot.PvPTactical.DecisionInterval", 250));
++    pvpTacticalHunterMinDistance =
++        sConfigMgr->GetOption<float>("AiPlayerbot.PvPTactical.Hunter.MinDistance", 24.0f);
++    pvpTacticalCasterMinDistance =
++        sConfigMgr->GetOption<float>("AiPlayerbot.PvPTactical.Caster.MinDistance", 18.0f);
++    pvpTacticalHealerMinDistance =
++        sConfigMgr->GetOption<float>("AiPlayerbot.PvPTactical.Healer.MinDistance", 22.0f);
++    pvpTacticalRetreatStep = sConfigMgr->GetOption<float>("AiPlayerbot.PvPTactical.RetreatStep", 7.0f);
++    pvpTacticalTargetLeashDistance =
++        sConfigMgr->GetOption<float>("AiPlayerbot.PvPTactical.TargetLeashDistance", 55.0f);
++
+     criticalHealth = sConfigMgr->GetOption<int32>("AiPlayerbot.CriticalHealth", 25);
+     lowHealth = sConfigMgr->GetOption<int32>("AiPlayerbot.LowHealth", 45);
+     mediumHealth = sConfigMgr->GetOption<int32>("AiPlayerbot.MediumHealth", 65);
+diff --git a/modules/mod-playerbots/src/PlayerbotAIConfig.h b/modules/mod-playerbots/src/PlayerbotAIConfig.h
+index 848de4e2..924b628b 100644
+--- a/modules/mod-playerbots/src/PlayerbotAIConfig.h
++++ b/modules/mod-playerbots/src/PlayerbotAIConfig.h
+@@ -125,6 +125,17 @@ public:
+     uint32 forceRebuffMarginSecs;
+     bool autoAvoidAoe;
+     float maxAoeAvoidRadius;
++    bool pvpTacticalEnabled;
++    bool pvpTacticalDuel;
++    bool pvpTacticalArena;
++    bool pvpTacticalBattleground;
++    bool pvpTacticalOpenWorld;
++    uint32 pvpTacticalDecisionInterval;
++    float pvpTacticalHunterMinDistance;
++    float pvpTacticalCasterMinDistance;
++    float pvpTacticalHealerMinDistance;
++    float pvpTacticalRetreatStep;
++    float pvpTacticalTargetLeashDistance;
+     std::set<uint32> aoeAvoidSpellWhitelist;
+     bool tellWhenAvoidAoe;
+     std::set<uint32> disallowedGameObjects;

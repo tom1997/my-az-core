@@ -1,0 +1,128 @@
+diff --git a/modules/mod-playerbots/conf/playerbots.conf.dist b/modules/mod-playerbots/conf/playerbots.conf.dist
+index c67322b..cff2850 100644
+--- a/modules/mod-playerbots/conf/playerbots.conf.dist
++++ b/modules/mod-playerbots/conf/playerbots.conf.dist
+@@ -536,7 +536,7 @@ AiPlayerbot.PvPTactical.Enable = 0
+ AiPlayerbot.PvPTactical.Duel = 1
+ AiPlayerbot.PvPTactical.Arena = 1
+ AiPlayerbot.PvPTactical.Battleground = 1
+-AiPlayerbot.PvPTactical.OpenWorld = 0
++AiPlayerbot.PvPTactical.OpenWorld = 1
+ 
+ # Milliseconds between positioning decisions. Values below 750 are clamped to 750
+ # to avoid movement/action starvation.
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp
+index 89784e8..89ef397 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp
+@@ -1865,6 +1865,10 @@ bool FleeAction::Execute(Event /*event*/)
+ bool PvpTacticalRetreatAction::Execute(Event /*event*/)
+ {
+     Unit* target = AI_VALUE(Unit*, "current target");
++    PvpTacticalState& state = GetPvpTacticalState(botAI);
++    if (state.retreating && !state.targetGuid.IsEmpty())
++        if (Unit* threat = botAI->GetUnit(state.targetGuid); threat && threat->IsAlive())
++            target = threat;
+     if (!target || !target->IsPlayer() || !botAI->IsRanged(bot, true))
+         return false;
+ 
+@@ -1946,6 +1950,42 @@ bool PvpTacticalRetreatAction::Execute(Event /*event*/)
+         }
+     }
+ 
++    // In group and world PvP, move along the combined repulsion vector of all
++    // nearby enemy players instead of escaping one target into another.
++    float repelX = 0.0f;
++    float repelY = 0.0f;
++    uint32 nearbyThreats = 0;
++    for (ObjectGuid const guid : AI_VALUE(GuidVector, "nearest enemy players"))
++    {
++        Unit* enemy = botAI->GetUnit(guid);
++        if (!enemy || !enemy->IsPlayer() || !enemy->IsAlive() || !bot->IsHostileTo(enemy))
++            continue;
++        float const enemyDistance = bot->GetDistance2d(enemy);
++        if (enemyDistance >= 15.0f || enemyDistance < 0.1f)
++            continue;
++        float const weight = (15.0f - enemyDistance) / enemyDistance;
++        repelX += (bot->GetPositionX() - enemy->GetPositionX()) * weight;
++        repelY += (bot->GetPositionY() - enemy->GetPositionY()) * weight;
++        ++nearbyThreats;
++    }
++    float const repelLength = std::sqrt(repelX * repelX + repelY * repelY);
++    if (nearbyThreats && repelLength > 0.01f)
++    {
++        float x = bot->GetPositionX() + repelX / repelLength * step;
++        float y = bot->GetPositionY() + repelY / repelLength * step;
++        float z = bot->GetPositionZ();
++        if (bot->GetMap()->CheckCollisionAndGetValidCoords(bot, bot->GetPositionX(), bot->GetPositionY(),
++                                                            bot->GetPositionZ(), x, y, z))
++        {
++            ClaimPvpMovement(botAI, PvpMovementOwner::Retreat, target);
++            bool const moved = MoveTo(bot->GetMapId(), x, y, z, false, false, false, true,
++                                      MovementPriority::MOVEMENT_COMBAT);
++            if (!moved)
++                ClearPvpMovement(botAI, PvpMovementOwner::Retreat);
++            return moved;
++        }
++    }
++
+     // Sprint out of a live melee contact first. Once clear, backpedal for the
+     // remaining segment so instant ranged abilities can keep facing the target.
+     bool const underMeleePressure = bot->IsWithinMeleeRange(target) && !target->HasRootAura() && !target->isFrozen();
+diff --git a/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.cpp b/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.cpp
+index 12f5c5a..1be7764 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.cpp
+@@ -221,6 +221,25 @@ bool PvpTacticalRangedTooCloseTrigger::IsActive()
+         return false;
+     }
+ 
++    // Keep the combat target for ability selection, but space from the closest
++    // hostile player. This prevents a second melee opponent from freely
++    // body-blocking a ranged bot that is targeting somebody else.
++    Unit* closestThreat = target;
++    float closestDistance = bot->GetDistance2d(target);
++    for (ObjectGuid const guid : AI_VALUE(GuidVector, "nearest enemy players"))
++    {
++        Unit* candidate = botAI->GetUnit(guid);
++        if (!candidate || !candidate->IsPlayer() || !candidate->IsAlive() || !bot->IsHostileTo(candidate))
++            continue;
++        float const candidateDistance = bot->GetDistance2d(candidate);
++        if (candidateDistance < closestDistance)
++        {
++            closestThreat = candidate;
++            closestDistance = candidateDistance;
++        }
++    }
++    target = closestThreat;
++
+     bool const rangedOpponent = IsRangedOpponent(botAI, target);
+     float const enterDistance = rangedOpponent ? sPlayerbotAIConfig.pvpTacticalRangedOpponentEmergencyDistance
+                                                : GetPvpTacticalMinimumDistance(botAI, bot);
+@@ -258,7 +277,11 @@ bool PvpTacticalPlayerTargetTrigger::IsActive()
+ 
+     UpdatePvpTacticalState(botAI, target);
+ 
+-    return target->GetVictim() == bot || (bot->duel && bot->duel->Opponent == target);
++    if (bot->duel && bot->duel->Opponent == target)
++        return true;
++    if (bot->InArena() || bot->InBattleground())
++        return bot->IsHostileTo(target);
++    return sPlayerbotAIConfig.pvpTacticalOpenWorld && bot->IsInCombat() && bot->IsHostileTo(target);
+ }
+ 
+ PvpTacticalPressureHunterTrigger::PvpTacticalPressureHunterTrigger(PlayerbotAI* botAI)
+diff --git a/modules/mod-playerbots/src/PlayerbotAIConfig.cpp b/modules/mod-playerbots/src/PlayerbotAIConfig.cpp
+index e5272d7..173d11b 100644
+--- a/modules/mod-playerbots/src/PlayerbotAIConfig.cpp
++++ b/modules/mod-playerbots/src/PlayerbotAIConfig.cpp
+@@ -127,7 +127,7 @@ bool PlayerbotAIConfig::Initialize()
+     pvpTacticalDuel = sConfigMgr->GetOption<bool>("AiPlayerbot.PvPTactical.Duel", true);
+     pvpTacticalArena = sConfigMgr->GetOption<bool>("AiPlayerbot.PvPTactical.Arena", true);
+     pvpTacticalBattleground = sConfigMgr->GetOption<bool>("AiPlayerbot.PvPTactical.Battleground", true);
+-    pvpTacticalOpenWorld = sConfigMgr->GetOption<bool>("AiPlayerbot.PvPTactical.OpenWorld", false);
++    pvpTacticalOpenWorld = sConfigMgr->GetOption<bool>("AiPlayerbot.PvPTactical.OpenWorld", true);
+     pvpTacticalDecisionInterval =
+         std::max<uint32>(150, sConfigMgr->GetOption<uint32>("AiPlayerbot.PvPTactical.DecisionInterval", 200));
+     pvpTacticalHunterMinDistance =
+

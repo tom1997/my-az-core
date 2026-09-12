@@ -1,7 +1,7 @@
 # Playerbot 独立登录、离线托管与决斗实验
 
 本发行版在上游 Playerbots 行为之外增加了四项个人服务器功能。实现位于
-`patches/0003-playerbot-owned-autonomy-and-duels.patch`，升级 Playerbots 时会由 CI 自动检查补丁兼容性。
+`patches/0003-playerbot-owned-autonomy-and-duels.patch`；正式 `.botduel` 命令及调度修复位于 `patches/0006-playerbot-pvp-cooperative-scheduling.patch`。升级 Playerbots 时会由 CI 自动检查补丁兼容性。
 
 ## 登录模式
 
@@ -54,11 +54,13 @@ follow, stay, guard, free, move from group, start duel
 
 ## botduel 决斗实验入口
 
-先让至少两个同阵营机器人进入队伍并站在允许决斗的野外区域，然后在队伍聊天输入：
+先让至少两个同阵营机器人进入队伍并站在允许决斗的野外区域，然后使用正式服务端命令：
 
 ```text
-botduel
+.botduel
 ```
+
+队伍聊天里的纯文本 `botduel` 仍作为兼容别名保留。正式命令会明确反馈候选机器人数、成功发起的决斗数，或距离、阵营、区域限制导致的失败原因。
 
 系统会选取满足以下条件的机器人，两两发起决斗：
 
@@ -75,5 +77,4 @@ botduel
 2. 设置 `nc +follow` 后离队，确认 `follow` 不会作为用户覆盖项恢复。
 3. 使用 `login-solo`，确认机器人在线但队伍未创建；主人退出后机器人退出。
 4. 使用 `login-persistent`，确认主人退出后机器人仍在线活动；主人重连后可以再次邀请和指挥。
-5. 组入四个同阵营机器人，在开阔区域输入 `botduel`，确认产生两组决斗且结束后可再次触发。
-
+5. 组入四个同阵营机器人，在开阔区域输入 `.botduel`，确认收到系统反馈、产生两组决斗且结束后可再次触发。

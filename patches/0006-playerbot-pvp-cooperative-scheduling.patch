@@ -1,0 +1,432 @@
+diff --git a/modules/mod-playerbots/conf/playerbots.conf.dist b/modules/mod-playerbots/conf/playerbots.conf.dist
+index 0b2d9fa..bc8e201 100644
+--- a/modules/mod-playerbots/conf/playerbots.conf.dist
++++ b/modules/mod-playerbots/conf/playerbots.conf.dist
+@@ -538,8 +538,9 @@ AiPlayerbot.PvPTactical.Arena = 1
+ AiPlayerbot.PvPTactical.Battleground = 1
+ AiPlayerbot.PvPTactical.OpenWorld = 0
+ 
+-# Milliseconds between positioning decisions. Values below 100 are clamped to 100.
+-AiPlayerbot.PvPTactical.DecisionInterval = 250
++# Milliseconds between positioning decisions. Values below 750 are clamped to 750
++# to avoid movement/action starvation.
++AiPlayerbot.PvPTactical.DecisionInterval = 900
+ 
+ # Preferred lower range boundary in yards. The active specialization determines
+ # whether the hunter, caster, or healer value is used.
+@@ -555,7 +556,7 @@ AiPlayerbot.PvPTactical.TargetLeashDistance = 55.0
+ # prevents constant orbiting while still allowing the bot to react when its
+ # opponent turns. Angles are degrees measured away from the target's front.
+ AiPlayerbot.PvPTactical.Melee.Enable = 1
+-AiPlayerbot.PvPTactical.Melee.DecisionInterval = 600
++AiPlayerbot.PvPTactical.Melee.DecisionInterval = 900
+ AiPlayerbot.PvPTactical.Melee.FlankDistance = 1.5
+ AiPlayerbot.PvPTactical.Melee.MinAngle = 100.0
+ AiPlayerbot.PvPTactical.Melee.MaxAngle = 145.0
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp
+index 15079ef..10da8d2 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp
+@@ -39,6 +39,31 @@
+ #include <iomanip>
+ #include <string>
+ 
++namespace
++{
++bool IsPvpTacticalMovementContext(Player* bot)
++{
++    if (!sPlayerbotAIConfig.pvpTacticalEnabled)
++        return false;
++
++    if (bot->duel && bot->duel->Opponent)
++        return sPlayerbotAIConfig.pvpTacticalDuel;
++    if (bot->InArena())
++        return sPlayerbotAIConfig.pvpTacticalArena;
++    if (bot->InBattleground())
++        return sPlayerbotAIConfig.pvpTacticalBattleground;
++    return sPlayerbotAIConfig.pvpTacticalOpenWorld;
++}
++
++bool IsCombatPointMovementActive(PlayerbotAI* botAI, Player* bot)
++{
++    LastMovement const& last =
++        botAI->GetAiObjectContext()->GetValue<LastMovement&>("last movement")->Get();
++    return bot->isMoving() && bot->GetMotionMaster()->GetCurrentMovementGeneratorType() == POINT_MOTION_TYPE &&
++           last.priority >= MovementPriority::MOVEMENT_COMBAT;
++}
++}
++
+ MovementAction::MovementAction(PlayerbotAI* botAI, std::string const name) : Action(botAI, name)
+ {
+     bot = botAI->GetBot();
+@@ -1828,86 +1853,24 @@ bool FleeAction::Execute(Event /*event*/)
+     return MoveAway(AI_VALUE(Unit*, "current target"), sPlayerbotAIConfig.fleeDistance, true);
+ }
+ 
+-bool PvpTacticalRetreatAction::TryClassPeel(Unit* target, float distance)
+-{
+-    auto tryCast = [this](char const* spell, Unit* spellTarget)
+-    {
+-        return botAI->HasSpell(spell) && !botAI->HasAura(spell, spellTarget) &&
+-               botAI->CanCastSpell(spell, spellTarget) &&
+-               botAI->CastSpell(spell, spellTarget);
+-    };
+-
+-    // Each branch is naturally level-aware: an option is considered only after
+-    // the character has actually learned that spell.
+-    switch (bot->getClass())
+-    {
+-        case CLASS_HUNTER:
+-            if (distance < 9.0f && tryCast("freezing trap", bot))
+-                return true;
+-            if (distance < 6.0f && tryCast("wing clip", target))
+-                return true;
+-            if (distance < 7.0f && botAI->HasSpell("disengage") && botAI->CanCastSpell("disengage", bot))
+-            {
+-                bot->SetOrientation(bot->GetAngle(target));
+-                return botAI->CastSpell("disengage", bot);
+-            }
+-            return tryCast("concussive shot", target);
+-        case CLASS_MAGE:
+-            if (distance < 10.0f && tryCast("frost nova", bot))
+-                return true;
+-            if (distance < 7.0f && botAI->HasSpell("blink") && botAI->CanCastSpell("blink", bot))
+-            {
+-                bot->SetOrientation(bot->GetAngle(target) + M_PI);
+-                return botAI->CastSpell("blink", bot);
+-            }
+-            return tryCast("cone of cold", target);
+-        case CLASS_WARLOCK:
+-            if (distance < 12.0f && tryCast("death coil", target))
+-                return true;
+-            if (tryCast("curse of exhaustion", target))
+-                return true;
+-            return distance < 10.0f && tryCast("fear", target);
+-        case CLASS_PRIEST:
+-            return distance < 8.0f && tryCast("psychic scream", bot);
+-        case CLASS_SHAMAN:
+-            if (distance < 10.0f && tryCast("thunderstorm", bot))
+-                return true;
+-            if (tryCast("frost shock", target))
+-                return true;
+-            return distance < 9.0f && tryCast("earthbind totem", bot);
+-        case CLASS_DRUID:
+-            if (tryCast("entangling roots", target))
+-                return true;
+-            return distance < 10.0f && tryCast("cyclone", target);
+-        case CLASS_PALADIN:
+-            if ((bot->HasRootAura() || bot->HasAuraType(SPELL_AURA_MOD_DECREASE_SPEED)) &&
+-                tryCast("hand of freedom", bot))
+-                return true;
+-            return distance < 10.0f && tryCast("hammer of justice", target);
+-        default:
+-            return false;
+-    }
+-}
+-
+ bool PvpTacticalRetreatAction::Execute(Event /*event*/)
+ {
+     Unit* target = AI_VALUE(Unit*, "current target");
+     if (!target || !target->IsPlayer() || !botAI->IsRanged(bot, true))
+         return false;
+ 
+-    float const distance = bot->GetDistance2d(target);
+-    if (TryClassPeel(target, distance))
+-        return true;
+-
+-    // Finish safe casts when possible, but do not stand still once the enemy has
+-    // reached the normal melee danger zone.
++    // Movement is a fallback action. Never turn it into a spell controller and
++    // never cancel a cast selected by the class strategy on the previous tick.
+     if (bot->IsNonMeleeSpellCast(false))
+-    {
+-        if (distance > sPlayerbotAIConfig.tooCloseDistance)
+-            return false;
+-        bot->InterruptNonMeleeSpells(true);
+-    }
++        return false;
+ 
++    // MovePoint keeps running between AI ticks. Do not replace the same combat
++    // movement every decision interval: later ticks can select instant class
++    // abilities while the spline continues.
++    if (IsCombatPointMovementActive(botAI, bot))
++        return false;
++
++    float const distance = bot->GetDistance2d(target);
+     float minimumDistance = sPlayerbotAIConfig.pvpTacticalCasterMinDistance;
+     if (bot->getClass() == CLASS_HUNTER)
+         minimumDistance = sPlayerbotAIConfig.pvpTacticalHunterMinDistance;
+@@ -1931,12 +1894,16 @@ bool PvpTacticalMeleeFlankAction::Execute(Event /*event*/)
+     if (!target || !target->IsPlayer() || !botAI->IsMelee(bot, true))
+         return false;
+ 
++    if (bot->IsNonMeleeSpellCast(false) || IsCombatPointMovementActive(botAI, bot))
++        return false;
++
+     float minAngle = std::clamp(sPlayerbotAIConfig.pvpTacticalMeleeMinAngle, 90.0f, 175.0f) * M_PI / 180.0f;
+     float maxAngle = std::clamp(sPlayerbotAIConfig.pvpTacticalMeleeMaxAngle, 90.0f, 175.0f) * M_PI / 180.0f;
+     if (minAngle > maxAngle)
+         std::swap(minAngle, maxAngle);
+ 
+-    float const angle = frand(minAngle, maxAngle);
++    // A stable angle prevents left/right destination churn every trigger tick.
++    float const angle = (minAngle + maxAngle) * 0.5f;
+     float const distance = std::max(1.0f, bot->GetMeleeRange(target) * 0.6f);
+     Position left = target->GetPosition();
+     Position right = target->GetPosition();
+@@ -1978,6 +1945,11 @@ bool FleeAction::isUseful()
+         return false;
+ 
+     Unit* target = AI_VALUE(Unit*, "current target");
++    // Stock ranged flee outranks class abilities. The tactical controller uses
++    // a cooperative fallback retreat instead when it owns player PvP.
++    if (target && target->IsPlayer() && botAI->IsRanged(bot, true) && IsPvpTacticalMovementContext(bot))
++        return false;
++
+     if (target && target->IsInWorld() && !bot->IsWithinMeleeRange(target))
+         return false;
+ 
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.h b/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.h
+index 0f93c94..3b3f622 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.h
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.h
+@@ -109,9 +109,6 @@ public:
+ 
+     bool Execute(Event event) override;
+     bool isUseful() override;
+-
+-private:
+-    bool TryClassPeel(Unit* target, float distance);
+ };
+ 
+ class PvpTacticalMeleeFlankAction : public MovementAction
+diff --git a/modules/mod-playerbots/src/Ai/Base/Strategy/CombatStrategy.cpp b/modules/mod-playerbots/src/Ai/Base/Strategy/CombatStrategy.cpp
+index d2b0f7b..2979ce7 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Strategy/CombatStrategy.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Strategy/CombatStrategy.cpp
+@@ -51,11 +51,11 @@ void CombatStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
+         )
+     );
+     triggers.push_back(new TriggerNode(
+-        "pvp tactical ranged too close", { NextAction("pvp tactical retreat", ACTION_MOVE + 8) }));
++        "pvp tactical ranged too close", { NextAction("pvp tactical retreat", ACTION_NORMAL + 4) }));
+     triggers.push_back(
+         new TriggerNode("pvp tactical target too far", { NextAction("drop target", ACTION_HIGH + 1) }));
+     triggers.push_back(
+-        new TriggerNode("pvp tactical melee flank", { NextAction("pvp tactical melee flank", ACTION_MOVE + 8) }));
++        new TriggerNode("pvp tactical melee flank", { NextAction("pvp tactical melee flank", ACTION_NORMAL + 4) }));
+     // The pet-attack trigger is commented out because it was forcing the bot's pet to attack, overriding stay and follow commands.
+     // Pets will automatically attack the bot's enemy if they are in "defensive" or "aggressive"
+     // stance, or if the master issues an attack command.
+diff --git a/modules/mod-playerbots/src/Bot/PlayerbotMgr.cpp b/modules/mod-playerbots/src/Bot/PlayerbotMgr.cpp
+index 0b26fd6..e23babc 100644
+--- a/modules/mod-playerbots/src/Bot/PlayerbotMgr.cpp
++++ b/modules/mod-playerbots/src/Bot/PlayerbotMgr.cpp
+@@ -1607,33 +1607,58 @@ void PlayerbotMgr::StartBotDuels()
+                   return master->GetDistance(left) < master->GetDistance(right);
+               });
+ 
++    if (candidates.size() < 2)
++    {
++        if (master->GetSession())
++            ChatHandler(master->GetSession()).PSendSysMessage(
++                "botduel: found {} eligible bot(s); need at least 2 alive, idle bots on this map", candidates.size());
++        return;
++    }
++
+     uint32 started = 0;
+-    for (size_t i = 0; i + 1 < candidates.size(); i += 2)
++    std::vector<bool> paired(candidates.size(), false);
++    for (size_t i = 0; i + 1 < candidates.size(); ++i)
+     {
++        if (paired[i])
++            continue;
++
+         Player* challenger = candidates[i];
+-        Player* opponent = candidates[i + 1];
+-        if (challenger->GetTeamId() != opponent->GetTeamId() || challenger->GetDistance(opponent) > 40.0f)
++        size_t opponentIndex = candidates.size();
++        for (size_t j = i + 1; j < candidates.size(); ++j)
++        {
++            if (!paired[j] && challenger->GetTeamId() == candidates[j]->GetTeamId() &&
++                challenger->GetDistance(candidates[j]) <= 40.0f)
++            {
++                opponentIndex = j;
++                break;
++            }
++        }
++        if (opponentIndex == candidates.size())
+             continue;
+ 
++        Player* opponent = candidates[opponentIndex];
++
+         PlayerbotAI* challengerAI = GET_PLAYERBOT_AI(challenger);
+-        PlayerbotAI* opponentAI = GET_PLAYERBOT_AI(opponent);
+-        if (!challengerAI || !opponentAI)
++        if (!challengerAI)
+             continue;
+ 
+-        challengerAI->ChangeStrategy("+duel", BOT_STATE_COMBAT);
+-        opponentAI->ChangeStrategy("+duel", BOT_STATE_COMBAT);
+         if (challengerAI->DoSpecificAction(
+                 "cast custom spell", Event("botduel", "7266 on " + opponent->GetName()), true))
++        {
++            paired[i] = true;
++            paired[opponentIndex] = true;
+             ++started;
++        }
+     }
+ 
+     if (master->GetSession())
+     {
+         if (started)
+-            ChatHandler(master->GetSession()).PSendSysMessage("botduel: started {} bot duel(s)", started);
++            ChatHandler(master->GetSession()).PSendSysMessage(
++                "botduel: started {} duel(s) from {} eligible bots", started, candidates.size());
+         else
+             ChatHandler(master->GetSession()).SendSysMessage(
+-                "botduel: no eligible same-faction bot pairs within 40 yards");
++                "botduel: no compatible pair (same faction, within 40 yards, and duel allowed here)");
+     }
+ }
+ 
+diff --git a/modules/mod-playerbots/src/Bot/PlayerbotMgr.h b/modules/mod-playerbots/src/Bot/PlayerbotMgr.h
+index bc0975b..0353fe3 100644
+--- a/modules/mod-playerbots/src/Bot/PlayerbotMgr.h
++++ b/modules/mod-playerbots/src/Bot/PlayerbotMgr.h
+@@ -100,13 +100,13 @@ public:
+     void HandleLinkAccountCommand(Player* player, std::string const& accountName, std::string const& key);
+     void HandleViewLinkedAccountsCommand(Player* player);
+     void HandleUnlinkAccountCommand(Player* player, std::string const& accountName);
++    void StartBotDuels();
+ 
+ protected:
+     void OnBotLoginInternal(Player* const bot) override;
+     void CheckTellErrors(uint32 elapsed);
+     void DetachPersistentBots();
+     void ReclaimPersistentBots();
+-    void StartBotDuels();
+ 
+ private:
+     Player* const master;
+diff --git a/modules/mod-playerbots/src/PlayerbotAIConfig.cpp b/modules/mod-playerbots/src/PlayerbotAIConfig.cpp
+index 85446bd..d86b734 100644
+--- a/modules/mod-playerbots/src/PlayerbotAIConfig.cpp
++++ b/modules/mod-playerbots/src/PlayerbotAIConfig.cpp
+@@ -129,7 +129,7 @@ bool PlayerbotAIConfig::Initialize()
+     pvpTacticalBattleground = sConfigMgr->GetOption<bool>("AiPlayerbot.PvPTactical.Battleground", true);
+     pvpTacticalOpenWorld = sConfigMgr->GetOption<bool>("AiPlayerbot.PvPTactical.OpenWorld", false);
+     pvpTacticalDecisionInterval =
+-        std::max<uint32>(100, sConfigMgr->GetOption<uint32>("AiPlayerbot.PvPTactical.DecisionInterval", 250));
++        std::max<uint32>(750, sConfigMgr->GetOption<uint32>("AiPlayerbot.PvPTactical.DecisionInterval", 900));
+     pvpTacticalHunterMinDistance =
+         sConfigMgr->GetOption<float>("AiPlayerbot.PvPTactical.Hunter.MinDistance", 24.0f);
+     pvpTacticalCasterMinDistance =
+@@ -141,7 +141,7 @@ bool PlayerbotAIConfig::Initialize()
+         sConfigMgr->GetOption<float>("AiPlayerbot.PvPTactical.TargetLeashDistance", 55.0f);
+     pvpTacticalMeleeEnabled = sConfigMgr->GetOption<bool>("AiPlayerbot.PvPTactical.Melee.Enable", true);
+     pvpTacticalMeleeDecisionInterval =
+-        std::max<uint32>(200, sConfigMgr->GetOption<uint32>("AiPlayerbot.PvPTactical.Melee.DecisionInterval", 600));
++        std::max<uint32>(750, sConfigMgr->GetOption<uint32>("AiPlayerbot.PvPTactical.Melee.DecisionInterval", 900));
+     pvpTacticalMeleeFlankDistance =
+         sConfigMgr->GetOption<float>("AiPlayerbot.PvPTactical.Melee.FlankDistance", 1.5f);
+     pvpTacticalMeleeMinAngle =
+diff --git a/modules/mod-playerbots/src/Script/PlayerbotCommandScript.cpp b/modules/mod-playerbots/src/Script/PlayerbotCommandScript.cpp
+index 3e73fda..f734823 100644
+--- a/modules/mod-playerbots/src/Script/PlayerbotCommandScript.cpp
++++ b/modules/mod-playerbots/src/Script/PlayerbotCommandScript.cpp
+@@ -42,6 +42,7 @@ public:
+         };
+ 
+         static ChatCommandTable commandTable = {
++            {"botduel", HandleBotDuelCommand, SEC_PLAYER, Console::No},
+             {"playerbots", playerbotsCommandTable},
+         };
+ 
+@@ -53,6 +54,20 @@ public:
+         return PlayerbotMgr::HandlePlayerbotMgrCommand(handler, args);
+     }
+ 
++    static bool HandleBotDuelCommand(ChatHandler* handler, char const* /*args*/)
++    {
++        Player* player = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
++        PlayerbotMgr* mgr = player ? PlayerbotsMgr::instance().GetPlayerbotMgr(player) : nullptr;
++        if (!mgr)
++        {
++            handler->SendSysMessage("botduel: no PlayerbotMgr is active for this character");
++            return false;
++        }
++
++        mgr->StartBotDuels();
++        return true;
++    }
++
+     static bool HandleRandomPlayerbotCommand(ChatHandler* handler, char const* args)
+     {
+         return RandomPlayerbotMgr::HandlePlayerbotConsoleCommand(handler, args);
+diff --git a/modules/mod-dungeon-clear/src/Ai/Dungeon/DungeonClear/Multiplier/DungeonClearMultiplier.cpp b/modules/mod-dungeon-clear/src/Ai/Dungeon/DungeonClear/Multiplier/DungeonClearMultiplier.cpp
+index fb3bfa0..f9833d7 100755
+--- a/modules/mod-dungeon-clear/src/Ai/Dungeon/DungeonClear/Multiplier/DungeonClearMultiplier.cpp
++++ b/modules/mod-dungeon-clear/src/Ai/Dungeon/DungeonClear/Multiplier/DungeonClearMultiplier.cpp
+@@ -84,12 +84,23 @@ static bool HorEscapeBackwardsBanned(Player* bot, std::string const& name)
+            inst->GetBossState(DcHallsOfReflection::DATA_LICH_KING) == IN_PROGRESS;
+ }
+ 
++static bool IsPlayerPvpActive(Player* bot)
++{
++    return (bot->duel && bot->duel->Opponent) || bot->InArena() || bot->InBattleground();
++}
++
+ float DungeonClearMultiplier::GetValue(Action* action)
+ {
+     if (!action || !botAI || !bot)
+         return 1.0f;
+ 
+     std::string const& name = action->getName();
++    bool const isDcAction = name.compare(0, 13, "dungeon clear") == 0;
++
++    // A duel can start while this strategy is still installed in an instance.
++    // PvP gets the untouched stock action set; Dungeon Clear actions go inert.
++    if (IsPlayerPvpActive(bot))
++        return isDcAction ? 0.0f : 1.0f;
+ 
+     if (float const clamp = RazorgorePossessionClamp(bot, name); clamp != 1.0f)
+         return clamp;
+@@ -249,6 +260,10 @@ float DungeonClearCombatMultiplier::GetValue(Action* action)
+         return 1.0f;
+ 
+     std::string const& name = action->getName();
++    bool const isDcAction = name.compare(0, 13, "dungeon clear") == 0;
++
++    if (IsPlayerPvpActive(bot))
++        return isDcAction ? 0.0f : 1.0f;
+ 
+     // The possession clamp, first and unconditional — see its definition above.
+     // The runner is IN COMBAT for most of its window (the adds are on it), so the
+@@ -275,7 +290,6 @@ float DungeonClearCombatMultiplier::GetValue(Action* action)
+     // Order of tests: the prefix compare is paid only after the cheap
+     // exact-compare fast path fails, and IsActive itself is raid-gated +
+     // leader-memoised, so dungeon runs pay one Map::IsRaid() at most.
+-    bool const isDcAction = name.compare(0, 13, "dungeon clear") == 0;
+     if (!isDcAction && name != "drop target")
+         return 1.0f;
+     if (DcBossStandDown::IsActive(bot))
+diff --git a/modules/mod-dungeon-clear/src/Ai/Dungeon/DungeonClear/Util/DcFollowerLifecycle.cpp b/modules/mod-dungeon-clear/src/Ai/Dungeon/DungeonClear/Util/DcFollowerLifecycle.cpp
+index a5f9aa1..00999c8 100644
+--- a/modules/mod-dungeon-clear/src/Ai/Dungeon/DungeonClear/Util/DcFollowerLifecycle.cpp
++++ b/modules/mod-dungeon-clear/src/Ai/Dungeon/DungeonClear/Util/DcFollowerLifecycle.cpp
+@@ -439,6 +439,14 @@ void DcFollowerLifecycle::ReapStrandedPassives()
+             continue;
+         }
+ 
++        // Release passive/stay pins immediately when the follower enters PvP.
++        // Otherwise a duel started in an instance can inherit the camp hold.
++        if ((player->duel && player->duel->Opponent) || player->InArena() || player->InBattleground())
++        {
++            RemoveFollowerPassive(player);
++            continue;
++        }
++
+         uint32 phase = 0;
+         Position camp;
+         bool const inPull = DcLeaderSignal::GetLeaderPullInfo(player, phase, camp);

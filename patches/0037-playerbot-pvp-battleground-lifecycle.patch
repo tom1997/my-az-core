@@ -1,0 +1,25 @@
+diff --git a/modules/mod-playerbots/src/Bot/RandomPlayerbotMgr.cpp b/modules/mod-playerbots/src/Bot/RandomPlayerbotMgr.cpp
+index 98170896..559b2a95 100644
+--- a/modules/mod-playerbots/src/Bot/RandomPlayerbotMgr.cpp
++++ b/modules/mod-playerbots/src/Bot/RandomPlayerbotMgr.cpp
+@@ -1353,6 +1353,20 @@ bool RandomPlayerbotMgr::ProcessBot(uint32 bot)
+     uint32 isValid = GetEventValue(bot, "add");
+     if (!isValid)
+     {
++        // A random bot's world-lifetime can expire while it is queued, invited, or already fighting.
++        // Logging it out here bypasses the battleground leave path and creates an empty team slot in
++        // the middle of a match. Keep the bot alive in short renewable slices until PvP owns it; the
++        // normal expiry path will run after it leaves the queue/battleground/arena.
++        if (player && (player->InBattleground() || player->InArena() || player->InBattlegroundQueue() ||
++                       player->IsInvitedForBattlegroundInstance()))
++        {
++            static constexpr uint32 PVP_LIFETIME_EXTENSION = 10 * MINUTE;
++            SetEventValue(bot, "add", 1, PVP_LIFETIME_EXTENSION);
++            LOG_DEBUG("playerbots", "Bot #{} {}:{} <{}>: defer random-bot expiry while PvP is active", bot,
++                      IsAlliance(player->getRace()) ? "A" : "H", player->GetLevel(), player->GetName().c_str());
++            return false;
++        }
++
+         if (!player || !player->GetGroup())
+         {
+             if (player)

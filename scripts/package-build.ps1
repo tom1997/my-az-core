@@ -28,6 +28,10 @@ Copy-Item -LiteralPath $distRoot -Destination (Join-Path $stage 'dist') -Recurse
 $sourceData = Join-Path $stage 'source-data'
 New-Item -ItemType Directory -Path $sourceData | Out-Null
 Copy-Item -LiteralPath (Join-Path $sourceRoot 'data') -Destination (Join-Path $sourceData 'data') -Recurse
+$uiModule = Join-Path $sourceRoot 'modules\mod-mythic-plus-ui\client'
+if (Test-Path -LiteralPath $uiModule) {
+    Copy-Item -LiteralPath $uiModule -Destination (Join-Path $stage 'client-addon\MythicPlusUI') -Recurse
+}
 foreach ($module in Get-ChildItem -LiteralPath (Join-Path $sourceRoot 'modules') -Directory) {
     $sql = Join-Path $module.FullName 'data\sql'
     if (Test-Path -LiteralPath $sql) {
@@ -45,7 +49,7 @@ $manifest = [ordered]@{
     core = $lock.core
     modules = @($lock.modules | Where-Object { $_.profiles -contains $Profile })
     customModules = @(Get-ChildItem -LiteralPath (Join-Path $sourceRoot 'modules') -Directory |
-        Where-Object { $_.Name -eq 'mod-mythic-rewards' } |
+        Where-Object { $_.Name -in @('mod-mythic-rewards', 'mod-mythic-plus-ui') } |
         ForEach-Object { [ordered]@{ name = $_.Name; source = 'my-az-core'; revision = $env:GITHUB_SHA } })
 }
 [IO.File]::WriteAllText((Join-Path $stage 'source-manifest.json'), (($manifest | ConvertTo-Json -Depth 8) + "`n"), [Text.UTF8Encoding]::new($false))
