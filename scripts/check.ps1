@@ -650,6 +650,25 @@ if ($pvpRecoveryContextPatchText -match '(?m)^\+.*AI_VALUE2') {
     throw '命名空间辅助函数不能使用依赖 Action::context 的 AI_VALUE2 宏。'
 }
 
+$pvpBattlegroundLifecyclePatch = Join-Path $repoRoot 'patches\0037-playerbot-pvp-battleground-lifecycle.patch'
+if (-not (Test-Path -LiteralPath $pvpBattlegroundLifecyclePatch)) {
+    throw '缺少 Playerbot PvP 战场生命周期保护补丁。'
+}
+$pvpBattlegroundLifecyclePatchText = Get-Content -LiteralPath $pvpBattlegroundLifecyclePatch -Raw
+foreach ($requiredMarker in @(
+    'PVP_LIFETIME_EXTENSION',
+    'InBattlegroundQueue()',
+    'IsInvitedForBattlegroundInstance()',
+    'defer random-bot expiry while PvP is active'
+)) {
+    if ($pvpBattlegroundLifecyclePatchText -notmatch [regex]::Escape($requiredMarker)) {
+        throw "Playerbot PvP 战场生命周期保护补丁缺少标记：$requiredMarker"
+    }
+}
+if ($pvpBattlegroundLifecyclePatchText -notmatch '(?s)if \(!isValid\).{0,1000}InBattleground\(\).{0,1000}SetEventValue\(bot, "add", 1, PVP_LIFETIME_EXTENSION\)') {
+    throw '随机机器人生命周期到期时必须先保护正在参与 PvP 的机器人。'
+}
+
 $pvpClassPatchText = Get-Content -LiteralPath (Join-Path $repoRoot 'patches\0010-playerbot-pvp-warrior-paladin-death-knight.patch') -Raw
 if ($pvpClassPatchText -match 'AI_VALUE\(' -and $pvpClassPatchText -notmatch '#include "Playerbots\.h"') {
     throw '使用 AI_VALUE 的 PvP 动作缺少 Playerbots.h。'
