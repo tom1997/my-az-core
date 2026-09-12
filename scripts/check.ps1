@@ -632,6 +632,24 @@ foreach ($removedSingleTargetField in @(
     }
 }
 
+$pvpRecoveryContextPatch = Join-Path $repoRoot 'patches\0036-playerbot-pvp-recovery-context-fix.patch'
+if (-not (Test-Path -LiteralPath $pvpRecoveryContextPatch)) {
+    throw '缺少 Playerbot PvP 恢复物品上下文修复补丁。'
+}
+$pvpRecoveryContextPatchText = Get-Content -LiteralPath $pvpRecoveryContextPatch -Raw
+foreach ($requiredMarker in @(
+    'HasUsablePvpHealthRecoveryItem',
+    'GetAiObjectContext()',
+    'GetValue<std::vector<Item*>>("inventory items", "healthstone")'
+)) {
+    if ($pvpRecoveryContextPatchText -notmatch [regex]::Escape($requiredMarker)) {
+        throw "Playerbot PvP 恢复物品上下文修复补丁缺少标记：$requiredMarker"
+    }
+}
+if ($pvpRecoveryContextPatchText -match '(?m)^\+.*AI_VALUE2') {
+    throw '命名空间辅助函数不能使用依赖 Action::context 的 AI_VALUE2 宏。'
+}
+
 $pvpClassPatchText = Get-Content -LiteralPath (Join-Path $repoRoot 'patches\0010-playerbot-pvp-warrior-paladin-death-knight.patch') -Raw
 if ($pvpClassPatchText -match 'AI_VALUE\(' -and $pvpClassPatchText -notmatch '#include "Playerbots\.h"') {
     throw '使用 AI_VALUE 的 PvP 动作缺少 Playerbots.h。'
