@@ -262,11 +262,11 @@ index d11dcd005abec2cae31c41be8ffae5c6c0480e39..cfb56bbba36109baecacb83402794b25
                                                                 NextAction("wing clip", 21.0f) }));
  
 diff --git a/modules/mod-playerbots/src/Ai/Class/Priest/Strategy/GenericPriestStrategy.cpp b/modules/mod-playerbots/src/Ai/Class/Priest/Strategy/GenericPriestStrategy.cpp
-index 52ff635e230c114b0d0c7f53e15161a892b70449..bc65e83e61acac586f1cb20711a88662ca23c056 100644
+index 85ed5132..dff8198d 100644
 --- a/modules/mod-playerbots/src/Ai/Class/Priest/Strategy/GenericPriestStrategy.cpp
 +++ b/modules/mod-playerbots/src/Ai/Class/Priest/Strategy/GenericPriestStrategy.cpp
-@@ -38,6 +38,7 @@ void GenericPriestStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
- 
+@@ -36,6 +36,7 @@ void GenericPriestStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
+         new TriggerNode("low mana", { NextAction("hymn of hope", ACTION_HIGH) }));
      triggers.push_back(new TriggerNode("enemy too close for spell",
                                         { NextAction("flee", ACTION_MOVE + 9) }));
 +    triggers.push_back(new TriggerNode("enemy is close", { NextAction("psychic scream", ACTION_HIGH + 5) }));
@@ -329,4 +329,3 @@ index d13055ffbe14543feb4645b3faa93e3a7159bb02..9125fd8f1291ed662c6b9ba41bb398f8
      float pvpTacticalRetreatStep;
      float pvpTacticalTargetLeashDistance;
      bool pvpTacticalMeleeEnabled;
-

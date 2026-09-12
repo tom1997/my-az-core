@@ -1,5 +1,5 @@
 diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/AttackAction.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/AttackAction.cpp
-index 4b840808..35a3247d 100644
+index fc3df8f9..6014f741 100644
 --- a/modules/mod-playerbots/src/Ai/Base/Actions/AttackAction.cpp
 +++ b/modules/mod-playerbots/src/Ai/Base/Actions/AttackAction.cpp
 @@ -13,6 +13,7 @@
@@ -35,19 +35,7 @@ index 4b840808..35a3247d 100644
          return false;
      return !bot->IsInCombat() || current != desired;
  }
-diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/GenericActions.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/GenericActions.cpp
-index 1c8354dd..ae67ad64 100644
---- a/modules/mod-playerbots/src/Ai/Base/Actions/GenericActions.cpp
-+++ b/modules/mod-playerbots/src/Ai/Base/Actions/GenericActions.cpp
-@@ -13,6 +13,7 @@
- #include "PlayerbotAIConfig.h"
- #include "PlayerbotTextMgr.h"
- #include "Playerbots.h"
-+#include "PvpTacticalValue.h"
- #include "SpellInfo.h"
- #include "SpellMgr.h"
- #include <algorithm>
-@@ -51,6 +52,9 @@ bool MeleeAction::isUseful()
+@@ -336,6 +346,9 @@ bool MeleeAction::isUseful()
      if (botAI->IsInVehicle() && !botAI->IsInVehicle(false, false, true))
          return false;
  
@@ -57,7 +45,19 @@ index 1c8354dd..ae67ad64 100644
      // Do not start autoattack while prowled — let opener spells break stealth intentionally.
      // Future rogue stealth implementation should use this instead:
      // return !(botAI->HasAura("stealth", bot) || botAI->HasAura("prowl", bot));
-@@ -136,6 +140,13 @@ bool PetAttackAction::Execute(Event /*event*/)
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/PetsAction.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/PetsAction.cpp
+index b1c19a58..219449e4 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/PetsAction.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/PetsAction.cpp
+@@ -14,6 +14,7 @@
+ #include "PlayerbotAIConfig.h"
+ #include "PlayerbotTextMgr.h"
+ #include "Playerbots.h"
++#include "PvpTacticalValue.h"
+ #include "SpellInfo.h"
+ #include "SpellMgr.h"
+ #include <algorithm>
+@@ -418,6 +419,13 @@ bool PetAttackAction::Execute(Event /*event*/)
      if (!target)
          return false;
  

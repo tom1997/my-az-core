@@ -210,10 +210,10 @@ index 13d35e49..80f22580 100644
  DEBUFF_ENEMY_TRIGGER(VampiricTouchOnAttackerTrigger, "vampiric touch on attacker");
  BUFF_TRIGGER(VampiricEmbraceTrigger, "vampiric embrace");
  CURE_TRIGGER(DispelMagicTrigger, "dispel magic", DISPEL_MAGIC);
-@@ -33,7 +53,11 @@ INTERRUPT_TRIGGER(SilenceTrigger, "silence");
+@@ -31,7 +51,11 @@ BUFF_TRIGGER(InnerFocusTrigger, "inner focus");
+ CC_TRIGGER(ShackleUndeadTrigger, "shackle undead");
+ INTERRUPT_TRIGGER(SilenceTrigger, "silence");
  INTERRUPT_HEALER_TRIGGER(SilenceEnemyHealerTrigger, "silence");
- 
- // racials
 -DEBUFF_CHECKISOWNER_TRIGGER(DevouringPlagueTrigger, "devouring plague");
 +class DevouringPlagueTrigger : public PvpShadowDebuffTrigger
 +{
@@ -321,4 +321,3 @@ index 15d2ddb7..1e70cf78 100644
 +  resume objective movement. Replacing a lost target with another visible
 +  enemy must also update the AI current target rather than keep attacking the
 +  old out-of-range player.
-

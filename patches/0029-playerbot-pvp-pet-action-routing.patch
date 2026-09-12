@@ -24,11 +24,11 @@ index f8c1f34c..db7049f5 100644
      static Action* set_pet_stance(PlayerbotAI* ai) { return new SetPetStanceAction(ai); }
  
      static Action* new_rpg_status_update(PlayerbotAI* ai) { return new NewRpgStatusUpdateAction(ai); }
-diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/GenericActions.h b/modules/mod-playerbots/src/Ai/Base/Actions/GenericActions.h
-index cd35af93..67eec900 100644
---- a/modules/mod-playerbots/src/Ai/Base/Actions/GenericActions.h
-+++ b/modules/mod-playerbots/src/Ai/Base/Actions/GenericActions.h
-@@ -32,7 +32,7 @@ public:
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/PetsAction.h b/modules/mod-playerbots/src/Ai/Base/Actions/PetsAction.h
+index c0a617f0..40c84fba 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/PetsAction.h
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/PetsAction.h
+@@ -33,7 +33,7 @@ public:
  class PetAttackAction : public Action
  {
  public:

@@ -140,6 +140,10 @@ foreach ($requiredMarker in @(
 if ($pvpPhaseOneHardeningPatchText -match '(?m)^\+\s*if \(targetCasting && TryInterrupt\(botAI, "spell lock"') {
     throw 'Spell Lock 必须由宠物执行器施放，不能继续走主人施法路径。'
 }
+if ($pvpPhaseOneHardeningPatchText -match 'GenericActions\.(cpp|h)' -or
+    $pvpPhaseOneHardeningPatchText -notmatch 'PetsAction\.cpp') {
+    throw '新版 Playerbot 已拆分 GenericActions；宠物伤害保护必须迁移到 PetsAction。'
+}
 
 $pvpPhaseOnePolishPatch = Join-Path $repoRoot 'patches\0020-playerbot-pvp-phase-one-polish.patch'
 if (-not (Test-Path -LiteralPath $pvpPhaseOnePolishPatch)) { throw '缺少 Playerbot PvP 第一阶段收尾补丁。' }
@@ -648,6 +652,17 @@ foreach ($requiredMarker in @(
 }
 if ($pvpRecoveryContextPatchText -match '(?m)^\+.*AI_VALUE2') {
     throw '命名空间辅助函数不能使用依赖 Action::context 的 AI_VALUE2 宏。'
+}
+
+foreach ($migratedPetPatchName in @(
+    '0026-playerbot-pvp-control-ownership-and-kite-value.patch',
+    '0029-playerbot-pvp-pet-action-routing.patch'
+)) {
+    $migratedPetPatchText = Get-Content -LiteralPath (Join-Path $repoRoot "patches\$migratedPetPatchName") -Raw
+    if ($migratedPetPatchText -match 'GenericActions\.(cpp|h)' -or
+        $migratedPetPatchText -notmatch 'PetsAction\.(cpp|h)') {
+        throw "新版 Playerbot 宠物动作迁移不完整：$migratedPetPatchName"
+    }
 }
 
 $pvpBattlegroundLifecyclePatch = Join-Path $repoRoot 'patches\0037-playerbot-pvp-battleground-lifecycle.patch'

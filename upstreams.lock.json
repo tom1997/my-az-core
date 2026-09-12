@@ -12,7 +12,7 @@
       "name": "mod-playerbots",
       "repository": "https://github.com/mod-playerbots/mod-playerbots.git",
       "branch": "master",
-      "commit": "2f7d9f774987d0157c6a0d0cc08c40bec3db3945",
+      "commit": "b6696bdbd3740e575598d167d69f39f68cc0b907",
       "profiles": ["stable", "enhanced"]
     },
     {

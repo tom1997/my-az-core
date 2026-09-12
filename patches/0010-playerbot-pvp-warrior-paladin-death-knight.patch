@@ -2,8 +2,8 @@ diff --git a/modules/mod-playerbots/src/Ai/Base/ActionContext.h b/modules/mod-pl
 index 68b73c0..b3a1336 100644
 --- a/modules/mod-playerbots/src/Ai/Base/ActionContext.h
 +++ b/modules/mod-playerbots/src/Ai/Base/ActionContext.h
-@@ -50,6 +50,7 @@
- #include "OutfitAction.h"
+@@ -51,6 +51,7 @@
+ #include "PetsAction.h"
  #include "PositionAction.h"
  #include "PullActions.h"
 +#include "PvpTacticalActions.h"

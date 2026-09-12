@@ -1,8 +1,8 @@
-diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/GenericActions.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/GenericActions.cpp
-index ae67ad64..7c180261 100644
---- a/modules/mod-playerbots/src/Ai/Base/Actions/GenericActions.cpp
-+++ b/modules/mod-playerbots/src/Ai/Base/Actions/GenericActions.cpp
-@@ -140,6 +140,12 @@ bool PetAttackAction::Execute(Event /*event*/)
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/PetsAction.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/PetsAction.cpp
+index 219449e4..ca8a4af1 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/PetsAction.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/PetsAction.cpp
+@@ -419,6 +419,12 @@ bool PetAttackAction::Execute(Event /*event*/)
      if (!target)
          return false;
  
@@ -967,4 +967,3 @@ index 271d4d7d..00a326d8 100644
 +  advantage, it may create distance first, then leave form for Entangling Roots
 +  and healing. Bear fallback with no tactical spell available must yield to the
 +  ordinary bear rotation instead of consuming every decision tick.
-
