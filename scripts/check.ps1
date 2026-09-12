@@ -543,6 +543,50 @@ if ($pvpInstantFlowPatchText -match '(?m)^\+\s*return moved && !cooperativeRange
     throw '战术距离移动不能继续占用瞬发技能的动作选择位。'
 }
 
+$pvpSpecPolicyPatch = Join-Path $repoRoot 'patches\0034-playerbot-pvp-spec-policies.patch'
+if (-not (Test-Path -LiteralPath $pvpSpecPolicyPatch)) {
+    throw '缺少 Playerbot PvP 专精策略补丁。'
+}
+$pvpSpecPolicyPatchText = Get-Content -LiteralPath $pvpSpecPolicyPatch -Raw
+if ($pvpSpecPolicyPatchText -match '(?m)^diff --git a/(?!modules/mod-playerbots/)') {
+    throw 'Playerbot PvP 专精策略补丁必须使用 AzerothCore 根目录下的模块路径。'
+}
+foreach ($requiredMarker in @(
+    'PvpSpecPhase',
+    'PvpSpecPlan',
+    'ObservedPvpCooldownLedger',
+    'ClassifyObservedPvpCooldown',
+    'ShouldCommitPvpPrimaryBurst',
+    'ShouldSpendPvpMobility',
+    'ShouldReserveSurvivalTrap',
+    'SelectPvpProcUse',
+    'pvp tactical spec policy',
+    'PvpArchetype::FuryWarrior',
+    'PvpArchetype::ProtectionWarrior',
+    'PvpArchetype::HolyPaladin',
+    'PvpArchetype::ProtectionPaladin',
+    'PvpArchetype::BloodDeathKnight',
+    'PvpArchetype::FrostDeathKnight',
+    'PvpArchetype::BeastMasteryHunter',
+    'PvpArchetype::SurvivalHunter',
+    'PvpArchetype::AssassinationRogue',
+    'PvpArchetype::CombatRogue',
+    'PvpArchetype::HolyPriest',
+    'PvpArchetype::EnhancementShaman',
+    'PvpArchetype::RestorationShaman',
+    'PvpArchetype::FireMage',
+    'PvpArchetype::DemonologyWarlock',
+    'PvpArchetype::FeralDruid',
+    'BurstRequiresARealConnectedCommitWindow'
+)) {
+    if ($pvpSpecPolicyPatchText -notmatch [regex]::Escape($requiredMarker)) {
+        throw "Playerbot PvP 专精策略补丁缺少标记：$requiredMarker"
+    }
+}
+if ($pvpSpecPolicyPatchText -match '(?m)^\+.*target->HasSpellCooldown') {
+    throw '专精策略不能读取敌方隐藏技能冷却。'
+}
+
 $pvpClassPatchText = Get-Content -LiteralPath (Join-Path $repoRoot 'patches\0010-playerbot-pvp-warrior-paladin-death-knight.patch') -Raw
 if ($pvpClassPatchText -match 'AI_VALUE\(' -and $pvpClassPatchText -notmatch '#include "Playerbots\.h"') {
     throw '使用 AI_VALUE 的 PvP 动作缺少 Playerbots.h。'
