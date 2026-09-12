@@ -587,6 +587,51 @@ if ($pvpSpecPolicyPatchText -match '(?m)^\+.*target->HasSpellCooldown') {
     throw '专精策略不能读取敌方隐藏技能冷却。'
 }
 
+$pvpPolicyMemoryPatch = Join-Path $repoRoot 'patches\0035-playerbot-pvp-policy-memory-and-scoring.patch'
+if (-not (Test-Path -LiteralPath $pvpPolicyMemoryPatch)) {
+    throw '缺少 Playerbot PvP 策略记忆与评分补丁。'
+}
+$pvpPolicyMemoryPatchText = Get-Content -LiteralPath $pvpPolicyMemoryPatch -Raw
+if ($pvpPolicyMemoryPatchText -match '(?m)^diff --git a/(?!modules/mod-playerbots/)') {
+    throw 'Playerbot PvP 策略记忆补丁必须使用 AzerothCore 根目录下的模块路径。'
+}
+foreach ($requiredMarker in @(
+    'EnemyPvpMemory',
+    'enemyMemory',
+    'PvpObservationSource',
+    'PvpObservationConfidence',
+    'SpatialDisplacement',
+    'EFFECT_MOTION_TYPE',
+    'PvpBurstResource',
+    'ShouldSequencePvpBurst',
+    'PvpProcScores',
+    'ScorePvpProcUse',
+    'PvpSpecPolicyProfile',
+    'GetPvpSpecPolicyProfile',
+    'ResolvePvpSupportTarget(botAI, 0.20f)',
+    'controlCandidateIsHealer',
+    'ProcScoresPreferLethalDamageUnlessHealingIsActuallyCritical',
+    'CompatibleBurstResourcesCanFormOneCommitBundle',
+    'EnemyMemoryExpiresOnlyAfterItsOwnTtl'
+)) {
+    if ($pvpPolicyMemoryPatchText -notmatch [regex]::Escape($requiredMarker)) {
+        throw "Playerbot PvP 策略记忆与评分补丁缺少标记：$requiredMarker"
+    }
+}
+if ($pvpPolicyMemoryPatchText -match '(?m)^\+.*target->HasSpellCooldown') {
+    throw '策略记忆不能读取敌方隐藏技能冷却。'
+}
+foreach ($removedSingleTargetField in @(
+    'observedMobilityAtMs',
+    'observedDefensiveAtMs',
+    'observedImmunityAtMs',
+    'observedPolicyTargetGuid'
+)) {
+    if ($pvpPolicyMemoryPatchText -match "(?m)^\+.*$([regex]::Escape($removedSingleTargetField))") {
+        throw "策略记忆不能重新引入单目标观察字段：$removedSingleTargetField"
+    }
+}
+
 $pvpClassPatchText = Get-Content -LiteralPath (Join-Path $repoRoot 'patches\0010-playerbot-pvp-warrior-paladin-death-knight.patch') -Raw
 if ($pvpClassPatchText -match 'AI_VALUE\(' -and $pvpClassPatchText -notmatch '#include "Playerbots\.h"') {
     throw '使用 AI_VALUE 的 PvP 动作缺少 Playerbots.h。'
