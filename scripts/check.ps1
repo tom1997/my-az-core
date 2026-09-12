@@ -481,6 +481,39 @@ if ($installerText -notmatch [regex]::Escape("Set-ConfigValue `$playerbots 'AiPl
     throw '安装脚本没有写入随机机器人装备差异配置。'
 }
 
+$pvpCasterFlowPatch = Join-Path $repoRoot 'patches\0032-playerbot-pvp-control-cadence-caster-flow.patch'
+if (-not (Test-Path -LiteralPath $pvpCasterFlowPatch)) {
+    throw '缺少 Playerbot PvP 控制节流与施法连续性补丁。'
+}
+$pvpCasterFlowPatchText = Get-Content -LiteralPath $pvpCasterFlowPatch -Raw
+if ($pvpCasterFlowPatchText -match '(?m)^diff --git a/(?!modules/mod-playerbots/)') {
+    throw 'Playerbot PvP 控制节流与施法连续性补丁必须使用 AzerothCore 根目录下的模块路径。'
+}
+foreach ($requiredMarker in @(
+    'PvpControlPurpose',
+    'MarkPvpControlAttempt',
+    'PvpTacticalCasterPressureAction',
+    'vampiric touch',
+    'PvpArchetype::ArcaneMage',
+    'PvpArchetype::BalanceDruid',
+    'ShouldDeployPvpTotems',
+    'ShouldLeavePvpDamageForm',
+    'pvpOriginalSpecNo',
+    'GetTemplatePrimaryTab',
+    'explicitDefensiveImmunity',
+    'alternateTargetAvailable'
+)) {
+    if ($pvpCasterFlowPatchText -notmatch [regex]::Escape($requiredMarker)) {
+        throw "Playerbot PvP 控制节流与施法连续性补丁缺少标记：$requiredMarker"
+    }
+}
+if ($pvpCasterFlowPatchText -match '(?m)^\+\s*int32 firstPvpSpec') {
+    throw 'PvP 天赋模板不能继续依赖固定下标偏移。'
+}
+if ($pvpCasterFlowPatchText -match '(?m)^\+.*ShouldUsePvpImmunityRecovery\(snapshot\.targetControlState') {
+    throw '控制免伤不能再直接触发对手防御免疫恢复逻辑。'
+}
+
 $pvpClassPatchText = Get-Content -LiteralPath (Join-Path $repoRoot 'patches\0010-playerbot-pvp-warrior-paladin-death-knight.patch') -Raw
 if ($pvpClassPatchText -match 'AI_VALUE\(' -and $pvpClassPatchText -notmatch '#include "Playerbots\.h"') {
     throw '使用 AI_VALUE 的 PvP 动作缺少 Playerbots.h。'
