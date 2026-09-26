@@ -368,8 +368,8 @@ diff --git a/modules/mod-dungeon-clear/src/Ai/Dungeon/DungeonClear/Multiplier/Du
 index fb3bfa0..f9833d7 100755
 --- a/modules/mod-dungeon-clear/src/Ai/Dungeon/DungeonClear/Multiplier/DungeonClearMultiplier.cpp
 +++ b/modules/mod-dungeon-clear/src/Ai/Dungeon/DungeonClear/Multiplier/DungeonClearMultiplier.cpp
-@@ -84,12 +84,23 @@ static bool HorEscapeBackwardsBanned(Player* bot, std::string const& name)
-            inst->GetBossState(DcHallsOfReflection::DATA_LICH_KING) == IN_PROGRESS;
+@@ -152,12 +152,23 @@ static bool OculusDrakeAttackUnsafe(Player* bot, PlayerbotAI* botAI, AiObjectContext* context, std::string const& name)
+     return target && !DcFlightLeg::IsFlyingSafe(target);
  }
  
 +static bool IsPlayerPvpActive(Player* bot)
