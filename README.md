@@ -14,7 +14,10 @@
 - AHBot（独立拍卖行做市，可自动出售和收购）
 - Mythic Plus（钥石、限时、词缀与层数）
 - Mythic Rewards（按层数提供职业/职责倾向的个人装备，支持 Playerbot）
+- PvP Tactical（远程按技能拉距与脱离，近战主动侧移抓背）
 - Random Enchants（仅 enhanced 包，默认关闭）
+- Playerbots PvP Life（仅 enhanced 包，小规模决斗与野外 PvP 热点）
+- Playerbots City Life（仅 enhanced 包，受限规模的主城生活机器人）
 
 上游版本全部固定在 [`upstreams.lock.json`](upstreams.lock.json)，不会在生产构建中静默追随 master。
 
@@ -36,6 +39,8 @@
 
 Windows 下也可直接双击仓库根目录的 `启动服务端.cmd` 和 `关闭服务端.cmd`。关闭入口会按 World、Auth、MySQL 的顺序停止服务，并让 MySQL 安全刷盘退出。
 
+以后 GitHub Actions 构建成功后，可直接双击 `自动更新测试版.cmd`。它会自动下载当前分支最新的成功构建，并完成校验、备份、停服、安装、数据库迁移和重新启动。发布到 Releases 的稳定版本则使用 `自动更新正式版.cmd`。详细说明见 [`docs/operations.zh-CN.md`](docs/operations.zh-CN.md)。
+
 ## 开发模块
 
 ```powershell
@@ -49,6 +54,10 @@ Dungeon Clear 的启用条件、命令和默认安全设置见 [`docs/dungeon-cl
 拍卖行机器人和大秘境的启用步骤分别见 [`docs/ahbot.zh-CN.md`](docs/ahbot.zh-CN.md) 与 [`docs/mythic-plus.zh-CN.md`](docs/mythic-plus.zh-CN.md)。RDF 资料片切换见 [`docs/rdf-expansion.zh-CN.md`](docs/rdf-expansion.zh-CN.md)。
 
 Playerbot 的独立登录、主人离线后继续活动、用户策略持久化和 `botduel` 决斗实验入口见 [`docs/playerbot-owned-autonomy.zh-CN.md`](docs/playerbot-owned-autonomy.zh-CN.md)。
+
+远程 Playerbot 的 PvP 距离控制、职业技能降级和配置项见 [`docs/playerbot-pvp-tactical.zh-CN.md`](docs/playerbot-pvp-tactical.zh-CN.md)。
+
+PvP Life 与 City Life 的启用范围、保守默认值和管理员命令见 [`docs/playerbot-life.zh-CN.md`](docs/playerbot-life.zh-CN.md)。
 
 ## 重要边界
 

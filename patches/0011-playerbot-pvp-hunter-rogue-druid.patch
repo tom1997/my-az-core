@@ -1,0 +1,72 @@
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
+index 081b486..9acb7f4 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
+@@ -57,6 +57,44 @@ bool PvpTacticalClassControlAction::Execute(Event /*event*/)
+             if (NeedsSlow(botAI, "chains of ice", target) && TrySpell(botAI, "chains of ice", target, false))
+                 return true;
+             return distance > 10.0f && TrySpell(botAI, "death grip", target, false);
++        case CLASS_HUNTER:
++            if (targetCasting && TrySpell(botAI, "silencing shot", target, false))
++                return true;
++            if (melee && TrySpell(botAI, "freezing trap", bot, false))
++                return true;
++            if (melee && NeedsSlow(botAI, "wing clip", target) && TrySpell(botAI, "wing clip", target, false))
++                return true;
++            if (melee && TrySpell(botAI, "disengage", bot, false))
++                return true;
++            return distance <= 35.0f && NeedsSlow(botAI, "concussive shot", target) &&
++                   TrySpell(botAI, "concussive shot", target, false);
++        case CLASS_ROGUE:
++            if (targetCasting && melee && TrySpell(botAI, "kick", target, false))
++                return true;
++            if (melee && TrySpell(botAI, "kidney shot", target))
++                return true;
++            if (melee && TrySpell(botAI, "gouge", target))
++                return true;
++            if (distance <= 15.0f && TrySpell(botAI, "blind", target))
++                return true;
++            return distance > 8.0f && TrySpell(botAI, "shadowstep", target, false);
++        case CLASS_DRUID:
++            if (bot->GetHealthPct() < 35.0f)
++            {
++                if (TrySpell(botAI, "barkskin", bot, false))
++                    return true;
++                if (TrySpell(botAI, "dire bear form", bot, false) || TrySpell(botAI, "bear form", bot, false))
++                    return true;
++            }
++            if (melee && TrySpell(botAI, "nature's grasp", bot, false))
++                return true;
++            if (targetCasting && TrySpell(botAI, "cyclone", target))
++                return true;
++            if (melee && TrySpell(botAI, "bash", target))
++                return true;
++            if (melee && TrySpell(botAI, "typhoon", target, false))
++                return true;
++            return NeedsSlow(botAI, "entangling roots", target) && TrySpell(botAI, "entangling roots", target);
+         default:
+             return false;
+     }
+diff --git a/modules/mod-playerbots/src/Ai/Class/Hunter/HunterActions.h b/modules/mod-playerbots/src/Ai/Class/Hunter/HunterActions.h
+index 6aa627d..dc4f0e8 100644
+--- a/modules/mod-playerbots/src/Ai/Class/Hunter/HunterActions.h
++++ b/modules/mod-playerbots/src/Ai/Class/Hunter/HunterActions.h
+@@ -134,7 +134,7 @@ public:
+ class CastPvpFreezingTrapAction : public CastSpellAction
+ {
+ public:
+-    CastPvpFreezingTrapAction(PlayerbotAI* botAI) : CastSpellAction(botAI, "pvp freezing trap") {}
++    CastPvpFreezingTrapAction(PlayerbotAI* botAI) : CastSpellAction(botAI, "freezing trap") {}
+     bool Execute(Event event) override;
+     bool isUseful() override;
+ };
+@@ -142,7 +142,7 @@ public:
+ class CastPvpConcussiveShotAction : public CastSpellAction
+ {
+ public:
+-    CastPvpConcussiveShotAction(PlayerbotAI* botAI) : CastSpellAction(botAI, "pvp concussive shot") {}
++    CastPvpConcussiveShotAction(PlayerbotAI* botAI) : CastSpellAction(botAI, "concussive shot") {}
+     bool Execute(Event event) override;
+     bool isUseful() override;
+ };
+

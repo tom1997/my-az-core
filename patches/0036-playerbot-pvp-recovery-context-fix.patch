@@ -1,0 +1,15 @@
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
+index 45d01a0e..f3c73f7c 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
+@@ -198,8 +198,8 @@ bool HasUsablePvpHealthRecoveryItem(PlayerbotAI* botAI)
+     if (!bot)
+         return false;
+ 
+-    std::vector<Item*> const healthstones =
+-        AI_VALUE2(std::vector<Item*>, "inventory items", "healthstone");
++    std::vector<Item*> const healthstones = botAI->GetAiObjectContext()
++        ->GetValue<std::vector<Item*>>("inventory items", "healthstone")->Get();
+     for (Item* item : healthstones)
+     {
+         if (!item || bot->CanUseItem(item) != EQUIP_ERR_OK)

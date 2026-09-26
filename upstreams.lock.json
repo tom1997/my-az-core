@@ -1,18 +1,18 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-09-05T00:00:00Z",
+  "generatedAt": "2026-09-26T04:30:00Z",
   "core": {
     "name": "playerbot-core",
     "repository": "https://github.com/mod-playerbots/azerothcore-wotlk.git",
     "branch": "Playerbot",
-    "commit": "47960183bb03b83e8943eb2f0f39c16df9710c9d"
+    "commit": "7f12e89ee5f467a50e62eba1d525eac7dc953d03"
   },
   "modules": [
     {
       "name": "mod-playerbots",
       "repository": "https://github.com/mod-playerbots/mod-playerbots.git",
       "branch": "master",
-      "commit": "2f7d9f774987d0157c6a0d0cc08c40bec3db3945",
+      "commit": "7bae1b5c58c76a0aa20381155edc08096d1485b2",
       "profiles": ["stable", "enhanced"]
     },
     {
@@ -33,7 +33,7 @@
       "name": "mod-aoe-loot",
       "repository": "https://github.com/azerothcore/mod-aoe-loot.git",
       "branch": "master",
-      "commit": "b5c663572d936985c19dc8b499ecea60e1da570d",
+      "commit": "57279b660a278e9b3a1afa425e7c7a5edc72b7bb",
       "profiles": ["stable", "enhanced"]
     },
     {
@@ -47,21 +47,21 @@
       "name": "mod-random-enchants",
       "repository": "https://github.com/azerothcore/mod-random-enchants.git",
       "branch": "master",
-      "commit": "02a2e0d83b3cfad039bf1967177326aef8dd71f5",
+      "commit": "6d49d64918f1e798490d0139038a33194fd294df",
       "profiles": ["enhanced"]
     },
     {
       "name": "mod-dungeon-clear",
       "repository": "https://github.com/jrad7/mod-dungeon-clear.git",
       "branch": "master",
-      "commit": "b0884fd25df4dd6317b6962b68c5671e3191d41b",
+      "commit": "805b909c7286348e75d0561f8cc259750e6ae62b",
       "profiles": ["stable", "enhanced"]
     },
     {
       "name": "mod-ah-bot",
       "repository": "https://github.com/azerothcore/mod-ah-bot.git",
       "branch": "master",
-      "commit": "a680cc1c98290713e9b3d3289544af78e5186dc1",
+      "commit": "c11d8318cbd8714a9980f9464f78e07d3d48a70a",
       "profiles": ["stable", "enhanced"]
     },
     {
@@ -70,6 +70,20 @@
       "branch": "master",
       "commit": "e2a487d358c1c1c562d686f53a3e269b2cf1b8c5",
       "profiles": ["stable", "enhanced"]
+    },
+    {
+      "name": "mod-playerbots-pvp-life",
+      "repository": "https://github.com/vrzgames/mod-playerbots-pvp-life.git",
+      "branch": "main",
+      "commit": "0773d80f0a3835e86e82034bccd7d1ae6f9d2ff5",
+      "profiles": ["enhanced"]
+    },
+    {
+      "name": "mod-playerbots-city-life",
+      "repository": "https://github.com/vrzgames/mod-playerbots-city-life.git",
+      "branch": "main",
+      "commit": "ce6a05df450f04c4961d09254ad73cf11f1afee2",
+      "profiles": ["enhanced"]
     }
   ]
 }
