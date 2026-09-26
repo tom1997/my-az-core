@@ -37,6 +37,47 @@ foreach ($module in $lock.modules) {
     }
 }
 
+$enhancedLifeModules = @('mod-playerbots-pvp-life', 'mod-playerbots-city-life')
+foreach ($moduleName in $enhancedLifeModules) {
+    $module = @($lock.modules | Where-Object { $_.name -eq $moduleName })
+    if ($module.Count -ne 1) { throw "缺少或重复的 Playerbot Life 模块锁定：$moduleName" }
+    if (@($module[0].profiles).Count -ne 1 -or $module[0].profiles[0] -ne 'enhanced') {
+        throw "$moduleName 必须只进入 enhanced 构建。"
+    }
+}
+
+$lifeDefaultKeys = @(
+    'pvpLifeEnabled',
+    'pvpLifeRespectPlayerbotActivity',
+    'pvpLifeMaxPerSide',
+    'pvpLifeMaxActiveHotspots',
+    'pvpLifeDuelPairLimit',
+    'pvpLifeChallengeRealPlayers',
+    'pvpLifeGurubashiEnabled',
+    'pvpLifeAdditionalHotspotsEnabled',
+    'pvpLifeWintergraspEnabled',
+    'pvpLifeFactionCampaignsEnabled',
+    'pvpLifeBotChatEnabled',
+    'cityLifeEnabled',
+    'cityLifeRespectPlayerbotActivity',
+    'cityLifeMaxTotalPopulation',
+    'cityLifeMaxChangesPerTick',
+    'cityLifeWintergraspEnabled'
+)
+foreach ($key in $lifeDefaultKeys) {
+    if ($defaults.PSObject.Properties.Name -notcontains $key) {
+        throw "runtime.defaults.json 缺少 Playerbot Life 设置：$key"
+    }
+}
+if (-not $defaults.pvpLifeRespectPlayerbotActivity -or -not $defaults.cityLifeRespectPlayerbotActivity) {
+    throw 'Playerbot Life 模块默认必须尊重 Playerbots 活动所有权。'
+}
+if ($defaults.pvpLifeChallengeRealPlayers -or $defaults.pvpLifeAdditionalHotspotsEnabled -or
+    $defaults.pvpLifeWintergraspEnabled -or $defaults.pvpLifeFactionCampaignsEnabled -or
+    $defaults.pvpLifeBotChatEnabled -or $defaults.cityLifeWintergraspEnabled) {
+    throw 'Playerbot Life 的高干扰实验功能必须默认关闭。'
+}
+
 foreach ($patch in Get-ChildItem -LiteralPath (Join-Path $repoRoot 'patches') -Filter '*.patch' -File -ErrorAction SilentlyContinue) {
     if ($patch.Name -notmatch '^\d{4}-[a-z0-9][a-z0-9-]*\.patch$') {
         throw "补丁文件名必须采用 0001-description.patch 格式：$($patch.Name)"
@@ -484,6 +525,19 @@ $installerText = Get-Content -LiteralPath (Join-Path $repoRoot 'scripts\install.
 if ($installerText -notmatch [regex]::Escape("Set-ConfigValue `$playerbots 'AiPlayerbot.RandomGearLoweringChance'")) {
     throw '安装脚本没有写入随机机器人装备差异配置。'
 }
+foreach ($requiredMarker in @(
+    'mod_playerbots_pvp_life.conf',
+    'PvPLife.Bots.RespectPlayerbotActivity',
+    'PvPLife.World.MaxActiveHotspots',
+    'PvPLife.Duel.ChallengeRealPlayers',
+    'mod_playerbots_city_life.conf',
+    'CityLife.Bots.RespectPlayerbotActivity',
+    'CityLife.Population.MaxTotal'
+)) {
+    if ($installerText -notmatch [regex]::Escape($requiredMarker)) {
+        throw "安装脚本缺少 Playerbot Life 配置标记：$requiredMarker"
+    }
+}
 
 $pvpCasterFlowPatch = Join-Path $repoRoot 'patches\0032-playerbot-pvp-control-cadence-caster-flow.patch'
 if (-not (Test-Path -LiteralPath $pvpCasterFlowPatch)) {
@@ -716,6 +770,17 @@ if ((Get-Item -LiteralPath (Join-Path $mythicUiModule 'include.sh')).Length -ne 
 
 foreach ($script in @('generate-mythic-items.ps1', 'build-client-compat-patch.ps1', 'package-build.ps1')) {
     [void][scriptblock]::Create((Get-Content -LiteralPath (Join-Path $repoRoot "scripts\$script") -Raw))
+}
+$packageBuildText = Get-Content -LiteralPath (Join-Path $repoRoot 'scripts\package-build.ps1') -Raw
+foreach ($requiredMarker in @(
+    'world_pvp_life.sql',
+    'b_world_pvp_life.sql',
+    'world_city_life.sql',
+    'b_world_city_life.sql'
+)) {
+    if ($packageBuildText -notmatch [regex]::Escape($requiredMarker)) {
+        throw "构建打包脚本缺少 Playerbot Life SQL 标记：$requiredMarker"
+    }
 }
 
 $pvpMeleePatch = Join-Path $repoRoot 'patches\0005-playerbot-pvp-tactical-melee-flanking.patch'

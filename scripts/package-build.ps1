@@ -41,6 +41,21 @@ foreach ($module in Get-ChildItem -LiteralPath (Join-Path $sourceRoot 'modules')
     }
 }
 
+# The Life modules deliberately ship their seed data as manual SQL. Promote a copy into the
+# packaged module database tree so a newly installed build imports it through AzerothCore's normal
+# database updater. The original manual file remains available for upstream-compatible diagnostics.
+$lifeSql = @(
+    [pscustomobject]@{ Module = 'mod-playerbots-pvp-life'; Source = 'world_pvp_life.sql'; Target = 'b_world_pvp_life.sql' },
+    [pscustomobject]@{ Module = 'mod-playerbots-city-life'; Source = 'world_city_life.sql'; Target = 'b_world_city_life.sql' }
+)
+foreach ($entry in $lifeSql) {
+    $source = Join-Path $sourceRoot "modules\$($entry.Module)\data\sql\manual\$($entry.Source)"
+    if (-not (Test-Path -LiteralPath $source)) { continue }
+    $destination = Join-Path $sourceData "modules\$($entry.Module)\data\sql\db-world\$($entry.Target)"
+    New-Item -ItemType Directory -Path (Split-Path $destination -Parent) -Force | Out-Null
+    Copy-Item -LiteralPath $source -Destination $destination -Force
+}
+
 $lock = Get-Content -LiteralPath (Join-Path $WorkingRoot 'upstreams.lock.json') -Raw | ConvertFrom-Json
 $manifest = [ordered]@{
     schemaVersion = 1

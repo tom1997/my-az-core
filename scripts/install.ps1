@@ -220,6 +220,47 @@ Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.Melee.FlankDistance' ([stri
 Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.Melee.MinAngle' ([string](Get-SettingValue $settings 'pvpTacticalMeleeMinAngle' 120.0))
 Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.Melee.MaxAngle' ([string](Get-SettingValue $settings 'pvpTacticalMeleeMaxAngle' 165.0))
 
+$pvpLife = Find-ModuleConfig 'mod_playerbots_pvp_life.conf'
+if ($pvpLife) {
+    $pvpLifeAdditionalHotspots = Get-SettingValue $settings 'pvpLifeAdditionalHotspotsEnabled' $false
+    Set-ConfigValue $pvpLife 'PvPLife.Enable' $(if (Get-SettingValue $settings 'pvpLifeEnabled' $true) {'1'} else {'0'})
+    Set-ConfigValue $pvpLife 'PvPLife.Bots.RespectPlayerbotActivity' $(if (Get-SettingValue $settings 'pvpLifeRespectPlayerbotActivity' $true) {'1'} else {'0'})
+    Set-ConfigValue $pvpLife 'PvPLife.Bots.SkipGrouped' '1'
+    Set-ConfigValue $pvpLife 'PvPLife.Bots.ReturnAfterActivity' '1'
+    Set-ConfigValue $pvpLife 'PvPLife.Bots.MaxPerSide' ([string](Get-SettingValue $settings 'pvpLifeMaxPerSide' 12))
+    Set-ConfigValue $pvpLife 'PvPLife.World.MaxActiveHotspots' ([string](Get-SettingValue $settings 'pvpLifeMaxActiveHotspots' 1))
+    Set-ConfigValue $pvpLife 'PvPLife.Duel.PairLimit' ([string](Get-SettingValue $settings 'pvpLifeDuelPairLimit' 6))
+    Set-ConfigValue $pvpLife 'PvPLife.Duel.ChallengeRealPlayers' $(if (Get-SettingValue $settings 'pvpLifeChallengeRealPlayers' $false) {'1'} else {'0'})
+    Set-ConfigValue $pvpLife 'PvPLife.Zone.StormwindDuel.Enable' '1'
+    Set-ConfigValue $pvpLife 'PvPLife.Zone.OrgrimmarDuel.Enable' '1'
+    Set-ConfigValue $pvpLife 'PvPLife.Zone.STV_Gurubashi.Enable' $(if (Get-SettingValue $settings 'pvpLifeGurubashiEnabled' $true) {'1'} else {'0'})
+    foreach ($zone in @('STV_Nesingwary', 'Tanaris_Gadgetzan', 'DarkPortal_Azeroth', 'DarkPortal_Outland',
+                        'Shattrath_Outskirts', 'K3_StormPeaks', 'Goldshire_Roaming', 'Durotar_Roaming',
+                        'Orgrimmar_Zeppelin')) {
+        Set-ConfigValue $pvpLife "PvPLife.Zone.$zone.Enable" $(if ($pvpLifeAdditionalHotspots) {'1'} else {'0'})
+    }
+    Set-ConfigValue $pvpLife 'PvPLife.Zone.Wintergrasp.Enable' $(if (Get-SettingValue $settings 'pvpLifeWintergraspEnabled' $false) {'1'} else {'0'})
+    $pvpLifeFactionCampaigns = Get-SettingValue $settings 'pvpLifeFactionCampaignsEnabled' $false
+    Set-ConfigValue $pvpLife 'PvPLife.ForTheHorde.Enable' $(if ($pvpLifeFactionCampaigns) {'1'} else {'0'})
+    Set-ConfigValue $pvpLife 'PvPLife.ForTheAlliance.Enable' $(if ($pvpLifeFactionCampaigns) {'1'} else {'0'})
+    Set-ConfigValue $pvpLife 'PvPLife.Zone.ForTheHorde_Stormwind.Enable' $(if ($pvpLifeFactionCampaigns) {'1'} else {'0'})
+    Set-ConfigValue $pvpLife 'PvPLife.Zone.ForTheAlliance_Orgrimmar.Enable' $(if ($pvpLifeFactionCampaigns) {'1'} else {'0'})
+    Set-ConfigValue $pvpLife 'PvPLife.BotChat.Enable' $(if (Get-SettingValue $settings 'pvpLifeBotChatEnabled' $false) {'1'} else {'0'})
+}
+
+$cityLife = Find-ModuleConfig 'mod_playerbots_city_life.conf'
+if ($cityLife) {
+    Set-ConfigValue $cityLife 'CityLife.Enable' $(if (Get-SettingValue $settings 'cityLifeEnabled' $true) {'1'} else {'0'})
+    Set-ConfigValue $cityLife 'CityLife.Bots.RespectPlayerbotActivity' $(if (Get-SettingValue $settings 'cityLifeRespectPlayerbotActivity' $true) {'1'} else {'0'})
+    Set-ConfigValue $cityLife 'CityLife.Bots.SkipGrouped' '1'
+    Set-ConfigValue $cityLife 'CityLife.Bots.ReturnWhenReleased' '1'
+    Set-ConfigValue $cityLife 'CityLife.Population.MaxTotal' ([string](Get-SettingValue $settings 'cityLifeMaxTotalPopulation' 100))
+    Set-ConfigValue $cityLife 'CityLife.Population.MaxChangesPerTick' ([string](Get-SettingValue $settings 'cityLifeMaxChangesPerTick' 2))
+    $cityLifeWintergrasp = Get-SettingValue $settings 'cityLifeWintergraspEnabled' $false
+    Set-ConfigValue $cityLife 'CityLife.Hub.WintergraspAlliance.Enable' $(if ($cityLifeWintergrasp) {'1'} else {'0'})
+    Set-ConfigValue $cityLife 'CityLife.Hub.WintergraspHorde.Enable' $(if ($cityLifeWintergrasp) {'1'} else {'0'})
+}
+
 $autoBalance = Find-ModuleConfig 'AutoBalance.conf'
 if ($autoBalance) {
     Set-ConfigValue $autoBalance 'AutoBalance.LevelScaling' '1'

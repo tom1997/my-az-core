@@ -16,6 +16,8 @@
 - Mythic Rewards（按层数提供职业/职责倾向的个人装备，支持 Playerbot）
 - PvP Tactical（远程按技能拉距与脱离，近战主动侧移抓背）
 - Random Enchants（仅 enhanced 包，默认关闭）
+- Playerbots PvP Life（仅 enhanced 包，小规模决斗与野外 PvP 热点）
+- Playerbots City Life（仅 enhanced 包，受限规模的主城生活机器人）
 
 上游版本全部固定在 [`upstreams.lock.json`](upstreams.lock.json)，不会在生产构建中静默追随 master。
 
@@ -54,6 +56,8 @@ Dungeon Clear 的启用条件、命令和默认安全设置见 [`docs/dungeon-cl
 Playerbot 的独立登录、主人离线后继续活动、用户策略持久化和 `botduel` 决斗实验入口见 [`docs/playerbot-owned-autonomy.zh-CN.md`](docs/playerbot-owned-autonomy.zh-CN.md)。
 
 远程 Playerbot 的 PvP 距离控制、职业技能降级和配置项见 [`docs/playerbot-pvp-tactical.zh-CN.md`](docs/playerbot-pvp-tactical.zh-CN.md)。
+
+PvP Life 与 City Life 的启用范围、保守默认值和管理员命令见 [`docs/playerbot-life.zh-CN.md`](docs/playerbot-life.zh-CN.md)。
 
 ## 重要边界
 
