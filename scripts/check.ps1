@@ -739,6 +739,22 @@ if ($pvpBattlegroundLifecyclePatchText -notmatch '(?s)if \(!isValid\).{0,1000}In
 }
 
 $pvpClassPatchText = Get-Content -LiteralPath (Join-Path $repoRoot 'patches\0010-playerbot-pvp-warrior-paladin-death-knight.patch') -Raw
+foreach ($patchDefinition in @(
+    @{ Name = '0038-playerbot-pvp-duel-reengagement-and-escape-roots.patch'; Markers = @('ShouldUsePvpEscapeRoot', 'RootsAreReservedForCloseMeleeEscape', 'ShouldReengagePvpDuel', 'ReengageAfterAttackStopWithoutInterruptingCasts', '!CanDamagePvpTarget(botAI, desired)') },
+    @{ Name = '0039-playerbot-pvp-life-duel-ownership.patch'; Markers = @('EnsureDuelArea', 'AREA_FLAG_ALLOW_DUELS', 'DuelAreaValidated', '-new rpg,-rpg,-travel', 'a.Level > b.Level') }
+)) {
+    $patchText = Get-Content -LiteralPath (Join-Path $repoRoot "patches\$($patchDefinition.Name)") -Raw
+    foreach ($marker in $patchDefinition.Markers) {
+        if ($patchText -notmatch [regex]::Escape($marker)) {
+            throw "决斗修复补丁 $($patchDefinition.Name) 缺少标记：$marker"
+        }
+    }
+}
+$prepareSourceText = Get-Content -LiteralPath (Join-Path $repoRoot 'scripts\prepare-source.ps1') -Raw
+[void][scriptblock]::Create($prepareSourceText)
+if ($prepareSourceText -notmatch 'excludedModules' -or $prepareSourceText -notmatch 'missingModules.Count -eq') {
+    throw '源码准备必须只跳过当前 profile 明确排除的独立模块补丁。'
+}
 if ($pvpClassPatchText -match 'AI_VALUE\(' -and $pvpClassPatchText -notmatch '#include "Playerbots\.h"') {
     throw '使用 AI_VALUE 的 PvP 动作缺少 Playerbots.h。'
 }

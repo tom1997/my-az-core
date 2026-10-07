@@ -1,0 +1,151 @@
+diff --git a/modules/mod-playerbots/mod-playerbots.cmake b/modules/mod-playerbots/mod-playerbots.cmake
+index 47a6d25c..4ecfb088 100644
+--- a/modules/mod-playerbots/mod-playerbots.cmake
++++ b/modules/mod-playerbots/mod-playerbots.cmake
+@@ -8,3 +8,10 @@
+ target_link_libraries(modules
+   PRIVATE
+     mysql)
++
++if (BUILD_TESTING)
++    set_property(GLOBAL APPEND PROPERTY ACORE_MODULE_TEST_SOURCES
++        "${CMAKE_CURRENT_LIST_DIR}/t/PvpTacticalPolicyTests.cxx")
++    set_property(GLOBAL APPEND PROPERTY ACORE_MODULE_TEST_INCLUDES
++        "${CMAKE_CURRENT_LIST_DIR}/src/Ai/Base/Value")
++endif()
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/AttackAction.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/AttackAction.cpp
+index a45ed0cd..5af63749 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/AttackAction.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/AttackAction.cpp
+@@ -306,9 +306,12 @@ bool AttackDuelOpponentAction::isUseful()
+     if (!desired)
+         return false;
+     Unit* current = AI_VALUE(Unit*, "current target");
+-    if (desired == opponent && current == opponent && !CanDamagePvpTarget(botAI, opponent))
++    if (!CanDamagePvpTarget(botAI, desired))
+         return false;
+-    return !bot->IsInCombat() || current != desired;
++    // AttackStop after control can leave the AI target intact while clearing
++    // the actual victim. Being in combat alone does not mean we are attacking.
++    return ShouldReengagePvpDuel(bot->IsInCombat(), current == desired,
++                                bot->GetVictim() != nullptr, bot->IsNonMeleeSpellCast(false));
+ }
+ 
+ bool AttackDuelOpponentAction::Execute(Event /*event*/)
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp
+index 4672b60f..55eca98c 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp
+@@ -908,7 +908,7 @@ bool MovementAction::IsMovingAllowed(WorldObject* target)
+     if (bot->GetMapId() != target->GetMapId())
+         return false;
+ 
+-    if (target->GetTypeId() == TYPEID_PLAYER)
++    if (target->IsPlayer())
+     {
+         Player* playerTarget = static_cast<Player*>(target);
+         if (bot->IsHostileTo(playerTarget) && IsPvpTacticalContextEnabled(bot) &&
+diff --git a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp
+index 1e135502..b08f6af6 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp
+@@ -2315,6 +2315,16 @@ bool IsPvpControlCadenceReady(uint32 now, uint32 lastAttemptAtMs, uint32 cadence
+     return !cadenceMs || !lastAttemptAtMs || now - lastAttemptAtMs >= cadenceMs;
+ }
+ 
++bool ShouldUsePvpEscapeRoot(bool activePressure, bool meleeThreat, bool movementDenied, float distance)
++{
++    return activePressure && meleeThreat && !movementDenied && distance <= 12.0f;
++}
++
++bool ShouldReengagePvpDuel(bool inCombat, bool currentTargetMatches, bool hasVictim, bool casting)
++{
++    return !inCombat || !currentTargetMatches || (!hasVictim && !casting);
++}
++
+ bool ShouldRepeatPvpControl(PvpControlPurpose purpose, float drWeight)
+ {
+     if (purpose == PvpControlPurpose::None)
+@@ -2642,6 +2652,22 @@ bool IsPvpTacticalActionAllowed(PlayerbotAI* botAI, std::string const& action, U
+     Unit* enemy = target && target->IsPlayer() && bot->IsHostileTo(target) ? target :
+                       botAI->GetUnit(snapshot.primaryTarget);
+ 
++    // Roots buy separation from an approaching melee attacker, not a second
++    // rotation against distant casters. Also covers the normal class CC action.
++    Unit* owner = target ? target->GetOwner() : nullptr;
++    if (action == "entangling roots" && target && bot->IsHostileTo(target) &&
++        (target->IsPlayer() || (owner && owner->IsPlayer())))
++    {
++        float const distance = bot->GetDistance2d(target);
++        bool const activePressure = target->GetVictim() == bot ||
++            target->GetTarget() == bot->GetGUID() || distance <= 8.0f;
++        bool const meleeThreat = !target->IsPlayer() || PlayerbotAI::IsMelee(target->ToPlayer(), true);
++        bool const movementDenied = target->HasAuraType(SPELL_AURA_MOD_ROOT) ||
++            GetPvpControlState(target) != PvpControlState::None;
++        if (!ShouldUsePvpEscapeRoot(activePressure, meleeThreat, movementDenied, distance))
++            return false;
++    }
++
+     if (action == "polymorph")
+     {
+         if (target == bot)
+diff --git a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h
+index 83d5d8b8..70e1f734 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h
++++ b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h
+@@ -558,6 +558,8 @@ PvpControlPurpose ClassifyPvpControlPurpose(bool offTarget, bool recoveryNeeded,
+ uint32 GetPvpControlCadenceMs(std::string const& spell);
+ bool IsPvpControlCadenceReady(uint32 now, uint32 lastAttemptAtMs, uint32 cadenceMs);
+ bool ShouldRepeatPvpControl(PvpControlPurpose purpose, float drWeight);
++bool ShouldUsePvpEscapeRoot(bool activePressure, bool meleeThreat, bool movementDenied, float distance);
++bool ShouldReengagePvpDuel(bool inCombat, bool currentTargetMatches, bool hasVictim, bool casting);
+ bool ShouldUsePvpPrimaryControlWindow(bool recoveryAvailable, bool petOpportunity,
+                                       bool activePressure, float botHealthPct,
+                                       float targetHealthPct);
+diff --git a/modules/mod-playerbots/t/PvpTacticalPolicyTests.cxx b/modules/mod-playerbots/t/PvpTacticalPolicyTests.cxx
+index 96314713..3a36a970 100644
+--- a/modules/mod-playerbots/t/PvpTacticalPolicyTests.cxx
++++ b/modules/mod-playerbots/t/PvpTacticalPolicyTests.cxx
+@@ -492,6 +492,25 @@ TEST(PvpSpecPolicy, ProcScoresPreferLethalDamageUnlessHealingIsActuallyCritical)
+     EXPECT_EQ(PvpProcUse::Control, SelectPvpProcUse(5, 5, setup));
+ }
+ 
++TEST(PvpControlPolicy, RootsAreReservedForCloseMeleeEscape)
++{
++    EXPECT_TRUE(ShouldUsePvpEscapeRoot(true, true, false, 8.0f));
++    EXPECT_TRUE(ShouldUsePvpEscapeRoot(true, true, false, 12.0f));
++    EXPECT_FALSE(ShouldUsePvpEscapeRoot(true, true, false, 12.1f));
++    EXPECT_FALSE(ShouldUsePvpEscapeRoot(false, true, false, 8.0f));
++    EXPECT_FALSE(ShouldUsePvpEscapeRoot(true, false, false, 8.0f));
++    EXPECT_FALSE(ShouldUsePvpEscapeRoot(true, true, true, 8.0f));
++}
++
++TEST(PvpDuelPolicy, ReengageAfterAttackStopWithoutInterruptingCasts)
++{
++    EXPECT_TRUE(ShouldReengagePvpDuel(false, true, false, false));
++    EXPECT_TRUE(ShouldReengagePvpDuel(true, false, true, false));
++    EXPECT_TRUE(ShouldReengagePvpDuel(true, true, false, false));
++    EXPECT_FALSE(ShouldReengagePvpDuel(true, true, false, true));
++    EXPECT_FALSE(ShouldReengagePvpDuel(true, true, true, false));
++}
++
+ TEST(PvpSpecPolicy, ProfilesGiveAggressiveAndDurableSpecsDifferentThresholds)
+ {
+     PvpSpecPolicyProfile const fury = GetPvpSpecPolicyProfile(PvpArchetype::FuryWarrior);
+diff --git a/modules/mod-playerbots/t/PvpTacticalScenarioMatrix.md b/modules/mod-playerbots/t/PvpTacticalScenarioMatrix.md
+index f714b8e6..49ec8f3c 100644
+--- a/modules/mod-playerbots/t/PvpTacticalScenarioMatrix.md
++++ b/modules/mod-playerbots/t/PvpTacticalScenarioMatrix.md
+@@ -271,3 +271,12 @@ off-target outside the effect radius to guard against overly broad suppression.
+ - Let a hunter and its pet pressure a death knight while the hunter is outside
+   melee range. Chains of Ice must prefer the hunter if it is not already
+   slowed; only then may the hostile-pet planner spend Chains on the pet.
++
++- In a duel, let breakable control stop auto-attack without clearing the AI
++  current target. Once damage is allowed again, restore the victim even if
++  the bot is still in combat. Do not restart attacks during a valid hard cast,
++  against protected CC/immunity, or during the pending stealth opener.
++- Pressure a druid with a melee player/pet inside 12 yards. Roots may create
++  an escape window; once rooted or controlled, do not refresh it. Against a
++  distant enemy or a ranged caster, ordinary damage must not be replaced by
++  repeated Roots. PvE roots remain unchanged.
