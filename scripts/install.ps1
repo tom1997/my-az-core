@@ -21,7 +21,14 @@ if ($versionText -notmatch '3\s*[,\.]\s*3\s*[,\.]\s*5' -or $versionText -notmatc
 }
 
 $drive = Get-PSDrive -Name ([IO.Path]::GetPathRoot($paths.Root).TrimEnd(':\'))
-if ($drive.Free -lt 45GB) { throw "安装盘可用空间不足 45 GB：$([math]::Round($drive.Free / 1GB, 1)) GB" }
+$isRuntimeUpdate = $SkipMySqlSetup -and
+    (Test-Path -LiteralPath (Join-Path $paths.Data 'dbc')) -and
+    (Test-Path -LiteralPath (Join-Path $paths.MySqlBin 'mysqld.exe'))
+$minimumFreeSpace = if ($isRuntimeUpdate) { 5GB } else { 45GB }
+$minimumFreeSpaceGB = [math]::Round($minimumFreeSpace / 1GB, 0)
+if ($drive.Free -lt $minimumFreeSpace) {
+    throw "安装盘可用空间不足 $minimumFreeSpaceGB GB：$([math]::Round($drive.Free / 1GB, 1)) GB"
+}
 
 foreach ($dir in @($paths.Root, $paths.Releases, $paths.Runtime, $paths.Configs, $paths.Data, $paths.Logs, $paths.State, $paths.Backups, $paths.MySql)) {
     New-Item -ItemType Directory -Path $dir -Force | Out-Null
@@ -40,7 +47,12 @@ try {
     if (-not (Test-Path -LiteralPath $manifestPath)) { throw '运行包缺少 source-manifest.json。' }
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
     $releaseDate = ([DateTime]$manifest.builtAt).ToUniversalTime().ToString('yyyyMMdd')
-    $releaseName = "$releaseDate.$($manifest.profile).$($manifest.core.commit.Substring(0,8))"
+    $buildRevision = if ($manifest.customModules -and $manifest.customModules.Count -gt 0 -and $manifest.customModules[0].revision) {
+        [string]$manifest.customModules[0].revision
+    } else {
+        [string]$manifest.core.commit
+    }
+    $releaseName = "$releaseDate.$($manifest.profile).$($manifest.core.commit.Substring(0,8)).$($buildRevision.Substring(0,8))"
     $releasePath = Join-Path $paths.Releases $releaseName
     if (Test-Path -LiteralPath $releasePath) { Remove-Item -LiteralPath $releasePath -Recurse -Force }
     Move-Item -LiteralPath $tempRoot -Destination $releasePath
@@ -176,6 +188,78 @@ Set-ConfigValue $playerbots 'AiPlayerbot.DisabledWithoutRealPlayer' $(if ($setti
 Set-ConfigValue $playerbots 'AiPlayerbot.BotActiveAlone' ([string]$settings.botActiveAlonePercent)
 Set-ConfigValue $playerbots 'AiPlayerbot.botActiveAloneSmartScale' '1'
 Set-ConfigValue $playerbots 'AiPlayerbot.CommandServerPort' '0'
+Set-ConfigValue $playerbots 'AiPlayerbot.RandomGearLoweringChance' ([string](Get-SettingValue $settings 'randomGearLoweringChance' 0.35))
+Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.Enable' $(if (Get-SettingValue $settings 'pvpTacticalEnabled' $true) {'1'} else {'0'})
+Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.Duel' $(if (Get-SettingValue $settings 'pvpTacticalDuel' $true) {'1'} else {'0'})
+Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.Arena' $(if (Get-SettingValue $settings 'pvpTacticalArena' $true) {'1'} else {'0'})
+Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.Battleground' $(if (Get-SettingValue $settings 'pvpTacticalBattleground' $true) {'1'} else {'0'})
+Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.OpenWorld' $(if (Get-SettingValue $settings 'pvpTacticalOpenWorld' $true) {'1'} else {'0'})
+Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.Debug' $(if (Get-SettingValue $settings 'pvpTacticalDebug' $false) {'1'} else {'0'})
+Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.DebugBot' ([string](Get-SettingValue $settings 'pvpTacticalDebugBot' ''))
+Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.Recovery.HealthPct' ([string](Get-SettingValue $settings 'pvpTacticalRecoveryHealthPct' 40.0))
+Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.Recovery.MinControlMs' ([string](Get-SettingValue $settings 'pvpTacticalRecoveryMinControlMs' 2000))
+Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.Recovery.BandageMinControlMs' ([string](Get-SettingValue $settings 'pvpTacticalBandageMinControlMs' 6500))
+Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.Rogue.ResetHealthPct' ([string](Get-SettingValue $settings 'pvpTacticalRogueResetHealthPct' 35.0))
+Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.Rogue.ResetDistance' ([string](Get-SettingValue $settings 'pvpTacticalRogueResetDistance' 30.0))
+Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.AntiStealth.ProbeDistance' ([string](Get-SettingValue $settings 'pvpTacticalAntiStealthProbeDistance' 12.0))
+Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.DecisionInterval' ([string](Get-SettingValue $settings 'pvpTacticalDecisionInterval' 150))
+Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.Hunter.MinDistance' ([string](Get-SettingValue $settings 'pvpTacticalHunterMinDistance' 30.0))
+Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.Caster.MinDistance' ([string](Get-SettingValue $settings 'pvpTacticalCasterMinDistance' 26.0))
+Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.Healer.MinDistance' ([string](Get-SettingValue $settings 'pvpTacticalHealerMinDistance' 28.0))
+Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.Hunter.PreferredDistance' ([string](Get-SettingValue $settings 'pvpTacticalHunterPreferredDistance' 36.0))
+Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.Caster.PreferredDistance' ([string](Get-SettingValue $settings 'pvpTacticalCasterPreferredDistance' 32.0))
+Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.Healer.PreferredDistance' ([string](Get-SettingValue $settings 'pvpTacticalHealerPreferredDistance' 34.0))
+Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.RangedOpponent.EmergencyDistance' ([string](Get-SettingValue $settings 'pvpTacticalRangedOpponentEmergencyDistance' 8.0))
+Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.RangedOpponent.PreferredDistance' ([string](Get-SettingValue $settings 'pvpTacticalRangedOpponentPreferredDistance' 12.0))
+Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.Duel.SafeRadius' ([string](Get-SettingValue $settings 'pvpTacticalDuelSafeRadius' 38.0))
+Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.RetreatStep' ([string](Get-SettingValue $settings 'pvpTacticalRetreatStep' 80.0))
+Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.TargetLeashDistance' ([string](Get-SettingValue $settings 'pvpTacticalTargetLeashDistance' 55.0))
+Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.Melee.Enable' $(if (Get-SettingValue $settings 'pvpTacticalMeleeEnabled' $true) {'1'} else {'0'})
+Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.Melee.DecisionInterval' ([string](Get-SettingValue $settings 'pvpTacticalMeleeDecisionInterval' 150))
+Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.Melee.FlankDistance' ([string](Get-SettingValue $settings 'pvpTacticalMeleeFlankDistance' 1.5))
+Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.Melee.MinAngle' ([string](Get-SettingValue $settings 'pvpTacticalMeleeMinAngle' 120.0))
+Set-ConfigValue $playerbots 'AiPlayerbot.PvPTactical.Melee.MaxAngle' ([string](Get-SettingValue $settings 'pvpTacticalMeleeMaxAngle' 165.0))
+
+$pvpLife = Find-ModuleConfig 'mod_playerbots_pvp_life.conf'
+if ($pvpLife) {
+    $pvpLifeAdditionalHotspots = Get-SettingValue $settings 'pvpLifeAdditionalHotspotsEnabled' $false
+    Set-ConfigValue $pvpLife 'PvPLife.Enable' $(if (Get-SettingValue $settings 'pvpLifeEnabled' $true) {'1'} else {'0'})
+    Set-ConfigValue $pvpLife 'PvPLife.Bots.RespectPlayerbotActivity' $(if (Get-SettingValue $settings 'pvpLifeRespectPlayerbotActivity' $true) {'1'} else {'0'})
+    Set-ConfigValue $pvpLife 'PvPLife.Bots.SkipGrouped' '1'
+    Set-ConfigValue $pvpLife 'PvPLife.Bots.ReturnAfterActivity' '1'
+    Set-ConfigValue $pvpLife 'PvPLife.Bots.MaxPerSide' ([string](Get-SettingValue $settings 'pvpLifeMaxPerSide' 12))
+    Set-ConfigValue $pvpLife 'PvPLife.World.MaxActiveHotspots' ([string](Get-SettingValue $settings 'pvpLifeMaxActiveHotspots' 1))
+    Set-ConfigValue $pvpLife 'PvPLife.Duel.PairLimit' ([string](Get-SettingValue $settings 'pvpLifeDuelPairLimit' 6))
+    Set-ConfigValue $pvpLife 'PvPLife.Duel.ChallengeRealPlayers' $(if (Get-SettingValue $settings 'pvpLifeChallengeRealPlayers' $false) {'1'} else {'0'})
+    Set-ConfigValue $pvpLife 'PvPLife.Zone.StormwindDuel.Enable' '1'
+    Set-ConfigValue $pvpLife 'PvPLife.Zone.OrgrimmarDuel.Enable' '1'
+    Set-ConfigValue $pvpLife 'PvPLife.Zone.STV_Gurubashi.Enable' $(if (Get-SettingValue $settings 'pvpLifeGurubashiEnabled' $true) {'1'} else {'0'})
+    foreach ($zone in @('STV_Nesingwary', 'Tanaris_Gadgetzan', 'DarkPortal_Azeroth', 'DarkPortal_Outland',
+                        'Shattrath_Outskirts', 'K3_StormPeaks', 'Goldshire_Roaming', 'Durotar_Roaming',
+                        'Orgrimmar_Zeppelin')) {
+        Set-ConfigValue $pvpLife "PvPLife.Zone.$zone.Enable" $(if ($pvpLifeAdditionalHotspots) {'1'} else {'0'})
+    }
+    Set-ConfigValue $pvpLife 'PvPLife.Zone.Wintergrasp.Enable' $(if (Get-SettingValue $settings 'pvpLifeWintergraspEnabled' $false) {'1'} else {'0'})
+    $pvpLifeFactionCampaigns = Get-SettingValue $settings 'pvpLifeFactionCampaignsEnabled' $false
+    Set-ConfigValue $pvpLife 'PvPLife.ForTheHorde.Enable' $(if ($pvpLifeFactionCampaigns) {'1'} else {'0'})
+    Set-ConfigValue $pvpLife 'PvPLife.ForTheAlliance.Enable' $(if ($pvpLifeFactionCampaigns) {'1'} else {'0'})
+    Set-ConfigValue $pvpLife 'PvPLife.Zone.ForTheHorde_Stormwind.Enable' $(if ($pvpLifeFactionCampaigns) {'1'} else {'0'})
+    Set-ConfigValue $pvpLife 'PvPLife.Zone.ForTheAlliance_Orgrimmar.Enable' $(if ($pvpLifeFactionCampaigns) {'1'} else {'0'})
+    Set-ConfigValue $pvpLife 'PvPLife.BotChat.Enable' $(if (Get-SettingValue $settings 'pvpLifeBotChatEnabled' $false) {'1'} else {'0'})
+}
+
+$cityLife = Find-ModuleConfig 'mod_playerbots_city_life.conf'
+if ($cityLife) {
+    Set-ConfigValue $cityLife 'CityLife.Enable' $(if (Get-SettingValue $settings 'cityLifeEnabled' $true) {'1'} else {'0'})
+    Set-ConfigValue $cityLife 'CityLife.Bots.RespectPlayerbotActivity' $(if (Get-SettingValue $settings 'cityLifeRespectPlayerbotActivity' $true) {'1'} else {'0'})
+    Set-ConfigValue $cityLife 'CityLife.Bots.SkipGrouped' '1'
+    Set-ConfigValue $cityLife 'CityLife.Bots.ReturnWhenReleased' '1'
+    Set-ConfigValue $cityLife 'CityLife.Population.MaxTotal' ([string](Get-SettingValue $settings 'cityLifeMaxTotalPopulation' 100))
+    Set-ConfigValue $cityLife 'CityLife.Population.MaxChangesPerTick' ([string](Get-SettingValue $settings 'cityLifeMaxChangesPerTick' 2))
+    $cityLifeWintergrasp = Get-SettingValue $settings 'cityLifeWintergraspEnabled' $false
+    Set-ConfigValue $cityLife 'CityLife.Hub.WintergraspAlliance.Enable' $(if ($cityLifeWintergrasp) {'1'} else {'0'})
+    Set-ConfigValue $cityLife 'CityLife.Hub.WintergraspHorde.Enable' $(if ($cityLifeWintergrasp) {'1'} else {'0'})
+}
 
 $autoBalance = Find-ModuleConfig 'AutoBalance.conf'
 if ($autoBalance) {

@@ -1,0 +1,250 @@
+diff --git a/modules/mod-playerbots-pvp-life/src/PvPLifeMgr.cpp b/modules/mod-playerbots-pvp-life/src/PvPLifeMgr.cpp
+index 9a4fb3d..8a9b7a4 100644
+--- a/modules/mod-playerbots-pvp-life/src/PvPLifeMgr.cpp
++++ b/modules/mod-playerbots-pvp-life/src/PvPLifeMgr.cpp
+@@ -14,6 +14,7 @@
+ #include "Chat.h"
+ #include "Config.h"
+ #include "DatabaseEnv.h"
++#include "DBCStores.h"
+ #include "GameTime.h"
+ #include "Group.h"
+ #include "Log.h"
+@@ -596,7 +597,13 @@ namespace PvPLife
+             ai->ChangeStrategy(_pvpCombatStrategies, BOT_STATE_COMBAT);
+             ai->ChangeStrategy(duelMode ? _duelNonCombatStrategies : _pvpNonCombatStrategies, BOT_STATE_NON_COMBAT);
+             if (duelMode)
+-                ai->ChangeStrategy("+stay,-follow,-passive,-grind", BOT_STATE_NON_COMBAT);
++            {
++                // Reserved duel participants must not simultaneously run RPG
++                // travel/teleport or another autonomous duel request.
++                ai->ChangeStrategy("-new rpg,-rpg,-travel,-grind,-mount,-start duel", BOT_STATE_COMBAT);
++                ai->ChangeStrategy("+stay,-follow,-passive,-new rpg,-rpg,-travel,-grind,-mount,-start duel",
++                    BOT_STATE_NON_COMBAT);
++            }
+         }
+     }
+ 
+@@ -683,6 +690,14 @@ namespace PvPLife
+             if (!attackerIds.count(bot.GuidLow) && defenders.size() < defenderNeed)
+                 defenders.push_back(bot);
+ 
++        // Keep same-faction duel pools in a narrow level band so a population
++        // spread over levels 1-80 does not leave most participants unpaired.
++        if (zone.Type == ActivityType::Duel)
++            std::stable_sort(shared.begin(), shared.end(), [](BotCandidate const& a, BotCandidate const& b)
++            {
++                return a.Level > b.Level;
++            });
++
+         for (BotCandidate const& bot : shared)
+         {
+             bool attackerNeedsBot = attackers.size() < attackerNeed;
+@@ -939,6 +954,20 @@ namespace PvPLife
+             if (!step.TargetIsRealPlayer && !IsConfiguredBotAccount(target->GetSession()->GetAccountId()))
+                 continue;
+ 
++            auto event = std::find_if(_activeEvents.begin(), _activeEvents.end(), [&](ActiveEvent const& active)
++            {
++                return active.EventId == step.EventId;
++            });
++            if (event == _activeEvents.end())
++                continue;
++            if (!event->DuelAreaValidated)
++            {
++                DuelStep retry = step;
++                retry.ExecuteAt = now + 3;
++                keep.push_back(retry);
++                continue;
++            }
++
+             if (challenger->GetMapId() != target->GetMapId() || challenger->GetDistance(target) > 30.0f)
+             {
+                 DuelStep retry = step;
+@@ -962,11 +991,21 @@ namespace PvPLife
+                     challenger->GetMaxPower(challenger->getPowerType()));
+                 target->SetPower(target->getPowerType(), target->GetMaxPower(target->getPowerType()));
+             }
++            challenger->StopMoving();
++            challenger->GetMotionMaster()->Clear();
++            if (!step.TargetIsRealPlayer)
++            {
++                target->StopMoving();
++                target->GetMotionMaster()->Clear();
++            }
+             challenger->CastSpell(target, _duelSpellId, true);
+             if (!challenger->duel || !target->duel)
+             {
+-                LOG_WARN("module", "[PvPLife] Duel request failed: {} -> {}. Check that the saved location "
+-                    "allows duels.", challenger->GetName(), target->GetName());
++                LOG_WARN("module", "[PvPLife] Duel request failed: {} -> {}; areas {} / {}. Check that the saved location "
++                    "allows duels.", challenger->GetName(), target->GetName(), challenger->GetAreaId(), target->GetAreaId());
++                _botDuelCooldown[step.ChallengerGuidLow] = now + _botDuelCooldownSeconds;
++                if (!step.TargetIsRealPlayer)
++                    _botDuelCooldown[step.TargetGuidLow] = now + _botDuelCooldownSeconds;
+                 continue;
+             }
+ 
+@@ -1180,12 +1219,95 @@ namespace PvPLife
+         }
+     }
+ 
++    bool Manager::EnsureDuelArea(ActiveEvent& event)
++    {
++        if (event.DuelAreaValidated)
++            return true;
++        uint32 const now = GameTimeSeconds();
++        if (event.DuelAreaRetryAt > now)
++            return false;
++
++        Player* reference = nullptr;
++        for (Participant const& participant : event.Members)
++        {
++            Player* bot = FindPlayer(participant.Bot.GuidLow);
++            // Wait until the destination map/grid has been loaded by arrival.
++            if (bot && !bot->IsBeingTeleported() && bot->GetMapId() == event.EventZone.MapId &&
++                bot->GetDistance2d(event.EventZone.RallyX, event.EventZone.RallyY) <= _duelLeashRadius)
++            {
++                reference = bot;
++                break;
++            }
++        }
++        if (!reference)
++            return false;
++
++        Map* map = reference->GetMap();
++        uint32 const phase = reference->GetPhaseMask();
++        float const margin = static_cast<float>(_positionJitter) + 5.0f;
++        auto allowsDuels = [&](float x, float y, float z)
++        {
++            // Validate the whole placement margin, not just a city-gate center
++            // whose jitter can put half of the participants in a no-duel area.
++            for (int dx = -1; dx <= 1; ++dx)
++                for (int dy = -1; dy <= 1; ++dy)
++                {
++                    AreaTableEntry const* area = sAreaTableStore.LookupEntry(
++                        map->GetAreaId(phase, x + dx * margin, y + dy * margin, z));
++                    if (!area || !(area->flags & AREA_FLAG_ALLOW_DUELS))
++                        return false;
++                }
++            return true;
++        };
++
++        float const originX = event.EventZone.RallyX;
++        float const originY = event.EventZone.RallyY;
++        float const originZ = event.EventZone.RallyZ;
++        for (uint32 ring = 0; ring <= 8; ++ring)
++            for (uint32 direction = 0; direction < (ring ? 16u : 1u); ++direction)
++            {
++                float const angle = direction * 6.2831853f / 16.0f;
++                float const x = originX + ring * 20.0f * std::cos(angle);
++                float const y = originY + ring * 20.0f * std::sin(angle);
++                float const z = map->GetHeight(phase, x, y, originZ + 30.0f);
++                if (!std::isfinite(z) || std::abs(z - originZ) > 40.0f || !allowsDuels(x, y, z))
++                    continue;
++
++                event.DuelAreaValidated = true;
++                event.EventZone.RallyX = event.EventZone.TargetX = x;
++                event.EventZone.RallyY = event.EventZone.TargetY = y;
++                event.EventZone.RallyZ = event.EventZone.TargetZ = z;
++                for (Participant& participant : event.Members)
++                {
++                    participant.ActivityX = x + Jitter();
++                    participant.ActivityY = y + Jitter();
++                    participant.ActivityZ = z;
++                }
++                for (MoveStep& step : _moveQueue)
++                    if (step.EventId == event.EventId)
++                    {
++                        step.X = x;
++                        step.Y = y;
++                        step.Z = z;
++                    }
++                LOG_INFO("module", "[PvPLife] Validated duel area '{}' at {}, {}, {}", event.EventZone.Name, x, y, z);
++                return true;
++            }
++
++        event.DuelAreaRetryAt = now + MINUTE;
++        LOG_WARN("module", "[PvPLife] No legal duel area near '{}'; waiting instead of spamming failed requests.",
++            event.EventZone.Name);
++        return false;
++    }
++
+     void Manager::MaintainDuelParticipants()
+     {
+-        for (ActiveEvent const& event : _activeEvents)
++        for (ActiveEvent& event : _activeEvents)
+         {
+             if (event.EventZone.Type != ActivityType::Duel)
+                 continue;
++            if (!EnsureDuelArea(event))
++                continue;
+ 
+             for (Participant const& participant : event.Members)
+             {
+@@ -1197,7 +1319,9 @@ namespace PvPLife
+                 if (bot->duel || bot->IsInCombat())
+                     continue;
+ 
+-                if (bot->GetMapId() != event.EventZone.MapId ||
++                AreaTableEntry const* area = sAreaTableStore.LookupEntry(bot->GetAreaId());
++                if (!area || !(area->flags & AREA_FLAG_ALLOW_DUELS) ||
++                    bot->GetMapId() != event.EventZone.MapId ||
+                     bot->GetDistance2d(participant.ActivityX, participant.ActivityY) > _duelLeashRadius)
+                 {
+                     MoveBot(bot, event.EventZone.MapId, participant.ActivityX, participant.ActivityY,
+@@ -1208,7 +1332,10 @@ namespace PvPLife
+                 if (PlayerbotAI* ai = GET_PLAYERBOT_AI(bot))
+                 {
+                     if (!ai->HasStrategy("duel", BOT_STATE_NON_COMBAT) ||
+-                        !ai->HasStrategy("stay", BOT_STATE_NON_COMBAT))
++                        !ai->HasStrategy("stay", BOT_STATE_NON_COMBAT) ||
++                        ai->HasStrategy("new rpg", BOT_STATE_NON_COMBAT) ||
++                        ai->HasStrategy("travel", BOT_STATE_NON_COMBAT) ||
++                        ai->HasStrategy("mount", BOT_STATE_NON_COMBAT))
+                         ApplyPvpStrategies(bot, true);
+ 
+                     PositionMap& positions = ai->GetAiObjectContext()->GetValue<PositionMap&>("position")->Get();
+@@ -1454,7 +1581,6 @@ namespace PvPLife
+         }
+ 
+         ProcessMoveQueue();
+-        ProcessDuelQueue();
+         ProcessChatQueue();
+         ExpireEvents();
+ 
+@@ -1466,6 +1592,9 @@ namespace PvPLife
+         else
+             _duelGuardTimerMs -= diff;
+ 
++        // Validate/anchor the destination before a pending request is cast.
++        ProcessDuelQueue();
++
+         if (_timerMs <= diff)
+         {
+             _timerMs = _tickSeconds * IN_MILLISECONDS;
+diff --git a/modules/mod-playerbots-pvp-life/src/PvPLifeMgr.h b/modules/mod-playerbots-pvp-life/src/PvPLifeMgr.h
+index 39b6106..81c0997 100644
+--- a/modules/mod-playerbots-pvp-life/src/PvPLifeMgr.h
++++ b/modules/mod-playerbots-pvp-life/src/PvPLifeMgr.h
+@@ -68,6 +68,7 @@ namespace PvPLife
+         void ProcessChatQueue();
+         void ProcessRealPlayerChallenges();
+         void MaintainDuelParticipants();
++        bool EnsureDuelArea(ActiveEvent& event);
+         void MaintainBotDuels();
+ 
+         void ApplyPvpStrategies(Player* player, bool duelMode) const;
+diff --git a/modules/mod-playerbots-pvp-life/src/PvPLifeTypes.h b/modules/mod-playerbots-pvp-life/src/PvPLifeTypes.h
+index 65981cf..b57b3cf 100644
+--- a/modules/mod-playerbots-pvp-life/src/PvPLifeTypes.h
++++ b/modules/mod-playerbots-pvp-life/src/PvPLifeTypes.h
+@@ -100,6 +100,8 @@ namespace PvPLife
+         Zone EventZone;
+         uint32 StartedAt = 0;
+         uint32 EndsAt = 0;
++        bool DuelAreaValidated = false;
++        uint32 DuelAreaRetryAt = 0;
+         std::vector<Participant> Members;
+     };
+ 

@@ -1,0 +1,163 @@
+diff --git a/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.cpp b/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.cpp
+index b94a2a21ebc270cab5363aff0d7ae4d1fc39fb88..263de3ac82ce1009a141cf4378be8c81c9bbe315 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.cpp
+@@ -420,6 +420,16 @@ bool PvpTacticalPlayerTargetTrigger::IsActive()
+     if (!IsPvpTacticalContextEnabled(bot) || !IsPvpTacticalEligible(bot))
+         return false;
+     Unit* target = ResolvePvpThreatTarget(botAI);
++    // ResolvePvpThreatTarget deliberately yields while a duel opponent is
++    // fully immune so secondary pet pressure is not overwritten. Keep the
++    // player tactical trigger alive nevertheless: the class action uses this
++    // same visible opponent to heal, recover mana, or prepare the next go.
++    if (!target && bot->duel && bot->duel->State == DUEL_STATE_IN_PROGRESS)
++    {
++        Player* opponent = bot->duel->Opponent;
++        if (opponent && opponent->IsAlive() && bot->CanSeeOrDetect(opponent, false, true))
++            target = opponent;
++    }
+     if (!target || !target->IsPlayer())
+         return false;
+ 
+diff --git a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp
+index 4453ad6a781c52d85625120cd8c257c9fec7857a..5525c5f71d65f3d567a9779c905fc73eefb3d30d 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp
+@@ -1489,13 +1489,19 @@ PvpRangeMotion SelectPvpRangeMotion(PvpRangeMotion current, float closestThreatD
+     preferredDistance = std::max(minimumDistance + 1.0f, preferredDistance);
+     maximumDistance = std::max(preferredDistance + 1.0f, maximumDistance);
+ 
+-    // A current correction owns the motion until the center of the band is
+-    // reached. This is what turns kiting into one continuous run instead of
+-    // repeated one- or two-yard adjustments at the edge of the band.
++    // Minimum/maximum are a real comfort band, not merely entry thresholds for
++    // a correction all the way to one exact preferred point. Cross only a
++    // small edge buffer before yielding so latency does not immediately flip
++    // the direction, while preserving the whole useful range for casting.
++    float const bandWidth = maximumDistance - minimumDistance;
++    float const edgeBuffer = std::min(2.0f, std::max(0.0f, bandWidth * 0.20f));
++    float const retreatExit = std::min(preferredDistance, minimumDistance + edgeBuffer);
++    float const advanceExit = std::max(preferredDistance, maximumDistance - edgeBuffer);
++
+     if (current == PvpRangeMotion::Retreat)
+-        return closestThreatDistance < preferredDistance ? PvpRangeMotion::Retreat : PvpRangeMotion::Hold;
++        return closestThreatDistance < retreatExit ? PvpRangeMotion::Retreat : PvpRangeMotion::Hold;
+     if (current == PvpRangeMotion::Advance)
+-        return primaryTargetDistance > preferredDistance ? PvpRangeMotion::Advance : PvpRangeMotion::Hold;
++        return primaryTargetDistance > advanceExit ? PvpRangeMotion::Advance : PvpRangeMotion::Hold;
+ 
+     if (closestThreatDistance < minimumDistance)
+         return PvpRangeMotion::Retreat;
+@@ -1844,6 +1850,20 @@ void DebugPvpTactical(PlayerbotAI* botAI, std::string const& message, Unit* targ
+              snapshot.hostilePet.distance);
+ }
+ 
++bool ShouldSkipPvpMaintainedEffect(std::string const& spell, bool auraActive)
++{
++    if (!auraActive)
++        return false;
++
++    // Planned controls and explicit maintenance auras are conditions, not
++    // rotational damage effects. Recasting the same active aura only overwrites
++    // duration and lets high-priority utility starve pursuit or normal DPS.
++    static std::set<std::string> const maintainedEffects = {
++        "hunter's mark"
++    };
++    return IsPlannedControlAction(spell) || maintainedEffects.find(spell) != maintainedEffects.end();
++}
++
+ bool CanUsePvpSpell(PlayerbotAI* botAI, std::string const& spell, Unit* target, bool respectDiminishing)
+ {
+     if (!target)
+@@ -1853,6 +1873,9 @@ bool CanUsePvpSpell(PlayerbotAI* botAI, std::string const& spell, Unit* target,
+     if (!spellId || botAI->GetBot()->HasSpellCooldown(spellId))
+         return false;
+ 
++    if (ShouldSkipPvpMaintainedEffect(spell, botAI->HasAura(spell, target)))
++        return false;
++
+     if (respectDiminishing && !CanApplyPvpControl(botAI, spell, target))
+         return false;
+ 
+diff --git a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h
+index 2149b4e7fb68a37511c50719471f645d18450dd8..afeddb38bafa34eb8719ec26cd936d040edd61b1 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h
++++ b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h
+@@ -396,6 +396,7 @@ bool ShouldRequestPvpCastPlant(bool combatSpacing, bool ranged, bool moving, boo
+                               float minimumPlantDistance, float emergencyDistance, float castSafety);
+ bool RequestPvpCastPlant(PlayerbotAI* botAI, uint32 castMs);
+ bool IsPvpCastPlantActive(PlayerbotAI* botAI);
++bool ShouldSkipPvpMaintainedEffect(std::string const& spell, bool auraActive);
+ bool CanUsePvpSpell(PlayerbotAI* botAI, std::string const& spell, Unit* target, bool respectDiminishing = true);
+ bool ShouldBlockPvpDuelInterference(bool targetDuelActive, bool actorIsParticipant);
+ bool ShouldBlockPvpDuelInterference(Player* actor, Unit* target);
+diff --git a/modules/mod-playerbots/t/PvpTacticalPolicyTests.cxx b/modules/mod-playerbots/t/PvpTacticalPolicyTests.cxx
+index 19817d57236813fcf6dbd1992effdc174d7c58c4..17eb62ed9552bbf8f079db3cf89b4a2f837e267e 100644
+--- a/modules/mod-playerbots/t/PvpTacticalPolicyTests.cxx
++++ b/modules/mod-playerbots/t/PvpTacticalPolicyTests.cxx
+@@ -178,20 +178,33 @@ TEST(PvpDuelIsolationPolicy, OnlyDuelParticipantsMayAffectAnActiveDuelist)
+     EXPECT_FALSE(ShouldBlockPvpDuelInterference(false, false));
+ }
+ 
+-TEST(PvpRangePolicy, RetreatAndAdvanceStayContinuousUntilPreferredDistance)
++TEST(PvpRangePolicy, CorrectionsEnterTheUsefulBandWithoutChasingOneExactDistance)
+ {
+     EXPECT_EQ(PvpRangeMotion::Retreat,
+               SelectPvpRangeMotion(PvpRangeMotion::Hold, 29.0f, 35.0f, 30.0f, 36.0f, 40.0f));
+     EXPECT_EQ(PvpRangeMotion::Retreat,
+-              SelectPvpRangeMotion(PvpRangeMotion::Retreat, 34.0f, 36.0f, 30.0f, 36.0f, 40.0f));
++              SelectPvpRangeMotion(PvpRangeMotion::Retreat, 31.0f, 36.0f, 30.0f, 36.0f, 40.0f));
+     EXPECT_EQ(PvpRangeMotion::Hold,
+-              SelectPvpRangeMotion(PvpRangeMotion::Retreat, 36.0f, 36.0f, 30.0f, 36.0f, 40.0f));
++              SelectPvpRangeMotion(PvpRangeMotion::Retreat, 32.0f, 36.0f, 30.0f, 36.0f, 40.0f));
++    EXPECT_EQ(PvpRangeMotion::Hold,
++              SelectPvpRangeMotion(PvpRangeMotion::Hold, 35.0f, 35.0f, 30.0f, 36.0f, 40.0f));
+     EXPECT_EQ(PvpRangeMotion::Advance,
+               SelectPvpRangeMotion(PvpRangeMotion::Hold, 41.0f, 41.0f, 30.0f, 36.0f, 40.0f));
+     EXPECT_EQ(PvpRangeMotion::Advance,
+-              SelectPvpRangeMotion(PvpRangeMotion::Advance, 38.0f, 38.0f, 30.0f, 36.0f, 40.0f));
++              SelectPvpRangeMotion(PvpRangeMotion::Advance, 39.0f, 39.0f, 30.0f, 36.0f, 40.0f));
+     EXPECT_EQ(PvpRangeMotion::Hold,
+-              SelectPvpRangeMotion(PvpRangeMotion::Advance, 35.0f, 35.0f, 30.0f, 36.0f, 40.0f));
++              SelectPvpRangeMotion(PvpRangeMotion::Advance, 38.0f, 38.0f, 30.0f, 36.0f, 40.0f));
++}
++
++TEST(PvpMaintainedEffectPolicy, ActiveUtilityAurasYieldWithoutSuppressingDamageEffects)
++{
++    for (char const* spell : { "chains of ice", "concussive shot", "entangling roots", "fear",
++                               "hamstring", "hunter's mark", "polymorph", "slow", "wing clip" })
++        EXPECT_TRUE(ShouldSkipPvpMaintainedEffect(spell, true));
++
++    EXPECT_FALSE(ShouldSkipPvpMaintainedEffect("chains of ice", false));
++    for (char const* spell : { "black arrow", "explosive shot", "frost shock" })
++        EXPECT_FALSE(ShouldSkipPvpMaintainedEffect(spell, true));
+ }
+ 
+ TEST(PvpRangePolicy, HardCastsCanReserveAnInterruptiblePlantWindow)
+diff --git a/modules/mod-playerbots/t/PvpTacticalScenarioMatrix.md b/modules/mod-playerbots/t/PvpTacticalScenarioMatrix.md
+index dc1d1665b2dc1adfd7532f19cf830d09fac91488..5f4e26ace04bbe051028d58928e0f014651e5879 100644
+--- a/modules/mod-playerbots/t/PvpTacticalScenarioMatrix.md
++++ b/modules/mod-playerbots/t/PvpTacticalScenarioMatrix.md
+@@ -190,12 +190,21 @@ off-target outside the effect radius to guard against overly broad suppression.
+   Steady Shot instead of running while reporting no target.
+ - Have the opponent use Divine Shield or Ice Block while the bot is wounded.
+   With no valid secondary target, the bot should stop damage and recover toward
+-  95% health rather than idle. A mage in its own Ice Block holds at least 1.2
++  95% health rather than idle; the player tactical trigger must remain active
++  even though normal threat selection temporarily yields. A mage in its own Ice Block holds at least 1.2
+   seconds, then cancels early when the opponent is rooted, safely distant, low,
+   or no longer applying burst; it never waits the full ten seconds by default.
+ - Cast Blink and Frost Nova during an active mage retreat. Frost Nova must leave
+   the existing spline intact; Blink must immediately replace its now-stale
+   landing path. Neither instant spell may request a hard-cast plant window.
++- Duel a Death Knight against a hunter whose pet is applying pressure. After
++  Chains of Ice lands on the pet, the hostile-pet action must yield while that
++  aura remains active so pursuit and owner pressure continue; it must not spend
++  every tactical tick merely overwriting the same slow duration.
++- Start a ranged correction outside a 30--40 yard comfort band. Retreat should
++  stop near 32 yards and advance near 38 yards, leaving the full useful band
++  stable instead of driving to one exact 36-yard point. Continuous retreat may
++  still run indefinitely while a pursuer prevents the distance from opening.
+ 
+ - In a mage or shadow-priest duel, begin a hard cast while a tactical retreat
+   spline is active and the pursuer is at least 18 yards away. Movement must stop
