@@ -744,6 +744,10 @@ foreach ($patchDefinition in @(
     @{ Name = '0039-playerbot-pvp-life-duel-ownership.patch'; Markers = @('EnsureDuelArea', 'AREA_FLAG_ALLOW_DUELS', 'DuelAreaValidated', '-new rpg,-rpg,-travel', 'a.Level > b.Level') }
 )) {
     $patchText = Get-Content -LiteralPath (Join-Path $repoRoot "patches\$($patchDefinition.Name)") -Raw
+    if ($patchDefinition.Name -eq '0038-playerbot-pvp-duel-reengagement-and-escape-roots.patch' -and
+        $patchText -match '(?m)^diff --git a/modules/mod-playerbots/mod-playerbots\.cmake ') {
+        throw '0038 不得重复引入 0020 已有的 PvP 测试构建配置。'
+    }
     foreach ($marker in $patchDefinition.Markers) {
         if ($patchText -notmatch [regex]::Escape($marker)) {
             throw "决斗修复补丁 $($patchDefinition.Name) 缺少标记：$marker"
