@@ -514,9 +514,10 @@ diff --git a/modules/mod-playerbots/src/Db/PlayerbotRepository.cpp b/modules/mod
 index b516a8e4..6e5aef9e 100644
 --- a/modules/mod-playerbots/src/Db/PlayerbotRepository.cpp
 +++ b/modules/mod-playerbots/src/Db/PlayerbotRepository.cpp
-@@ -6,6 +6,34 @@
+@@ -6,7 +6,35 @@
  
  #include "PlayerbotRepository.h"
+ #include "PlayerbotsDatabase.h"
  #include "AiObjectContext.h"
 +#include <algorithm>
 +#include <cctype>
@@ -706,4 +707,3 @@ index ef39400f..b0f54f61 100644
          }
  
          sRandomPlayerbotMgr.OnPlayerLogout(player);
-

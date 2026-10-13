@@ -1,0 +1,965 @@
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
+index 4cf90639..45d01a0e 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
+@@ -2159,7 +2159,12 @@ bool PvpTacticalSpecPolicyAction::isUseful()
+ {
+     if (!bot->IsAlive() || bot->IsNonMeleeSpellCast(false))
+         return false;
+-    switch (DetectPvpArchetype(botAI))
++    PvpArchetype const archetype = DetectPvpArchetype(botAI);
++    if (archetype == PvpArchetype::HolyPaladin || archetype == PvpArchetype::HolyPriest ||
++        archetype == PvpArchetype::RestorationShaman)
++        return ResolvePvpClassActionTarget(botAI) != nullptr ||
++               ResolvePvpSupportTarget(botAI, 0.20f) != nullptr;
++    switch (archetype)
+     {
+         case PvpArchetype::FuryWarrior:
+         case PvpArchetype::ProtectionWarrior:
+@@ -2185,36 +2190,41 @@ bool PvpTacticalSpecPolicyAction::isUseful()
+ 
+ bool PvpTacticalSpecPolicyAction::Execute(Event /*event*/)
+ {
++    PvpArchetype const archetype = DetectPvpArchetype(botAI);
++    bool const healerPolicy = archetype == PvpArchetype::HolyPaladin ||
++        archetype == PvpArchetype::HolyPriest || archetype == PvpArchetype::RestorationShaman;
+     Unit* target = ResolvePvpClassActionTarget(botAI);
+-    if (!target || !target->IsPlayer() || !target->IsAlive())
++    if ((!target || !target->IsPlayer() || !target->IsAlive()) && !healerPolicy)
+         return false;
++    if (target && (!target->IsPlayer() || !target->IsAlive()))
++        target = nullptr;
+ 
+     PvpSnapshot const snapshot = GetPvpSnapshot(botAI);
+     PvpSpecPlan const& plan = snapshot.specPlan;
+     PvpTacticalState& state = GetPvpTacticalState(botAI);
+     uint32 const now = getMSTime();
+-    float const distance = bot->GetDistance2d(target);
+-    bool const melee = bot->IsWithinMeleeRange(target);
++    float const distance = target ? bot->GetDistance2d(target) : 0.0f;
++    bool const melee = target && bot->IsWithinMeleeRange(target);
+     bool const commit = plan.phase == PvpSpecPhase::Commit || plan.phase == PvpSpecPhase::Finish;
+     bool const survive = plan.phase == PvpSpecPhase::Survive;
+-    bool const targetProtected = snapshot.targetMajorDefensive ||
++    bool const targetProtected = target && (snapshot.targetMajorDefensive ||
+         snapshot.targetControlState == PvpControlState::DamageBreakable ||
+-        snapshot.targetControlState == PvpControlState::DamageImmune;
+-    bool const targetConnected = melee ||
++        snapshot.targetControlState == PvpControlState::DamageImmune);
++    bool const targetConnected = target && (melee ||
+         ((botAI->IsRanged(bot, true) || botAI->IsHeal(bot)) && distance <= 35.0f) ||
+-        snapshot.targetControlState == PvpControlState::DamageSafe;
++        snapshot.targetControlState == PvpControlState::DamageSafe);
+     Unit* controlTarget = plan.controlTarget.IsEmpty() ? nullptr : botAI->GetUnit(plan.controlTarget);
+     Unit* support = ResolvePvpSupportTarget(botAI, 0.20f);
+     if (!support)
+         support = bot;
+ 
+-    if (!bot->duel && plan.phase != PvpSpecPhase::Survive &&
++    if (target && !bot->duel && plan.phase != PvpSpecPhase::Survive &&
+         plan.phase != PvpSpecPhase::Peel && plan.phase != PvpSpecPhase::Recover &&
+         snapshot.recommendedTarget != snapshot.primaryTarget)
+         if (botAI->DoSpecificAction("pvp tactical target swap", Event(), true))
+             return true;
+ 
+-    if ((bot->getClass() == CLASS_HUNTER || bot->getClass() == CLASS_WARLOCK) &&
++    if (target && (bot->getClass() == CLASS_HUNTER || bot->getClass() == CLASS_WARLOCK) &&
+         CanDamagePvpTarget(botAI, target))
+         if (Pet* pet = bot->GetPet(); pet && pet->IsAlive() && pet->GetVictim() != target)
+             if (botAI->DoSpecificAction("pvp tactical pet attack", Event(), true))
+@@ -2245,26 +2255,40 @@ bool PvpTacticalSpecPolicyAction::Execute(Event /*event*/)
+     };
+     auto markPrimaryDefensive = [&]() { state.lastPrimaryDefensiveAtMs = now; };
+     auto markSecondaryDefensive = [&]() { state.lastSecondaryDefensiveAtMs = now; };
+-    auto castBurst = [&](std::string const& spell, Unit* unit, char const* reason)
++    PvpSpecPolicyProfile const profile = GetPvpSpecPolicyProfile(archetype);
++    auto castBurst = [&](std::string const& spell, Unit* unit, char const* reason,
++                         PvpBurstResource resource)
+     {
++        bool const sameBundle = target && state.burstBundleTargetGuid == target->GetGUID() &&
++            state.burstBundleStartedAtMs && now - state.burstBundleStartedAtMs <= 5000;
++        uint32 const elapsed = state.lastBurstResourceAtMs ? now - state.lastBurstResourceAtMs : 1500;
+         if (plan.reservePrimaryBurst ||
+-            !ShouldCommitPvpPrimaryBurst(plan.phase, plan.commitScore, targetProtected, targetConnected) ||
+-            (state.lastPrimaryBurstAtMs && now - state.lastPrimaryBurstAtMs < 1500))
++            !ShouldCommitPvpPrimaryBurst(plan.phase, plan.commitScore, targetProtected,
++                                         targetConnected, profile.commitThreshold) ||
++            !ShouldSequencePvpBurst(state.lastBurstResource, resource, elapsed, sameBundle))
+             return false;
+         if (!cast(spell, unit, reason))
+             return false;
+-        state.lastPrimaryBurstAtMs = now;
++        if (!sameBundle)
++        {
++            state.burstBundleStartedAtMs = now;
++            state.burstBundleTargetGuid = target->GetGUID();
++        }
++        state.lastBurstResource = resource;
++        state.lastBurstResourceAtMs = now;
+         return true;
+     };
+ 
+-    switch (snapshot.archetype)
++    switch (archetype)
+     {
+         case PvpArchetype::FeralDruid:
+         {
+             bool const instantNature = botAI->HasAura("predator's swiftness", bot);
+             PvpProcUse const predatoryUse = SelectPvpProcUse(
+-                instantNature ? 1 : 0, 1, bot->GetHealthPct() <= 55.0f,
+-                !plan.reserveControl, commit);
++                instantNature ? 1 : 0, 1,
++                ScorePvpProcUse(archetype, bot->GetHealthPct(), support->GetHealthPct(),
++                                target->GetHealthPct(), snapshot.incomingBurstScore,
++                                !plan.reserveControl, targetProtected, plan.phase));
+             if ((botAI->IsMovementImpaired(bot) || bot->HasRootAura()) &&
+                 bot->GetShapeshiftForm() != FORM_NONE)
+             {
+@@ -2305,7 +2329,8 @@ bool PvpTacticalSpecPolicyAction::Execute(Event /*event*/)
+             }
+             if (!botAI->HasAura("cat form", bot) && cast("cat form", bot, "feral-pressure-cat"))
+                 return true;
+-            if (commit && melee && castBurst("berserk", bot, "feral-berserk"))
++            if (commit && melee && castBurst("berserk", bot, "feral-berserk",
++                                             PvpBurstResource::PrimaryTransformation))
+                 return true;
+             if (!melee)
+                 return false;
+@@ -2332,6 +2357,8 @@ bool PvpTacticalSpecPolicyAction::Execute(Event /*event*/)
+             bool const trapReserved = ShouldReserveSurvivalTrap(
+                 controlTarget && controlTarget != target,
+                 controlTarget && GetPvpControlState(controlTarget) != PvpControlState::None,
++                controlTarget && controlTarget->IsPlayer() &&
++                    PlayerbotAI::IsHeal(controlTarget->ToPlayer(), true),
+                 plan.phase);
+             if (lockAndLoad && (!state.lastExplosiveShotAtMs || now - state.lastExplosiveShotAtMs >= 1100) &&
+                 cast("explosive shot", target, "survival-lock-and-load"))
+@@ -2365,8 +2392,11 @@ bool PvpTacticalSpecPolicyAction::Execute(Event /*event*/)
+             Aura* maelstrom = botAI->GetAura("maelstrom weapon", bot, false, true);
+             uint8 const stacks = maelstrom ? maelstrom->GetStackAmount() : 0;
+             PvpProcUse const maelstromUse = SelectPvpProcUse(
+-                stacks, 5, survive || support->GetHealthPct() <= 55.0f,
+-                !plan.reserveControl && controlTarget && controlTarget != target, true);
++                stacks, 5,
++                ScorePvpProcUse(archetype, bot->GetHealthPct(), support->GetHealthPct(),
++                                target->GetHealthPct(), snapshot.incomingBurstScore,
++                                !plan.reserveControl && controlTarget && controlTarget != target,
++                                targetProtected, plan.phase));
+             SpellInfo const* enemySpell = snapshot.enemyCastSpellId ?
+                 sSpellMgr->GetSpellInfo(snapshot.enemyCastSpellId) : nullptr;
+             bool const incomingFear = enemySpell &&
+@@ -2385,7 +2415,8 @@ bool PvpTacticalSpecPolicyAction::Execute(Event /*event*/)
+                     pressure("lightning bolt", target, "enhancement-maelstrom-damage"))
+                     return true;
+             }
+-            if ((commit || survive) && melee && castBurst("feral spirit", bot, "enhancement-feral-spirit"))
++            if ((commit || survive) && melee && castBurst("feral spirit", bot, "enhancement-feral-spirit",
++                                                          PvpBurstResource::PetBurst))
+                 return true;
+             if (snapshot.magicPressureScore >= 0.45f && target->IsNonMeleeSpellCast(false) &&
+                 cast("grounding totem", bot, "enhancement-grounding"))
+@@ -2432,7 +2463,8 @@ bool PvpTacticalSpecPolicyAction::Execute(Event /*event*/)
+             if (botAI->HasAura("hot streak", bot) && !snapshot.targetMajorDefensive &&
+                 pressure("pyroblast", target, "fire-hot-streak"))
+                 return true;
+-            if (commit && castBurst("combustion", bot, "fire-combustion"))
++            if (commit && castBurst("combustion", bot, "fire-combustion",
++                                    PvpBurstResource::PrimaryDamageAmp))
+                 return true;
+             if (bot->isMoving())
+                 return pressure("fire blast", target, "fire-moving-fire-blast");
+@@ -2456,7 +2488,8 @@ bool PvpTacticalSpecPolicyAction::Execute(Event /*event*/)
+             bool const petConnected = pet && pet->IsAlive() && pet->GetVictim() == target;
+             bool const targetConstrained = melee || snapshot.targetControlState == PvpControlState::DamageSafe;
+             if (commit && (petConnected || targetConstrained) && distance <= 15.0f &&
+-                castBurst("metamorphosis", bot, "demo-metamorphosis"))
++                castBurst("metamorphosis", bot, "demo-metamorphosis",
++                          PvpBurstResource::PrimaryTransformation))
+                 return true;
+             if (botAI->HasAura("metamorphosis", bot))
+             {
+@@ -2582,7 +2615,8 @@ bool PvpTacticalSpecPolicyAction::Execute(Event /*event*/)
+         }
+         case PvpArchetype::FrostDeathKnight:
+         {
+-            if (ShouldSpendPvpMobility(snapshot.observedCooldowns.mobility, distance,
++            if (ShouldSpendPvpMobility(snapshot.observedCooldowns.mobility,
++                                       snapshot.observedCooldowns.mobilityConfidence, distance,
+                                        botAI->IsMovementImpaired(bot), survive) &&
+                 distance <= 30.0f &&
+                 cast("death grip", target, "frost-dk-post-mobility-grip"))
+@@ -2597,9 +2631,12 @@ bool PvpTacticalSpecPolicyAction::Execute(Event /*event*/)
+                 return true;
+             if (commit && melee)
+             {
+-                if (castBurst("unbreakable armor", bot, "frost-dk-unbreakable-armor") ||
+-                    castBurst("deathchill", bot, "frost-dk-deathchill") ||
+-                    castBurst("empower rune weapon", bot, "frost-dk-empower-rune-weapon"))
++                if (castBurst("unbreakable armor", bot, "frost-dk-unbreakable-armor",
++                              PvpBurstResource::PrimaryDamageAmp) ||
++                    castBurst("deathchill", bot, "frost-dk-deathchill",
++                              PvpBurstResource::SecondaryDamageAmp) ||
++                    castBurst("empower rune weapon", bot, "frost-dk-empower-rune-weapon",
++                              PvpBurstResource::ExecuteResource))
+                     return true;
+             }
+             if (botAI->HasAura("rime", bot) && pressure("howling blast", target, "frost-dk-rime"))
+@@ -2616,7 +2653,8 @@ bool PvpTacticalSpecPolicyAction::Execute(Event /*event*/)
+             if (pet && pet->IsAlive() && pet->GetHealthPct() <= 45.0f &&
+                 cast("mend pet", pet, "bm-mend-pet"))
+                 return true;
+-            if (ShouldSpendPvpMobility(snapshot.observedCooldowns.mobility, distance,
++            if (ShouldSpendPvpMobility(snapshot.observedCooldowns.mobility,
++                                       snapshot.observedCooldowns.mobilityConfidence, distance,
+                                        botAI->IsMovementImpaired(bot) || bot->HasRootAura(), survive) &&
+                 primaryDefensiveReady() &&
+                 cast("master's call", bot, "bm-masters-call"))
+@@ -2626,7 +2664,7 @@ bool PvpTacticalSpecPolicyAction::Execute(Event /*event*/)
+             }
+             bool const petConnected = pet && pet->IsAlive() && pet->GetVictim() == target;
+             if (commit && petConnected && !snapshot.targetMajorDefensive &&
+-                castBurst("bestial wrath", bot, "bm-bestial-wrath"))
++                castBurst("bestial wrath", bot, "bm-bestial-wrath", PvpBurstResource::PetBurst))
+                 return true;
+             if (petConnected && pressure("kill command", target, "bm-kill-command"))
+                 return true;
+@@ -2644,14 +2682,18 @@ bool PvpTacticalSpecPolicyAction::Execute(Event /*event*/)
+                 return true;
+             bool const targetSlowed = botAI->HasAura("hamstring", target, false, true) ||
+                                       target->HasRootAura() || target->HasAuraType(SPELL_AURA_MOD_STUN);
+-            if (ShouldSpendPvpMobility(snapshot.observedCooldowns.mobility, distance,
++            if (ShouldSpendPvpMobility(snapshot.observedCooldowns.mobility,
++                                       snapshot.observedCooldowns.mobilityConfidence, distance,
+                                        botAI->IsMovementImpaired(bot), survive) &&
+                 cast("heroic fury", bot, "fury-heroic-fury"))
+                 return true;
+             if (commit && melee && targetSlowed)
+             {
+-                if (castBurst("death wish", bot, "fury-death-wish") ||
+-                    (plan.phase == PvpSpecPhase::Finish && castBurst("recklessness", bot, "fury-recklessness")))
++                if (castBurst("death wish", bot, "fury-death-wish",
++                              PvpBurstResource::PrimaryDamageAmp) ||
++                    (plan.phase == PvpSpecPhase::Finish &&
++                     castBurst("recklessness", bot, "fury-recklessness",
++                               PvpBurstResource::SecondaryDamageAmp)))
+                     return true;
+             }
+             if (target->GetHealthPct() <= 20.0f && pressure("execute", target, "fury-execute"))
+@@ -2734,7 +2776,8 @@ bool PvpTacticalSpecPolicyAction::Execute(Event /*event*/)
+             if (plan.reserveSurvivalResource || bot->GetHealthPct() <= 78.0f)
+                 if (pressure("death strike", target, "blood-dk-death-strike"))
+                     return true;
+-            if (commit && melee && castBurst("dancing rune weapon", target, "blood-dk-dancing-rune-weapon"))
++            if (commit && melee && castBurst("dancing rune weapon", target, "blood-dk-dancing-rune-weapon",
++                                             PvpBurstResource::PrimaryTransformation))
+                 return true;
+             return melee && (pressure("heart strike", target, "blood-dk-heart-strike") ||
+                              pressure("death strike", target, "blood-dk-death-strike-fallback"));
+@@ -2743,14 +2786,17 @@ bool PvpTacticalSpecPolicyAction::Execute(Event /*event*/)
+         {
+             uint8 const combo = bot->GetComboPoints();
+             if (distance >= 12.0f &&
+-                ShouldSpendPvpMobility(snapshot.observedCooldowns.mobility, distance,
++                ShouldSpendPvpMobility(snapshot.observedCooldowns.mobility,
++                                       snapshot.observedCooldowns.mobilityConfidence, distance,
+                                        botAI->IsMovementImpaired(bot), survive) &&
+                 cast("sprint", bot, "combat-rogue-sprint"))
+                 return true;
+             if (commit && melee && !snapshot.targetMajorDefensive)
+             {
+-                if (castBurst("killing spree", target, "combat-rogue-killing-spree") ||
+-                    castBurst("adrenaline rush", bot, "combat-rogue-adrenaline-rush"))
++                if (castBurst("killing spree", target, "combat-rogue-killing-spree",
++                              PvpBurstResource::PrimaryTransformation) ||
++                    castBurst("adrenaline rush", bot, "combat-rogue-adrenaline-rush",
++                              PvpBurstResource::PrimaryDamageAmp))
+                     return true;
+                 bool const usefulSecondTarget = snapshot.recommendedTarget != snapshot.primaryTarget;
+                 if (usefulSecondTarget && cast("blade flurry", bot, "combat-rogue-blade-flurry"))
+@@ -2765,7 +2811,7 @@ bool PvpTacticalSpecPolicyAction::Execute(Event /*event*/)
+         {
+             SpellInfo const* enemySpell = snapshot.enemyCastSpellId ?
+                 sSpellMgr->GetSpellInfo(snapshot.enemyCastSpellId) : nullptr;
+-            bool const incomingPolymorph = enemySpell &&
++            bool const incomingPolymorph = target && enemySpell &&
+                 (enemySpell->GetAllEffectsMechanicMask() & (1ULL << MECHANIC_POLYMORPH)) &&
+                 target->GetTarget() == bot->GetGUID() && snapshot.enemyCastProgress >= 0.70f;
+             if (incomingPolymorph && cast("shadow word: death", target, "holy-priest-death-poly"))
+diff --git a/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.cpp b/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.cpp
+index 00a749ec..2a175200 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.cpp
+@@ -429,6 +429,13 @@ bool PvpTacticalPlayerTargetTrigger::IsActive()
+         if (opponent && opponent->IsAlive() && bot->CanSeeOrDetect(opponent, false, true))
+             target = opponent;
+     }
++    if (!target)
++    {
++        PvpArchetype const archetype = DetectPvpArchetype(botAI);
++        bool const healerPolicy = archetype == PvpArchetype::HolyPaladin ||
++            archetype == PvpArchetype::HolyPriest || archetype == PvpArchetype::RestorationShaman;
++        return healerPolicy && ResolvePvpSupportTarget(botAI, 0.20f) != nullptr;
++    }
+     if (!target || !target->IsPlayer())
+         return false;
+ 
+diff --git a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp
+index 5e82e3d5..1e135502 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp
+@@ -871,11 +871,8 @@ void PvpTacticalState::Reset()
+     instantKiteUntilMs = 0;
+     lastCadencedControlAtMs = 0;
+     lastCadencedControlSpellId = 0;
+-    observedMobilityAtMs = 0;
+-    observedDefensiveAtMs = 0;
+-    observedImmunityAtMs = 0;
+-    observedPolicyTargetAtMs = 0;
+-    lastPrimaryBurstAtMs = 0;
++    lastBurstResourceAtMs = 0;
++    burstBundleStartedAtMs = 0;
+     lastPrimaryMobilityAtMs = 0;
+     lastPrimaryDefensiveAtMs = 0;
+     lastSecondaryDefensiveAtMs = 0;
+@@ -889,7 +886,7 @@ void PvpTacticalState::Reset()
+     controlWindowTargetGuid.Clear();
+     instantKiteThreatGuid.Clear();
+     lastCadencedControlTargetGuid.Clear();
+-    observedPolicyTargetGuid.Clear();
++    burstBundleTargetGuid.Clear();
+     earthShieldTargetGuid.Clear();
+     desiredDistance = 0.0f;
+     movementProgressX = 0.0f;
+@@ -905,8 +902,8 @@ void PvpTacticalState::Reset()
+     interruptCommitPct = 0.0f;
+     ownFakeCastCancelPct = 0.0f;
+     observedEnemyCastProgress = 0.0f;
+-    observedPolicyTargetX = 0.0f;
+-    observedPolicyTargetY = 0.0f;
++    lastBurstResource = PvpBurstResource::None;
++    enemyMemory.clear();
+     druidOriginalForm = 0;
+     rangeMotion = PvpRangeMotion::Hold;
+     duelOrbitDirection = 0;
+@@ -1059,13 +1056,65 @@ ObservedPvpCooldownState ClassifyObservedPvpCooldown(uint32 now, uint32 observed
+ PvpSpecPhase SelectPvpSpecPhase(bool allyCritical, bool selfCritical, bool targetFinish,
+                                 bool targetProtected, bool safeRecovery, bool resetRequested,
+                                 float incomingBurstScore, float killWindowScore)
++{
++    return SelectPvpSpecPhase(PvpSpecPolicyProfile(), allyCritical, selfCritical, targetFinish,
++                              targetProtected, safeRecovery, resetRequested,
++                              incomingBurstScore, killWindowScore);
++}
++
++PvpSpecPolicyProfile GetPvpSpecPolicyProfile(PvpArchetype archetype)
++{
++    PvpSpecPolicyProfile profile;
++    switch (archetype)
++    {
++        case PvpArchetype::FuryWarrior:
++        case PvpArchetype::FireMage:
++            profile.setupThreshold = 0.30f;
++            profile.commitThreshold = 0.56f;
++            profile.finishThreshold = 0.76f;
++            profile.surviveThreshold = 0.84f;
++            break;
++        case PvpArchetype::SubtletyRogue:
++        case PvpArchetype::FeralDruid:
++        case PvpArchetype::AssassinationRogue:
++            profile.setupThreshold = 0.32f;
++            profile.commitThreshold = 0.60f;
++            profile.resetBias = 0.12f;
++            break;
++        case PvpArchetype::BloodDeathKnight:
++        case PvpArchetype::ProtectionWarrior:
++        case PvpArchetype::ProtectionPaladin:
++            profile.commitThreshold = 0.68f;
++            profile.surviveThreshold = 0.68f;
++            profile.resetBias = -0.10f;
++            break;
++        case PvpArchetype::HolyPaladin:
++        case PvpArchetype::HolyPriest:
++        case PvpArchetype::RestorationShaman:
++        case PvpArchetype::DisciplinePriest:
++        case PvpArchetype::RestorationDruid:
++            profile.commitThreshold = 0.74f;
++            profile.surviveThreshold = 0.66f;
++            profile.resetBias = -0.06f;
++            break;
++        default:
++            break;
++    }
++    return profile;
++}
++
++PvpSpecPhase SelectPvpSpecPhase(PvpSpecPolicyProfile const& profile, bool allyCritical,
++                                bool selfCritical, bool targetFinish, bool targetProtected,
++                                bool safeRecovery, bool resetRequested, float incomingBurstScore,
++                                float killWindowScore)
+ {
+     // A nearly secured kill may be worth finishing through moderate pressure,
+     // but never through a true lethal enemy go. This is the shared answer to
+     // "Finish or Reset?" used by every specialization policy.
+-    if (targetFinish && killWindowScore >= 0.82f && incomingBurstScore < 0.85f && !targetProtected)
++    if (targetFinish && killWindowScore >= profile.finishThreshold &&
++        incomingBurstScore < std::max(0.85f, profile.surviveThreshold + 0.07f) && !targetProtected)
+         return PvpSpecPhase::Finish;
+-    if (selfCritical || incomingBurstScore >= 0.78f)
++    if (selfCritical || incomingBurstScore >= profile.surviveThreshold)
+         return PvpSpecPhase::Survive;
+     if (allyCritical)
+         return PvpSpecPhase::Peel;
+@@ -1077,46 +1126,107 @@ PvpSpecPhase SelectPvpSpecPhase(bool allyCritical, bool selfCritical, bool targe
+         return PvpSpecPhase::Recover;
+     if (targetFinish)
+         return PvpSpecPhase::Finish;
+-    if (killWindowScore >= 0.62f)
++    if (killWindowScore >= profile.commitThreshold)
+         return PvpSpecPhase::Commit;
+-    if (killWindowScore >= 0.35f)
++    if (killWindowScore >= profile.setupThreshold)
+         return PvpSpecPhase::Setup;
+     return PvpSpecPhase::Pressure;
+ }
+ 
+ bool ShouldCommitPvpPrimaryBurst(PvpSpecPhase phase, float commitScore,
+-                                 bool targetProtected, bool targetConnected)
++                                 bool targetProtected, bool targetConnected,
++                                 float requiredCommitScore)
+ {
+-    return !targetProtected && targetConnected && commitScore >= 0.62f &&
++    return !targetProtected && targetConnected && commitScore >= requiredCommitScore &&
+            (phase == PvpSpecPhase::Commit || phase == PvpSpecPhase::Finish);
+ }
+ 
+ bool ShouldSpendPvpMobility(ObservedPvpCooldownState observedEnemyMobility,
+-                            float targetDistance, bool movementImpaired, bool emergency)
++                            PvpObservationConfidence confidence, float targetDistance,
++                            bool movementImpaired, bool emergency)
+ {
+     if (emergency && movementImpaired)
+         return true;
+     bool const enemyMobilitySpent = observedEnemyMobility == ObservedPvpCooldownState::RecentlyUsed ||
+                                     observedEnemyMobility == ObservedPvpCooldownState::LikelyUnavailable;
+-    return enemyMobilitySpent && targetDistance >= 8.0f;
++    if (!enemyMobilitySpent || confidence == PvpObservationConfidence::None)
++        return false;
++    if (confidence == PvpObservationConfidence::Inferred)
++        return targetDistance >= 18.0f;
++    return targetDistance >= 8.0f;
+ }
+ 
+ bool ShouldReserveSurvivalTrap(bool controlCandidate, bool controlAlreadyActive,
+-                               PvpSpecPhase phase)
++                               bool controlCandidateIsHealer, PvpSpecPhase phase)
++{
++    return controlCandidate && !controlAlreadyActive &&
++        (phase != PvpSpecPhase::Finish || controlCandidateIsHealer);
++}
++
++bool ArePvpBurstResourcesCompatible(PvpBurstResource previous, PvpBurstResource next)
+ {
+-    return controlCandidate && !controlAlreadyActive && phase != PvpSpecPhase::Finish;
++    if (previous == PvpBurstResource::None || next == PvpBurstResource::None || previous == next)
++        return false;
++    if (previous == PvpBurstResource::ExecuteResource || next == PvpBurstResource::ExecuteResource)
++        return true;
++    if (previous == PvpBurstResource::PetBurst || next == PvpBurstResource::PetBurst)
++        return previous != PvpBurstResource::PetBurst && next != PvpBurstResource::PetBurst;
++    return (previous == PvpBurstResource::PrimaryTransformation || next == PvpBurstResource::PrimaryTransformation) ||
++           (previous == PvpBurstResource::PrimaryDamageAmp && next == PvpBurstResource::SecondaryDamageAmp) ||
++           (previous == PvpBurstResource::SecondaryDamageAmp && next == PvpBurstResource::PrimaryDamageAmp);
++}
++
++bool ShouldSequencePvpBurst(PvpBurstResource previous, PvpBurstResource next,
++                            uint32 elapsedMs, bool sameCommitBundle)
++{
++    if (previous == PvpBurstResource::None || elapsedMs >= 1500)
++        return true;
++    return sameCommitBundle && elapsedMs >= 150 && ArePvpBurstResourcesCompatible(previous, next);
+ }
+ 
+-PvpProcUse SelectPvpProcUse(uint8 stacks, uint8 requiredStacks, bool criticalHeal,
+-                            bool controlSetup, bool damageWindow)
++bool ShouldExpirePvpEnemyMemory(uint32 now, uint32 lastSeenAtMs, uint32 ttlMs)
++{
++    return lastSeenAtMs && now - lastSeenAtMs > ttlMs;
++}
++
++PvpProcScores ScorePvpProcUse(PvpArchetype archetype, float selfHealthPct,
++                              float supportHealthPct, float targetHealthPct,
++                              float incomingBurstScore, bool controlSetup,
++                              bool targetProtected, PvpSpecPhase phase)
++{
++    PvpProcScores scores;
++    float const selfMissing = std::clamp((100.0f - selfHealthPct) / 100.0f, 0.0f, 1.0f);
++    float const supportMissing = std::clamp((100.0f - supportHealthPct) / 100.0f, 0.0f, 1.0f);
++    float const targetMissing = std::clamp((100.0f - targetHealthPct) / 100.0f, 0.0f, 1.0f);
++    float healNeed = selfMissing;
++    if (archetype == PvpArchetype::EnhancementShaman)
++        healNeed = std::max(selfMissing, supportMissing * 0.92f);
++    scores.heal = healNeed * 0.90f + incomingBurstScore * 0.28f;
++    if (selfHealthPct <= 30.0f || supportHealthPct <= 25.0f)
++        scores.heal += 0.55f;
++    scores.control = controlSetup ? 0.58f : 0.0f;
++    if (phase == PvpSpecPhase::Setup || phase == PvpSpecPhase::Peel || phase == PvpSpecPhase::Reset)
++        scores.control += 0.24f;
++    scores.damage = targetProtected ? 0.0f : 0.30f + targetMissing * 0.58f;
++    if (phase == PvpSpecPhase::Commit)
++        scores.damage += 0.22f;
++    else if (phase == PvpSpecPhase::Finish)
++        scores.damage += 0.62f;
++    return scores;
++}
++
++PvpProcUse SelectPvpProcUse(uint8 stacks, uint8 requiredStacks, PvpProcScores const& scores)
+ {
+     if (stacks < requiredStacks)
+         return PvpProcUse::Hold;
+-    if (criticalHeal)
++    float const best = std::max({ scores.heal, scores.control, scores.damage });
++    if (best <= 0.0f)
++        return PvpProcUse::Hold;
++    if (scores.heal >= scores.control && scores.heal >= scores.damage)
+         return PvpProcUse::Heal;
+-    if (controlSetup)
++    if (scores.control >= scores.damage)
+         return PvpProcUse::Control;
+-    return damageWindow ? PvpProcUse::Damage : PvpProcUse::Hold;
++    return PvpProcUse::Damage;
+ }
+ 
+ PvpSpecPlan BuildPvpSpecPlan(PlayerbotAI* botAI, PvpSnapshot const& snapshot)
+@@ -1129,14 +1239,12 @@ PvpSpecPlan BuildPvpSpecPlan(PlayerbotAI* botAI, PvpSnapshot const& snapshot)
+ 
+     plan.killTarget = snapshot.primaryTarget;
+     plan.controlTarget = snapshot.ccTarget;
++    PvpSpecPolicyProfile const profile = GetPvpSpecPolicyProfile(snapshot.archetype);
+     bool const targetProtected = snapshot.targetMajorDefensive ||
+         snapshot.targetControlState == PvpControlState::DamageImmune ||
+         snapshot.targetControlState == PvpControlState::DamageBreakable;
+     bool const safeRecovery = bot->GetHealthPct() < 55.0f &&
+         (snapshot.controlWindow.active || targetProtected || snapshot.incomingBurstScore < 0.30f);
+-    bool const resetRequested = snapshot.intent == PvpIntent::Reset ||
+-        (bot->GetHealthPct() < 40.0f && target->GetHealthPct() > 55.0f &&
+-         snapshot.killWindowScore < 0.45f);
+     bool const allyCritical = snapshot.triage.targetGuid != bot->GetGUID() &&
+         snapshot.triage.dangerScore >= 0.72f;
+     bool const selfCritical = bot->GetHealthPct() <= 25.0f;
+@@ -1145,7 +1253,22 @@ PvpSpecPlan BuildPvpSpecPlan(PlayerbotAI* botAI, PvpSnapshot const& snapshot)
+     float observedOpportunity = 0.0f;
+     if (snapshot.observedCooldowns.mobility == ObservedPvpCooldownState::RecentlyUsed ||
+         snapshot.observedCooldowns.mobility == ObservedPvpCooldownState::LikelyUnavailable)
+-        observedOpportunity += 0.30f;
++    {
++        switch (snapshot.observedCooldowns.mobilityConfidence)
++        {
++            case PvpObservationConfidence::Confirmed:
++                observedOpportunity += 0.30f;
++                break;
++            case PvpObservationConfidence::Probable:
++                observedOpportunity += 0.20f;
++                break;
++            case PvpObservationConfidence::Inferred:
++                observedOpportunity += 0.08f;
++                break;
++            default:
++                break;
++        }
++    }
+     if (snapshot.observedCooldowns.majorDefensive == ObservedPvpCooldownState::LikelyUnavailable ||
+         snapshot.observedCooldowns.immunity == ObservedPvpCooldownState::LikelyUnavailable)
+         observedOpportunity += 0.12f;
+@@ -1158,17 +1281,18 @@ PvpSpecPlan BuildPvpSpecPlan(PlayerbotAI* botAI, PvpSnapshot const& snapshot)
+                                   0.0f, 1.0f);
+     plan.resetScore = std::clamp((100.0f - bot->GetHealthPct()) / 100.0f * 0.65f +
+                                      snapshot.incomingBurstScore * 0.45f -
+-                                     snapshot.killWindowScore * 0.50f,
++                                     snapshot.killWindowScore * 0.50f + profile.resetBias,
+                                  0.0f, 1.0f);
+-    plan.phase = SelectPvpSpecPhase(allyCritical, selfCritical, targetFinish,
++    bool const resetRequested = snapshot.intent == PvpIntent::Reset || plan.resetScore >= 0.55f;
++    plan.phase = SelectPvpSpecPhase(profile, allyCritical, selfCritical, targetFinish,
+                                     targetProtected, safeRecovery, resetRequested,
+                                     snapshot.incomingBurstScore, snapshot.killWindowScore);
+     if ((plan.phase == PvpSpecPhase::Pressure || plan.phase == PvpSpecPhase::Setup) &&
+-        plan.commitScore >= 0.62f && !targetProtected)
++        plan.commitScore >= profile.commitThreshold && !targetProtected)
+         plan.phase = PvpSpecPhase::Commit;
+     plan.reservePrimaryBurst = targetProtected ||
+         (plan.phase != PvpSpecPhase::Commit && plan.phase != PvpSpecPhase::Finish) ||
+-        plan.commitScore < 0.62f;
++        plan.commitScore < profile.commitThreshold;
+     plan.reservePrimaryMobility =
+         snapshot.observedCooldowns.mobility != ObservedPvpCooldownState::RecentlyUsed &&
+         snapshot.observedCooldowns.mobility != ObservedPvpCooldownState::LikelyUnavailable &&
+@@ -1472,6 +1596,13 @@ PvpSnapshot PvpSnapshotValue::Calculate()
+ 
+     uint32 const now = getMSTime();
+     PvpTacticalState& state = GetPvpTacticalState(botAI);
++    for (auto itr = state.enemyMemory.begin(); itr != state.enemyMemory.end();)
++    {
++        if (ShouldExpirePvpEnemyMemory(now, itr->second.lastSeenAtMs, 60000))
++            itr = state.enemyMemory.erase(itr);
++        else
++            ++itr;
++    }
+     snapshot.capturedAtMs = now;
+     snapshot.archetype = DetectPvpArchetype(botAI);
+     snapshot.triage = CalculateTriage(botAI);
+@@ -1508,11 +1639,6 @@ PvpSnapshot PvpSnapshotValue::Calculate()
+     {
+         state.trackedPrimaryTarget.Clear();
+         state.targetAcquiredAtMs = 0;
+-        state.observedPolicyTargetGuid.Clear();
+-        state.observedPolicyTargetAtMs = 0;
+-        state.observedMobilityAtMs = 0;
+-        state.observedDefensiveAtMs = 0;
+-        state.observedImmunityAtMs = 0;
+         return snapshot;
+     }
+     if (state.trackedPrimaryTarget != current->GetGUID())
+@@ -1525,46 +1651,62 @@ PvpSnapshot PvpSnapshotValue::Calculate()
+     snapshot.targetControlState = GetPvpControlState(current);
+     snapshot.controlWindow = GetPvpControlWindow(botAI, current, snapshot.archetype);
+ 
+-    // The ledger only records public evidence. A large visible displacement is
+-    // treated as observed mobility; visible defensive/immunity auras refresh
+-    // their observation timestamp. It never asks the hostile Player object for
+-    // spell cooldowns or talents.
+-    if (state.observedPolicyTargetGuid != current->GetGUID())
++    // Each visible enemy owns a short-lived public-evidence ledger. Target swaps
++    // therefore do not erase what the bot actually saw, and one enemy's Blink
++    // can never be mistaken for another enemy's spent mobility.
++    EnemyPvpMemory& memory = state.enemyMemory[current->GetGUID()];
++    memory.lastSeenAtMs = now;
++    bool const explicitMobility =
++        botAI->HasAura("sprint", current, false, false) ||
++        botAI->HasAura("dash", current, false, false) ||
++        botAI->HasAura("nitro boosts", current, false, false);
++    if (explicitMobility)
+     {
+-        state.observedPolicyTargetGuid = current->GetGUID();
+-        state.observedPolicyTargetAtMs = now;
+-        state.observedPolicyTargetX = current->GetPositionX();
+-        state.observedPolicyTargetY = current->GetPositionY();
+-        state.observedMobilityAtMs = 0;
+-        state.observedDefensiveAtMs = 0;
+-        state.observedImmunityAtMs = 0;
++        memory.cooldowns.mobilityObservedAtMs = now;
++        memory.cooldowns.mobilitySource = PvpObservationSource::VisibleAura;
++        memory.cooldowns.mobilityConfidence = PvpObservationConfidence::Confirmed;
++    }
++    if (!memory.positionObservedAtMs)
++    {
++        memory.positionObservedAtMs = now;
++        memory.positionX = current->GetPositionX();
++        memory.positionY = current->GetPositionY();
+     }
+     else
+     {
+-        uint32 const observedElapsed = now - state.observedPolicyTargetAtMs;
+-        float const observedDx = current->GetPositionX() - state.observedPolicyTargetX;
+-        float const observedDy = current->GetPositionY() - state.observedPolicyTargetY;
+-        if (observedElapsed >= 100 && observedElapsed <= 900 &&
++        uint32 const observedElapsed = now - memory.positionObservedAtMs;
++        float const observedDx = current->GetPositionX() - memory.positionX;
++        float const observedDy = current->GetPositionY() - memory.positionY;
++        bool const forcedDisplacement =
++            current->HasUnitMovementFlag(MOVEMENTFLAG_FALLING | MOVEMENTFLAG_FALLING_FAR) ||
++            current->GetMotionMaster()->GetCurrentMovementGeneratorType() == EFFECT_MOTION_TYPE;
++        if (!explicitMobility && !forcedDisplacement && observedElapsed >= 100 && observedElapsed <= 900 &&
+             std::sqrt(observedDx * observedDx + observedDy * observedDy) >= 10.0f)
+-            state.observedMobilityAtMs = now;
+-        state.observedPolicyTargetAtMs = now;
+-        state.observedPolicyTargetX = current->GetPositionX();
+-        state.observedPolicyTargetY = current->GetPositionY();
++        {
++            memory.cooldowns.mobilityObservedAtMs = now;
++            memory.cooldowns.mobilitySource = PvpObservationSource::SpatialDisplacement;
++            memory.cooldowns.mobilityConfidence = PvpObservationConfidence::Inferred;
++        }
++        memory.positionObservedAtMs = now;
++        memory.positionX = current->GetPositionX();
++        memory.positionY = current->GetPositionY();
+     }
+     bool const explicitImmunity = current->HasAura(45438) || current->HasAura(642);
+     if (snapshot.targetMajorDefensive)
+-        state.observedDefensiveAtMs = now;
++        memory.cooldowns.defensiveObservedAtMs = now;
+     if (explicitImmunity)
+-        state.observedImmunityAtMs = now;
+-    snapshot.observedCooldowns.mobilityObservedAtMs = state.observedMobilityAtMs;
+-    snapshot.observedCooldowns.defensiveObservedAtMs = state.observedDefensiveAtMs;
+-    snapshot.observedCooldowns.immunityObservedAtMs = state.observedImmunityAtMs;
+-    snapshot.observedCooldowns.mobility =
+-        ClassifyObservedPvpCooldown(now, state.observedMobilityAtMs, 2500, 12000);
+-    snapshot.observedCooldowns.majorDefensive =
+-        ClassifyObservedPvpCooldown(now, state.observedDefensiveAtMs, 2500, 45000);
+-    snapshot.observedCooldowns.immunity =
+-        ClassifyObservedPvpCooldown(now, state.observedImmunityAtMs, 2500, 90000);
++        memory.cooldowns.immunityObservedAtMs = now;
++    if (snapshot.targetControlState != PvpControlState::None)
++        memory.lastControlAtMs = now;
++    if (HasMajorOffensive(current))
++        memory.lastMajorOffensiveAtMs = now;
++    memory.cooldowns.mobility = ClassifyObservedPvpCooldown(
++        now, memory.cooldowns.mobilityObservedAtMs, 2500, 12000);
++    memory.cooldowns.majorDefensive = ClassifyObservedPvpCooldown(
++        now, memory.cooldowns.defensiveObservedAtMs, 2500, 45000);
++    memory.cooldowns.immunity = ClassifyObservedPvpCooldown(
++        now, memory.cooldowns.immunityObservedAtMs, 2500, 90000);
++    snapshot.observedCooldowns = memory.cooldowns;
+ 
+     if (Unit* hostilePet = ResolvePvpHostilePet(botAI, 50.0f))
+     {
+diff --git a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h
+index 6e744ea9..83d5d8b8 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h
++++ b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h
+@@ -8,6 +8,7 @@
+ #include "ObjectGuid.h"
+ #include "Value.h"
+ 
++#include <map>
+ #include <string>
+ 
+ class Player;
+@@ -94,6 +95,31 @@ enum class ObservedPvpCooldownState : uint8
+     LikelyUnavailable
+ };
+ 
++enum class PvpObservationSource : uint8
++{
++    None,
++    VisibleAura,
++    SpatialDisplacement
++};
++
++enum class PvpObservationConfidence : uint8
++{
++    None,
++    Inferred,
++    Probable,
++    Confirmed
++};
++
++enum class PvpBurstResource : uint8
++{
++    None,
++    PrimaryTransformation,
++    PrimaryDamageAmp,
++    SecondaryDamageAmp,
++    PetBurst,
++    ExecuteResource
++};
++
+ enum class PvpProcUse : uint8
+ {
+     Hold,
+@@ -110,6 +136,36 @@ struct ObservedPvpCooldownLedger
+     uint32 mobilityObservedAtMs = 0;
+     uint32 defensiveObservedAtMs = 0;
+     uint32 immunityObservedAtMs = 0;
++    PvpObservationSource mobilitySource = PvpObservationSource::None;
++    PvpObservationConfidence mobilityConfidence = PvpObservationConfidence::None;
++};
++
++struct EnemyPvpMemory
++{
++    ObservedPvpCooldownLedger cooldowns;
++    uint32 lastSeenAtMs = 0;
++    uint32 lastControlAtMs = 0;
++    uint32 lastTrinketAtMs = 0;
++    uint32 lastMajorOffensiveAtMs = 0;
++    uint32 positionObservedAtMs = 0;
++    float positionX = 0.0f;
++    float positionY = 0.0f;
++};
++
++struct PvpProcScores
++{
++    float heal = 0.0f;
++    float control = 0.0f;
++    float damage = 0.0f;
++};
++
++struct PvpSpecPolicyProfile
++{
++    float setupThreshold = 0.35f;
++    float commitThreshold = 0.62f;
++    float finishThreshold = 0.82f;
++    float surviveThreshold = 0.78f;
++    float resetBias = 0.0f;
+ };
+ 
+ struct PvpSpecPlan
+@@ -271,11 +327,8 @@ struct PvpTacticalState
+     uint32 instantKiteUntilMs = 0;
+     uint32 lastCadencedControlAtMs = 0;
+     uint32 lastCadencedControlSpellId = 0;
+-    uint32 observedMobilityAtMs = 0;
+-    uint32 observedDefensiveAtMs = 0;
+-    uint32 observedImmunityAtMs = 0;
+-    uint32 observedPolicyTargetAtMs = 0;
+-    uint32 lastPrimaryBurstAtMs = 0;
++    uint32 lastBurstResourceAtMs = 0;
++    uint32 burstBundleStartedAtMs = 0;
+     uint32 lastPrimaryMobilityAtMs = 0;
+     uint32 lastPrimaryDefensiveAtMs = 0;
+     uint32 lastSecondaryDefensiveAtMs = 0;
+@@ -289,7 +342,7 @@ struct PvpTacticalState
+     ObjectGuid controlWindowTargetGuid;
+     ObjectGuid instantKiteThreatGuid;
+     ObjectGuid lastCadencedControlTargetGuid;
+-    ObjectGuid observedPolicyTargetGuid;
++    ObjectGuid burstBundleTargetGuid;
+     ObjectGuid earthShieldTargetGuid;
+     float desiredDistance = 0.0f;
+     float movementProgressX = 0.0f;
+@@ -305,8 +358,8 @@ struct PvpTacticalState
+     float interruptCommitPct = 0.0f;
+     float ownFakeCastCancelPct = 0.0f;
+     float observedEnemyCastProgress = 0.0f;
+-    float observedPolicyTargetX = 0.0f;
+-    float observedPolicyTargetY = 0.0f;
++    PvpBurstResource lastBurstResource = PvpBurstResource::None;
++    std::map<ObjectGuid, EnemyPvpMemory> enemyMemory;
+     uint32 druidOriginalForm = 0;
+     PvpRangeMotion rangeMotion = PvpRangeMotion::Hold;
+     int8 duelOrbitDirection = 0;
+@@ -449,14 +502,29 @@ ObservedPvpCooldownState ClassifyObservedPvpCooldown(uint32 now, uint32 observed
+ PvpSpecPhase SelectPvpSpecPhase(bool allyCritical, bool selfCritical, bool targetFinish,
+                                 bool targetProtected, bool safeRecovery, bool resetRequested,
+                                 float incomingBurstScore, float killWindowScore);
++PvpSpecPolicyProfile GetPvpSpecPolicyProfile(PvpArchetype archetype);
++PvpSpecPhase SelectPvpSpecPhase(PvpSpecPolicyProfile const& profile, bool allyCritical,
++                                bool selfCritical, bool targetFinish, bool targetProtected,
++                                bool safeRecovery, bool resetRequested, float incomingBurstScore,
++                                float killWindowScore);
+ bool ShouldCommitPvpPrimaryBurst(PvpSpecPhase phase, float commitScore,
+-                                 bool targetProtected, bool targetConnected);
++                                 bool targetProtected, bool targetConnected,
++                                 float requiredCommitScore = 0.62f);
+ bool ShouldSpendPvpMobility(ObservedPvpCooldownState observedEnemyMobility,
+-                            float targetDistance, bool movementImpaired, bool emergency);
++                            PvpObservationConfidence confidence, float targetDistance,
++                            bool movementImpaired, bool emergency);
+ bool ShouldReserveSurvivalTrap(bool controlCandidate, bool controlAlreadyActive,
+-                               PvpSpecPhase phase);
+-PvpProcUse SelectPvpProcUse(uint8 stacks, uint8 requiredStacks, bool criticalHeal,
+-                            bool controlSetup, bool damageWindow);
++                               bool controlCandidateIsHealer, PvpSpecPhase phase);
++bool ArePvpBurstResourcesCompatible(PvpBurstResource previous, PvpBurstResource next);
++bool ShouldSequencePvpBurst(PvpBurstResource previous, PvpBurstResource next,
++                            uint32 elapsedMs, bool sameCommitBundle);
++bool ShouldExpirePvpEnemyMemory(uint32 now, uint32 lastSeenAtMs, uint32 ttlMs);
++PvpProcScores ScorePvpProcUse(PvpArchetype archetype, float selfHealthPct,
++                              float supportHealthPct, float targetHealthPct,
++                              float incomingBurstScore, bool controlSetup,
++                              bool targetProtected, PvpSpecPhase phase);
++PvpProcUse SelectPvpProcUse(uint8 stacks, uint8 requiredStacks,
++                            PvpProcScores const& scores);
+ PvpSpecPlan BuildPvpSpecPlan(PlayerbotAI* botAI, PvpSnapshot const& snapshot);
+ PvpControlState ClassifyPvpControlMetadata(uint64 mechanicMask, uint32 auraInterruptFlags, bool damageImmune);
+ PvpControlState ClassifyPvpControlFallback(bool metadataDamageSafe, bool stunned, bool rooted, bool silenced,
+diff --git a/modules/mod-playerbots/t/PvpTacticalPolicyTests.cxx b/modules/mod-playerbots/t/PvpTacticalPolicyTests.cxx
+index 173c870f..96314713 100644
+--- a/modules/mod-playerbots/t/PvpTacticalPolicyTests.cxx
++++ b/modules/mod-playerbots/t/PvpTacticalPolicyTests.cxx
+@@ -428,28 +428,79 @@ TEST(PvpSpecPolicy, BurstRequiresARealConnectedCommitWindow)
+ 
+ TEST(PvpSpecPolicy, MobilityIsSavedUntilEnemyMovementOrAnEmergencyRoot)
+ {
+-    EXPECT_FALSE(ShouldSpendPvpMobility(ObservedPvpCooldownState::Unknown, 20.0f, false, false));
+-    EXPECT_TRUE(ShouldSpendPvpMobility(ObservedPvpCooldownState::RecentlyUsed, 20.0f, false, false));
+-    EXPECT_TRUE(ShouldSpendPvpMobility(ObservedPvpCooldownState::LikelyUnavailable, 9.0f, false, false));
+-    EXPECT_FALSE(ShouldSpendPvpMobility(ObservedPvpCooldownState::LikelyUnavailable, 5.0f, false, false));
+-    EXPECT_TRUE(ShouldSpendPvpMobility(ObservedPvpCooldownState::Unknown, 5.0f, true, true));
++    EXPECT_FALSE(ShouldSpendPvpMobility(ObservedPvpCooldownState::Unknown,
++                                       PvpObservationConfidence::None, 20.0f, false, false));
++    EXPECT_TRUE(ShouldSpendPvpMobility(ObservedPvpCooldownState::RecentlyUsed,
++                                      PvpObservationConfidence::Confirmed, 20.0f, false, false));
++    EXPECT_TRUE(ShouldSpendPvpMobility(ObservedPvpCooldownState::LikelyUnavailable,
++                                      PvpObservationConfidence::Probable, 9.0f, false, false));
++    EXPECT_FALSE(ShouldSpendPvpMobility(ObservedPvpCooldownState::LikelyUnavailable,
++                                       PvpObservationConfidence::Inferred, 9.0f, false, false));
++    EXPECT_TRUE(ShouldSpendPvpMobility(ObservedPvpCooldownState::LikelyUnavailable,
++                                      PvpObservationConfidence::Inferred, 20.0f, false, false));
++    EXPECT_TRUE(ShouldSpendPvpMobility(ObservedPvpCooldownState::Unknown,
++                                      PvpObservationConfidence::None, 5.0f, true, true));
+ }
+ 
+ TEST(PvpSpecPolicy, SurvivalTrapResourceIsNotSpentOnRoutineBlackArrow)
+ {
+-    EXPECT_TRUE(ShouldReserveSurvivalTrap(true, false, PvpSpecPhase::Pressure));
+-    EXPECT_TRUE(ShouldReserveSurvivalTrap(true, false, PvpSpecPhase::Commit));
+-    EXPECT_FALSE(ShouldReserveSurvivalTrap(true, true, PvpSpecPhase::Commit));
+-    EXPECT_FALSE(ShouldReserveSurvivalTrap(true, false, PvpSpecPhase::Finish));
+-    EXPECT_FALSE(ShouldReserveSurvivalTrap(false, false, PvpSpecPhase::Pressure));
++    EXPECT_TRUE(ShouldReserveSurvivalTrap(true, false, false, PvpSpecPhase::Pressure));
++    EXPECT_TRUE(ShouldReserveSurvivalTrap(true, false, false, PvpSpecPhase::Commit));
++    EXPECT_FALSE(ShouldReserveSurvivalTrap(true, true, true, PvpSpecPhase::Commit));
++    EXPECT_FALSE(ShouldReserveSurvivalTrap(true, false, false, PvpSpecPhase::Finish));
++    EXPECT_TRUE(ShouldReserveSurvivalTrap(true, false, true, PvpSpecPhase::Finish));
++    EXPECT_FALSE(ShouldReserveSurvivalTrap(false, false, false, PvpSpecPhase::Pressure));
+ }
+ 
+-TEST(PvpSpecPolicy, ProcResourcesChooseSurvivalControlThenDamage)
++TEST(PvpSpecPolicy, CompatibleBurstResourcesCanFormOneCommitBundle)
+ {
+-    EXPECT_EQ(PvpProcUse::Hold, SelectPvpProcUse(4, 5, true, true, true));
+-    EXPECT_EQ(PvpProcUse::Heal, SelectPvpProcUse(5, 5, true, true, true));
+-    EXPECT_EQ(PvpProcUse::Control, SelectPvpProcUse(5, 5, false, true, true));
+-    EXPECT_EQ(PvpProcUse::Damage, SelectPvpProcUse(5, 5, false, false, true));
+-    EXPECT_EQ(PvpProcUse::Hold, SelectPvpProcUse(5, 5, false, false, false));
++    EXPECT_TRUE(ShouldSequencePvpBurst(PvpBurstResource::PrimaryDamageAmp,
++                                      PvpBurstResource::SecondaryDamageAmp, 200, true));
++    EXPECT_TRUE(ShouldSequencePvpBurst(PvpBurstResource::PrimaryTransformation,
++                                      PvpBurstResource::PetBurst, 200, true));
++    EXPECT_FALSE(ShouldSequencePvpBurst(PvpBurstResource::PrimaryDamageAmp,
++                                       PvpBurstResource::PrimaryDamageAmp, 200, true));
++    EXPECT_FALSE(ShouldSequencePvpBurst(PvpBurstResource::PrimaryDamageAmp,
++                                       PvpBurstResource::SecondaryDamageAmp, 200, false));
++    EXPECT_TRUE(ShouldSequencePvpBurst(PvpBurstResource::PrimaryDamageAmp,
++                                      PvpBurstResource::PrimaryDamageAmp, 1500, false));
++}
++
++TEST(PvpSpecPolicy, EnemyMemoryExpiresOnlyAfterItsOwnTtl)
++{
++    EXPECT_FALSE(ShouldExpirePvpEnemyMemory(60000, 1, 60000));
++    EXPECT_TRUE(ShouldExpirePvpEnemyMemory(60002, 1, 60000));
++    EXPECT_FALSE(ShouldExpirePvpEnemyMemory(60002, 0, 60000));
++}
++
++TEST(PvpSpecPolicy, ProcScoresPreferLethalDamageUnlessHealingIsActuallyCritical)
++{
++    PvpProcScores finish = ScorePvpProcUse(PvpArchetype::EnhancementShaman,
++                                           100.0f, 54.0f, 8.0f, 0.10f,
++                                           false, false, PvpSpecPhase::Finish);
++    EXPECT_EQ(PvpProcUse::Hold, SelectPvpProcUse(4, 5, finish));
++    EXPECT_EQ(PvpProcUse::Damage, SelectPvpProcUse(5, 5, finish));
++
++    PvpProcScores emergency = ScorePvpProcUse(PvpArchetype::EnhancementShaman,
++                                              22.0f, 80.0f, 70.0f, 0.85f,
++                                              false, false, PvpSpecPhase::Survive);
++    EXPECT_EQ(PvpProcUse::Heal, SelectPvpProcUse(5, 5, emergency));
++
++    PvpProcScores setup = ScorePvpProcUse(PvpArchetype::FeralDruid,
++                                          100.0f, 100.0f, 90.0f, 0.0f,
++                                          true, false, PvpSpecPhase::Setup);
++    EXPECT_EQ(PvpProcUse::Control, SelectPvpProcUse(5, 5, setup));
++}
++
++TEST(PvpSpecPolicy, ProfilesGiveAggressiveAndDurableSpecsDifferentThresholds)
++{
++    PvpSpecPolicyProfile const fury = GetPvpSpecPolicyProfile(PvpArchetype::FuryWarrior);
++    PvpSpecPolicyProfile const blood = GetPvpSpecPolicyProfile(PvpArchetype::BloodDeathKnight);
++    EXPECT_LT(fury.commitThreshold, blood.commitThreshold);
++    EXPECT_GT(fury.surviveThreshold, blood.surviveThreshold);
++    EXPECT_TRUE(ShouldCommitPvpPrimaryBurst(PvpSpecPhase::Commit, 0.58f, false, true,
++                                           fury.commitThreshold));
++    EXPECT_FALSE(ShouldCommitPvpPrimaryBurst(PvpSpecPhase::Commit, 0.58f, false, true,
++                                            blood.commitThreshold));
+ }
+ }

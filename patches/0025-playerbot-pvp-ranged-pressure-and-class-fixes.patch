@@ -1,0 +1,617 @@
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/GenericSpellActions.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/GenericSpellActions.cpp
+index 1d9878a8..5a3595b5 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/GenericSpellActions.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/GenericSpellActions.cpp
+@@ -182,6 +182,8 @@ bool CastSpellAction::Execute(Event /*event*/)
+     Unit* target = GetTarget();
+     if (ShouldBlockPvpDuelInterference(bot, target))
+         return false;
++    if (IsPvpTacticalContextEnabled(bot) && spell == "polymorph" && target == bot)
++        return false;
+     uint32 const spellId = AI_VALUE2(uint32, "spell id", spell);
+     SpellInfo const* spellInfo = spellId ? sSpellMgr->GetSpellInfo(spellId) : nullptr;
+     bool interrupt = IsPvpInterruptAction(spell);
+@@ -273,6 +275,24 @@ bool CastSpellAction::isPossible()
+         return false;
+     }
+ 
++    // A long retreat spline and a hard cast used to cancel each other every
++    // update: movement restarted first, then CanCastSpell rejected the cast
++    // because the bot was moving. Reserve a short, interruptible plant window
++    // so the next decision can actually begin the cast. Face-hug pressure
++    // cancels the reservation in IsPvpCastPlantActive.
++    if (IsPvpTacticalContextEnabled(bot) && bot->duel && bot->isMoving() &&
++        GetPvpTacticalState(botAI).movementOwner == PvpMovementOwner::Retreat)
++    {
++        Unit* target = GetTarget();
++        uint32 const spellId = AI_VALUE2(uint32, "spell id", spell);
++        SpellInfo const* spellInfo = spellId ? sSpellMgr->GetSpellInfo(spellId) : nullptr;
++        uint32 const castMs = spellInfo ? (spellInfo->IsChanneled() ? std::max<int32>(0, spellInfo->GetDuration()) :
++                                                                   spellInfo->CalcCastTime(bot)) : 0;
++        if (castMs >= 750 && IsSafeForPvpCast(botAI, target, spellInfo, castMs) &&
++            RequestPvpCastPlant(botAI, castMs))
++            return false;
++    }
++
+     // Spell* currentSpell = bot->GetCurrentSpell(CURRENT_GENERIC_SPELL); //not used, line marked for removal.
+     return botAI->CanCastSpell(spell, GetTarget());
+ }
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp
+index b16ef372..5da17766 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp
+@@ -1874,6 +1874,8 @@ bool PvpTacticalRetreatAction::Execute(Event /*event*/)
+     if (!primaryTarget || !target || !botAI->IsRanged(bot, true) || bot->IsMounted() ||
+         state.rangeMotion == PvpRangeMotion::Hold)
+         return false;
++    if (bot->duel && IsPvpCastPlantActive(botAI))
++        return false;
+ 
+     // Hard casts deliberately plant inside the stable band. Emergency escape
+     // may still interrupt them when the attacker reaches face-hug distance.
+@@ -1889,28 +1891,18 @@ bool PvpTacticalRetreatAction::Execute(Event /*event*/)
+     if (IsPvpMovementActive(botAI, bot, PvpMovementOwner::Retreat))
+     {
+         // Preserve a long spline while the threat remains in roughly the same
+-        // direction. A Charge, Shadowstep, Grip or side swap can move the
+-        // pressure source behind the bot; only a large heading change is
+-        // allowed to replace the active path.
++        // direction. In a duel the opponent naturally crosses the tangent of
++        // the orbit; treating that as an unsafe destination caused a fresh
++        // spline every few hundred milliseconds and recreated the short-step
++        // stutter. The generic near-reversal guard in IsPvpMovementActive is
++        // sufficient for teleports and true side swaps.
+         if (state.hasThreatAngle)
+         {
+             float const currentThreatAngle = target->GetAngle(bot);
+             float const headingDelta = std::abs(std::remainder(
+                 currentThreatAngle - state.threatAngleAtIssue, float(2.0 * M_PI)));
+-            float destinationRisk = 0.0f;
+-            if (state.hasMovementDestination)
+-            {
+-                float const currentTravelAngle = std::atan2(
+-                    state.movementDestinationY - bot->GetPositionY(),
+-                    state.movementDestinationX - bot->GetPositionX());
+-                destinationRisk = std::abs(std::remainder(
+-                    currentTravelAngle - currentThreatAngle, float(2.0 * M_PI)));
+-            }
+             bool const worldHeadingChanged = !bot->duel && headingDelta > float(M_PI / 3.0);
+-            bool const duelPathBecameUnsafe = bot->duel && state.hasMovementDestination &&
+-                destinationRisk > float(M_PI * 2.0 / 3.0) &&
+-                getMSTime() - state.movementIssuedAtMs >= 300;
+-            if (worldHeadingChanged || duelPathBecameUnsafe)
++            if (worldHeadingChanged)
+             {
+                 CancelPvpMovement(botAI, PvpMovementOwner::Retreat);
+                 DebugPvpTactical(botAI, "retreat-heading-replan", target);
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
+index a092acb0..20f2e669 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
+@@ -385,6 +385,61 @@ bool RestoreDruidForm(PlayerbotAI* botAI, uint32 spellId)
+     }
+ }
+ 
++bool TryDruidRecoveryReposition(PlayerbotAI* botAI, Unit* target)
++{
++    Player* bot = botAI->GetBot();
++    PvpTacticalState& state = GetPvpTacticalState(botAI);
++    uint32 const now = getMSTime();
++    float const distance = target ? bot->GetDistance2d(target) : 0.0f;
++    bool const controlStillSafe = target &&
++        (GetPvpControlState(target) == PvpControlState::DamageBreakable ||
++         GetPvpControlState(target) == PvpControlState::DamageImmune ||
++         target->HasRootAura() || target->HasAuraType(SPELL_AURA_MOD_STUN));
++
++    if (state.movementOwner == PvpMovementOwner::DruidRecovery)
++    {
++        if (!controlStillSafe || distance >= 18.0f ||
++            now - state.druidRecoveryMoveStartedAtMs >= 2500)
++        {
++            CancelPvpMovement(botAI, PvpMovementOwner::DruidRecovery);
++            state.druidRecoveryMoveStartedAtMs = 0;
++            DebugPvpTactical(botAI, "druid-recovery-positioned", target);
++            return false;
++        }
++        if (IsPvpMovementActive(botAI, bot, PvpMovementOwner::DruidRecovery))
++            return true;
++        CancelPvpMovement(botAI, PvpMovementOwner::DruidRecovery);
++    }
++
++    if (!controlStillSafe || distance >= 18.0f)
++        return false;
++
++    float const awayAngle = target->GetAngle(bot);
++    float const step = std::clamp(22.0f - distance, 7.0f, 14.0f);
++    GameObject* duelFlag = bot->GetMap()->GetGameObject(bot->GetGuidValue(PLAYER_DUEL_ARBITER));
++    for (float const offset : { 0.0f, float(M_PI / 6.0), float(-M_PI / 6.0) })
++    {
++        float x = bot->GetPositionX() + std::cos(awayAngle + offset) * step;
++        float y = bot->GetPositionY() + std::sin(awayAngle + offset) * step;
++        float z = bot->GetPositionZ();
++        if (!bot->GetMap()->CheckCollisionAndGetValidCoords(bot, bot->GetPositionX(), bot->GetPositionY(),
++                                                             bot->GetPositionZ(), x, y, z))
++            continue;
++        if (duelFlag && duelFlag->GetDistance2d(x, y) >
++            std::clamp(sPlayerbotAIConfig.pvpTacticalDuelSafeRadius, 20.0f, 39.0f))
++            continue;
++
++        ClaimPvpMovement(botAI, PvpMovementOwner::DruidRecovery, target);
++        SetPvpMovementDestination(botAI, x, y);
++        state.druidRecoveryMoveStartedAtMs = now;
++        bot->GetMotionMaster()->Clear(false);
++        bot->GetMotionMaster()->MovePoint(0, x, y, z, FORCED_MOVEMENT_NONE, 0.0f, 0.0f, true, false);
++        DebugPvpTactical(botAI, "druid-recovery-cat-reposition", target);
++        return true;
++    }
++    return false;
++}
++
+ void StopOwnedPvpMovement(PlayerbotAI* botAI)
+ {
+     CancelPvpMovement(botAI);
+@@ -1082,10 +1137,16 @@ bool PvpTacticalDuelOpenerAction::Execute(Event /*event*/)
+         }
+         if (state.duelOpenerStep == 1)
+         {
+-            if (MoveStealthOpenerToTarget(botAI, opponent, true))
++            // Sap already created the setup. Requiring a perfect behind point
++            // here can loop forever when both units overlap: the movement
++            // generator keeps chasing a two-yard rear point while the target
++            // sleeps. Garrote and Cheap Shot only need melee range, so treat
++            // facing as an optimization rather than a gate.
++            if (MoveStealthOpenerToTarget(botAI, opponent, false))
+                 return true;
++            CancelPvpMovement(botAI, PvpMovementOwner::DuelPrepare);
+             int32 const sapRemaining = MechanicControlRemainingMs(opponent, MECHANIC_SAPPED);
+-            if (sapRemaining > 1500 && bot->GetPower(POWER_ENERGY) < 80)
++            if (sapRemaining > 3000 && bot->GetPower(POWER_ENERGY) < 70)
+             {
+                 bot->AttackStop();
+                 botAI->PetFollow();
+@@ -1095,6 +1156,8 @@ bool PvpTacticalDuelOpenerAction::Execute(Event /*event*/)
+             state.duelOpenerStep = 2;
+         }
+ 
++        CancelPvpMovement(botAI, PvpMovementOwner::DuelPrepare);
++
+         bool const casterOpener = botAI->IsRanged(opponent, true) || PlayerbotAI::IsHeal(opponent, true);
+         if (casterOpener && TryRogueOpenerSpell(botAI, "garrote", opponent))
+         {
+@@ -1305,8 +1368,14 @@ bool PvpTacticalEmergencyEscapeAction::Execute(Event /*event*/)
+             DebugPvpTactical(botAI, "emergency-blink", threat);
+             return true;
+         }
+-        if (TrySelfAreaControl(botAI, "frost nova", threat) ||
+-            TrySpell(botAI, "cone of cold", threat, false))
++        if (TrySelfAreaControl(botAI, "frost nova", threat))
++        {
++            DebugPvpTactical(botAI, "emergency-mage-control", threat);
++            return true;
++        }
++        bot->SetFacingToObject(threat);
++        bot->SendMovementFlagUpdate(true);
++        if (TrySpell(botAI, "cone of cold", threat, false))
+         {
+             DebugPvpTactical(botAI, "emergency-mage-control", threat);
+             return true;
+@@ -1728,6 +1797,8 @@ bool PvpTacticalClassControlAction::Execute(Event /*event*/)
+             {
+                 if (bot->GetHealthPct() >= 68.0f)
+                 {
++                    CancelPvpMovement(botAI, PvpMovementOwner::DruidRecovery);
++                    state.druidRecoveryMoveStartedAtMs = 0;
+                     uint32 const restoreForm = state.druidOriginalForm;
+                     if (restoreForm && GetDruidForm(bot) != restoreForm)
+                         return RestoreDruidForm(botAI, restoreForm);
+@@ -1753,6 +1824,18 @@ bool PvpTacticalClassControlAction::Execute(Event /*event*/)
+                         return true;
+                 }
+ 
++                bool const feralReset = state.druidOriginalForm == 768 || IsFeralCat(botAI);
++                if (state.movementOwner == PvpMovementOwner::DruidRecovery &&
++                    TryDruidRecoveryReposition(botAI, target))
++                    return true;
++                if (feralReset && safeControlWindow && distance < 18.0f)
++                {
++                    if (!botAI->HasAura("cat form", bot) && TrySpell(botAI, "cat form", bot, false))
++                        return true;
++                    if (botAI->HasAura("cat form", bot) && TryDruidRecoveryReposition(botAI, target))
++                        return true;
++                }
++
+                 if (safeToLeaveForm && bot->isMoving())
+                 {
+                     StopOwnedPvpMovement(botAI);
+@@ -1843,8 +1926,13 @@ bool PvpTacticalClassControlAction::Execute(Event /*event*/)
+                 return true;
+             if (melee && TrySelfAreaControl(botAI, "frost nova", target))
+                 return true;
+-            if (melee && TrySpell(botAI, "cone of cold", target, false))
+-                return true;
++            if (melee)
++            {
++                bot->SetFacingToObject(target);
++                bot->SendMovementFlagUpdate(true);
++                if (TrySpell(botAI, "cone of cold", target, false))
++                    return true;
++            }
+             if (snapshot.archetype == PvpArchetype::FrostMage &&
+                 (target->HasAuraWithMechanic(1ULL << MECHANIC_FREEZE) || target->HasRootAura()))
+             {
+diff --git a/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.cpp b/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.cpp
+index 4262abe7..c771151e 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.cpp
+@@ -255,11 +255,23 @@ bool PvpTacticalRangedTooCloseTrigger::IsActive()
+ 
+     UpdatePvpTacticalState(botAI, primaryTarget);
+ 
+-    float const enterDistance = GetPvpTacticalMinimumDistance(botAI, bot);
++    if (!bot->InBattleground() && IsPvpCastPlantActive(botAI))
++    {
++        state.rangeMotion = PvpRangeMotion::Hold;
++        CancelPvpMovement(botAI, PvpMovementOwner::Retreat);
++        return false;
++    }
++
++    float enterDistance = GetPvpTacticalMinimumDistance(botAI, bot);
+     float preferredDistance = std::max(enterDistance + 2.0f, GetPvpTacticalPreferredDistance(botAI, bot));
+     if (IsPvpThreatPinned(primaryTarget))
+     {
+         float const reduction = bot->getClass() == CLASS_HUNTER ? 6.0f : 10.0f;
++        // A root/stun is a casting window. Reduce the entry edge together
++        // with the preferred edge; otherwise the old minimum silently forced
++        // casters to run all the way back to 28-32 yards before planting.
++        enterDistance = std::max(bot->getClass() == CLASS_HUNTER ? 22.0f : 18.0f,
++                                 enterDistance - reduction);
+         preferredDistance = std::max(enterDistance + 2.0f, preferredDistance - reduction);
+     }
+     state.desiredDistance = preferredDistance;
+diff --git a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp
+index cdded526..b3b44108 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp
+@@ -899,6 +899,9 @@ void PvpTacticalState::Reset()
+     controlWindowStartedAtMs = 0;
+     controlWindowSpellId = 0;
+     controlWindowLastRemainingMs = 0;
++    rangedCastPlantUntilMs = 0;
++    lastRangedCastPlantAtMs = 0;
++    druidRecoveryMoveStartedAtMs = 0;
+     trackedPrimaryTarget.Clear();
+     movementTargetGuid.Clear();
+     observedEnemyCasterGuid.Clear();
+@@ -983,8 +986,10 @@ PvpArchetype DetectPvpArchetype(PlayerbotAI* botAI)
+             return HasPvpSpell(botAI, "shadowstep") || HasPvpSpell(botAI, "shadow dance") ?
+                        PvpArchetype::SubtletyRogue : PvpArchetype::Generic;
+         case CLASS_PRIEST:
+-            return HasPvpSpell(botAI, "penance") || HasPvpSpell(botAI, "pain suppression") ?
+-                       PvpArchetype::DisciplinePriest : PvpArchetype::Generic;
++            if (HasPvpSpell(botAI, "penance") || HasPvpSpell(botAI, "pain suppression"))
++                return PvpArchetype::DisciplinePriest;
++            return HasPvpSpell(botAI, "shadowform") && HasPvpSpell(botAI, "mind flay") ?
++                       PvpArchetype::ShadowPriest : PvpArchetype::Generic;
+         case CLASS_SHAMAN:
+             return HasPvpSpell(botAI, "lava burst") && HasPvpSpell(botAI, "thunderstorm") ?
+                        PvpArchetype::ElementalShaman : PvpArchetype::Generic;
+@@ -1708,6 +1713,73 @@ bool IsPvpMovementActive(PlayerbotAI* botAI, Player* bot, PvpMovementOwner owner
+     return active;
+ }
+ 
++bool ShouldRequestPvpCastPlant(bool duel, bool ranged, bool moving, bool retreatOwned, bool hardCast,
++                              bool targetControlled, bool recentlyPlanted, float threatDistance,
++                              float minimumPlantDistance, float emergencyDistance, float castSafety)
++{
++    return duel && ranged && moving && retreatOwned && hardCast && !recentlyPlanted &&
++           threatDistance >= minimumPlantDistance && threatDistance > emergencyDistance &&
++           (targetControlled || castSafety >= 0.55f);
++}
++
++bool RequestPvpCastPlant(PlayerbotAI* botAI, uint32 castMs)
++{
++    Player* bot = botAI ? botAI->GetBot() : nullptr;
++    if (!bot || !castMs)
++        return false;
++
++    PvpTacticalState& state = GetPvpTacticalState(botAI);
++    uint32 const now = getMSTime();
++    if (state.rangedCastPlantUntilMs > now)
++        return true;
++
++    Unit* threat = ResolvePvpMovementThreat(botAI);
++    PvpSnapshot const snapshot = GetPvpSnapshot(botAI);
++    float const threatDistance = threat ? bot->GetDistance2d(threat) : 0.0f;
++    float const emergencyDistance = botAI->IsHeal(bot) ? 14.0f : 10.0f;
++    float const minimumPlantDistance = botAI->IsHeal(bot) ? 20.0f : 18.0f;
++    bool const targetControlled = threat && GetPvpControlState(threat) != PvpControlState::None;
++    bool const recentlyPlanted = state.lastRangedCastPlantAtMs &&
++                                 now - state.lastRangedCastPlantAtMs < 2500;
++    if (!ShouldRequestPvpCastPlant(
++            bot->duel && bot->duel->State == DUEL_STATE_IN_PROGRESS,
++            botAI->IsRanged(bot, true) || botAI->IsHeal(bot), bot->isMoving(),
++            state.movementOwner == PvpMovementOwner::Retreat, true, targetControlled,
++            recentlyPlanted, threatDistance, minimumPlantDistance, emergencyDistance,
++            snapshot.castSafetyScore))
++        return false;
++
++    state.lastRangedCastPlantAtMs = now;
++    state.rangedCastPlantUntilMs = now + std::clamp<uint32>(castMs + 700, 1400, 4500);
++    state.rangeMotion = PvpRangeMotion::Hold;
++    CancelPvpMovement(botAI, PvpMovementOwner::Retreat);
++    DebugPvpTactical(botAI, "ranged-cast-plant", threat);
++    return true;
++}
++
++bool IsPvpCastPlantActive(PlayerbotAI* botAI)
++{
++    Player* bot = botAI ? botAI->GetBot() : nullptr;
++    if (!bot)
++        return false;
++    PvpTacticalState& state = GetPvpTacticalState(botAI);
++    uint32 const now = getMSTime();
++    if (!state.rangedCastPlantUntilMs || now >= state.rangedCastPlantUntilMs)
++    {
++        state.rangedCastPlantUntilMs = 0;
++        return false;
++    }
++
++    Unit* threat = ResolvePvpMovementThreat(botAI);
++    float const emergencyDistance = botAI->IsHeal(bot) ? 14.0f : 10.0f;
++    if (!threat || bot->GetDistance2d(threat) <= emergencyDistance)
++    {
++        state.rangedCastPlantUntilMs = 0;
++        return false;
++    }
++    return true;
++}
++
+ void DebugPvpTactical(PlayerbotAI* botAI, std::string const& message, Unit* target)
+ {
+     if (!sPlayerbotAIConfig.pvpTacticalDebug || !botAI || !botAI->GetBot())
+@@ -1917,6 +1989,15 @@ bool IsPvpTacticalActionAllowed(PlayerbotAI* botAI, std::string const& action, U
+     Unit* enemy = target && target->IsPlayer() && bot->IsHostileTo(target) ? target :
+                       botAI->GetUnit(snapshot.primaryTarget);
+ 
++    if (action == "polymorph")
++    {
++        if (target == bot)
++            return false;
++        if (target && bot->IsHostileTo(target) &&
++            (target->HasReflectSpellsAura() || target->HasAuraType(SPELL_AURA_REFLECT_SPELLS_SCHOOL)))
++            return false;
++    }
++
+     if (action == "polymorph" && enemy && target == enemy)
+     {
+         uint32 const lastControl = GetPvpTacticalState(botAI).lastPrimaryControlAtMs;
+diff --git a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h
+index 6384336a..96361dc6 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h
++++ b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h
+@@ -48,6 +48,7 @@ enum class PvpArchetype : uint8
+     MarksmanshipHunter,
+     SubtletyRogue,
+     DisciplinePriest,
++    ShadowPriest,
+     ElementalShaman,
+     FrostMage,
+     AfflictionWarlock,
+@@ -120,7 +121,8 @@ enum class PvpMovementOwner : uint8
+     ReturnToAnchor,
+     RogueReset,
+     HunterTrap,
+-    WarriorChargeReset
++    WarriorChargeReset,
++    DruidRecovery
+ };
+ 
+ enum class PvpRangeMotion : uint8
+@@ -180,6 +182,9 @@ struct PvpTacticalState
+     uint32 controlWindowStartedAtMs = 0;
+     uint32 controlWindowSpellId = 0;
+     uint32 controlWindowLastRemainingMs = 0;
++    uint32 rangedCastPlantUntilMs = 0;
++    uint32 lastRangedCastPlantAtMs = 0;
++    uint32 druidRecoveryMoveStartedAtMs = 0;
+     ObjectGuid trackedPrimaryTarget;
+     ObjectGuid movementTargetGuid;
+     ObjectGuid observedEnemyCasterGuid;
+@@ -377,6 +382,11 @@ void SetPvpMovementDestination(PlayerbotAI* botAI, float x, float y);
+ void ClearPvpMovement(PlayerbotAI* botAI, PvpMovementOwner owner = PvpMovementOwner::None);
+ void CancelPvpMovement(PlayerbotAI* botAI, PvpMovementOwner owner = PvpMovementOwner::None);
+ bool IsPvpMovementActive(PlayerbotAI* botAI, Player* bot, PvpMovementOwner owner = PvpMovementOwner::None);
++bool ShouldRequestPvpCastPlant(bool duel, bool ranged, bool moving, bool retreatOwned, bool hardCast,
++                              bool targetControlled, bool recentlyPlanted, float threatDistance,
++                              float minimumPlantDistance, float emergencyDistance, float castSafety);
++bool RequestPvpCastPlant(PlayerbotAI* botAI, uint32 castMs);
++bool IsPvpCastPlantActive(PlayerbotAI* botAI);
+ bool CanUsePvpSpell(PlayerbotAI* botAI, std::string const& spell, Unit* target, bool respectDiminishing = true);
+ bool ShouldBlockPvpDuelInterference(bool targetDuelActive, bool actorIsParticipant);
+ bool ShouldBlockPvpDuelInterference(Player* actor, Unit* target);
+diff --git a/modules/mod-playerbots/src/Ai/Base/Value/SpellIdValue.cpp b/modules/mod-playerbots/src/Ai/Base/Value/SpellIdValue.cpp
+index 61104d4d..391d73e4 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Value/SpellIdValue.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Value/SpellIdValue.cpp
+@@ -39,7 +39,13 @@ uint32 SpellIdValue::Calculate()
+     {
+         uint32 spellId = itr->first;
+ 
+-        if (itr->second->State == PLAYERSPELL_REMOVED || !itr->second->Active)
++        // Dual-spec spell maps retain talent spells from both pages. Active
++        // only describes rank visibility; it does not mean the spell belongs
++        // to the currently selected spec. Returning an off-spec rank makes
++        // CanCastSpell fail forever (Mind Flay was a common example) and the
++        // strategy then falls all the way back to wand attacks.
++        if (itr->second->State == PLAYERSPELL_REMOVED || !itr->second->Active ||
++            !itr->second->IsInSpec(bot->GetActiveSpec()))
+             continue;
+ 
+         SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(spellId);
+diff --git a/modules/mod-playerbots/src/Ai/Class/Mage/MageActions.cpp b/modules/mod-playerbots/src/Ai/Class/Mage/MageActions.cpp
+index b19c5976..7ab3b24b 100644
+--- a/modules/mod-playerbots/src/Ai/Class/Mage/MageActions.cpp
++++ b/modules/mod-playerbots/src/Ai/Class/Mage/MageActions.cpp
+@@ -82,6 +82,51 @@ bool CastFrostNovaAction::isUseful()
+         AI_VALUE2(float, "distance", GetTargetName()), 10.f);
+ }
+ 
++bool CastManaShieldAction::isUseful()
++{
++    if (IsPvpTacticalContextEnabled(bot))
++    {
++        // Name/rank lookup can miss the active absorb aura after a spec or
++        // rank change. Aura type is authoritative and prevents a low-health
++        // mage from paying the mana cost again every decision tick.
++        if (bot->HasAuraType(SPELL_AURA_MANA_SHIELD) || bot->GetPowerPct(POWER_MANA) < 35.0f)
++            return false;
++    }
++    return CastBuffSpellAction::isUseful();
++}
++
++bool CastEvocationAction::isUseful()
++{
++    if (IsPvpTacticalContextEnabled(bot) && bot->duel)
++    {
++        if (bot->GetPowerPct(POWER_MANA) >= 30.0f || botAI->HasAura("evocation", bot))
++            return false;
++        Unit* target = ResolvePvpThreatTarget(botAI);
++        if (!target)
++            return false;
++        PvpSnapshot const snapshot = GetPvpSnapshot(botAI);
++        bool const protectedWindow = snapshot.controlWindow.active &&
++            (snapshot.controlWindow.controlState == PvpControlState::DamageBreakable ||
++             snapshot.controlWindow.controlState == PvpControlState::DamageImmune) &&
++            snapshot.controlWindow.expectedRemainingMs >= 3500;
++        bool const distantWindow = bot->GetDistance2d(target) >= 28.0f &&
++                                   snapshot.incomingBurstScore < 0.30f;
++        if (!protectedWindow && !distantWindow)
++            return false;
++    }
++    return CastSpellAction::isUseful();
++}
++
++bool CastConeOfColdAction::Execute(Event event)
++{
++    if (Unit* target = GetTarget())
++    {
++        bot->SetFacingToObject(target);
++        bot->SendMovementFlagUpdate(true);
++    }
++    return CastSpellAction::Execute(event);
++}
++
+ bool CastConeOfColdAction::isUseful()
+ {
+     bool facingTarget = AI_VALUE2(bool, "facing", "current target");
+@@ -247,7 +292,11 @@ bool CastPvpMageSlowAction::Execute(Event /*event*/)
+         return false;
+ 
+     if (bot->GetDistance2d(target) <= 10.0f && botAI->CanCastSpell("cone of cold", target))
++    {
++        bot->SetFacingToObject(target);
++        bot->SendMovementFlagUpdate(true);
+         return botAI->CastSpell("cone of cold", target);
++    }
+ 
+     if (botAI->CanCastSpell("slow", target))
+         return botAI->CastSpell("slow", target);
+@@ -262,6 +311,8 @@ bool CastPvpMageSlowAction::Execute(Event /*event*/)
+ 
+     if (bot->isMoving())
+     {
++        if (bot->duel)
++            return frostbolt && RequestPvpCastPlant(botAI, frostbolt->CalcCastTime(bot));
+         StopMageForPvpCast(botAI, bot);
+         return true;
+     }
+diff --git a/modules/mod-playerbots/src/Ai/Class/Mage/MageActions.h b/modules/mod-playerbots/src/Ai/Class/Mage/MageActions.h
+index 48092d35..6268dfd6 100644
+--- a/modules/mod-playerbots/src/Ai/Class/Mage/MageActions.h
++++ b/modules/mod-playerbots/src/Ai/Class/Mage/MageActions.h
+@@ -148,6 +148,7 @@ class CastManaShieldAction : public CastBuffSpellAction
+ {
+ public:
+     CastManaShieldAction(PlayerbotAI* botAI) : CastBuffSpellAction(botAI, "mana shield") {}
++    bool isUseful() override;
+ };
+ 
+ // Utility Actions
+@@ -157,6 +158,7 @@ class CastEvocationAction : public CastSpellAction
+ public:
+     CastEvocationAction(PlayerbotAI* botAI) : CastSpellAction(botAI, "evocation") {}
+     std::string const GetTargetName() override { return "self target"; }
++    bool isUseful() override;
+ };
+ 
+ class CastConjureManaGemAction : public CastBuffSpellAction
+@@ -406,6 +408,7 @@ class CastConeOfColdAction : public CastSpellAction
+ public:
+     CastConeOfColdAction(PlayerbotAI* botAI) : CastSpellAction(botAI, "cone of cold") {}
+     ActionThreatType getThreatType() override { return ActionThreatType::Aoe; }
++    bool Execute(Event event) override;
+     bool isUseful() override;
+ };
+ 
+diff --git a/modules/mod-playerbots/t/PvpTacticalPolicyTests.cxx b/modules/mod-playerbots/t/PvpTacticalPolicyTests.cxx
+index 3808206a..c708de00 100644
+--- a/modules/mod-playerbots/t/PvpTacticalPolicyTests.cxx
++++ b/modules/mod-playerbots/t/PvpTacticalPolicyTests.cxx
+@@ -188,6 +188,20 @@ TEST(PvpRangePolicy, RetreatAndAdvanceStayContinuousUntilPreferredDistance)
+               SelectPvpRangeMotion(PvpRangeMotion::Advance, 35.0f, 35.0f, 30.0f, 36.0f, 40.0f));
+ }
+ 
++TEST(PvpRangePolicy, HardCastsCanReserveAnInterruptiblePlantWindow)
++{
++    EXPECT_TRUE(ShouldRequestPvpCastPlant(true, true, true, true, true,
++                                         false, false, 24.0f, 18.0f, 10.0f, 0.70f));
++    EXPECT_TRUE(ShouldRequestPvpCastPlant(true, true, true, true, true,
++                                         true, false, 18.0f, 18.0f, 10.0f, 0.35f));
++    EXPECT_FALSE(ShouldRequestPvpCastPlant(true, true, true, true, true,
++                                          false, false, 9.0f, 18.0f, 10.0f, 1.0f));
++    EXPECT_FALSE(ShouldRequestPvpCastPlant(true, true, true, true, true,
++                                          false, true, 24.0f, 18.0f, 10.0f, 1.0f));
++    EXPECT_FALSE(ShouldRequestPvpCastPlant(false, true, true, true, true,
++                                          false, false, 24.0f, 18.0f, 10.0f, 1.0f));
++}
++
+ TEST(PvpBattlegroundRangePolicy, OnlyActivePressureStartsDangerMovement)
+ {
+     EXPECT_EQ(PvpRangeMotion::Hold,
+diff --git a/modules/mod-playerbots/t/PvpTacticalScenarioMatrix.md b/modules/mod-playerbots/t/PvpTacticalScenarioMatrix.md
+index 307a4f5e..271d4d7d 100644
+--- a/modules/mod-playerbots/t/PvpTacticalScenarioMatrix.md
++++ b/modules/mod-playerbots/t/PvpTacticalScenarioMatrix.md
+@@ -153,3 +153,32 @@ off-target outside the effect radius to guard against overly broad suppression.
+   60 degrees. The old spline must be replaced once; smaller heading changes must
+   not cause repeated path rebuilds. Root the pursuer and verify a caster plants
+   at the reduced safe distance to begin hard casting.
++
++## Ranged pressure and class recovery
++
++- In a mage or shadow-priest duel, begin a hard cast while a tactical retreat
++  spline is active and the pursuer is at least 18 yards away. Movement must stop
++  once, remain reserved long enough for the next decision to start the cast,
++  and resume only after the cast window or a new face-hug emergency. The log
++  should contain `ranged-cast-plant`, not alternating move/cancel every tick.
++- Activate a second talent page that contains a different rank of Mind Flay.
++  Spell-name resolution must select only a spell from the active spec; the
++  shadow rotation should maintain Vampiric Touch, Devouring Plague and Shadow
++  Word: Pain, channel Mind Flay, and use the wand only when spells are genuinely
++  unavailable.
++- Below 30% mana, give a mage a protected control window or at least 28 yards of
++  safe distance. It should plant and channel Evocation. With Mana Shield already
++  active, or below 35% mana, the low-health trigger must not cast Mana Shield
++  again every decision tick.
++- Put Spell Reflection on the mage's hostile target. Polymorph must wait until
++  the reflection aura is gone instead of returning the sheep to the mage.
++  Move through the mage's rear arc before Cone of Cold; the mage must turn to
++  face the pressure source before casting.
++- Sap a target while the rogue overlaps it or cannot reach a perfect rear point.
++  Once melee range is established, the rogue must stop the setup movement,
++  pool no later than 70 energy/three seconds remaining, then Garrote a caster or
++  Cheap Shot a melee target before Sap expires.
++- During a feral recovery, root or otherwise safely control the opponent. The
++  druid should use Cat Form for one bounded move to roughly 18 yards, leave form
++  to heal, then restore its combat form. Prowl is attempted only after combat
++  has actually ended because it is not legal during an active duel.

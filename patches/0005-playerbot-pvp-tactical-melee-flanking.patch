@@ -1,0 +1,244 @@
+diff --git a/modules/mod-playerbots/conf/playerbots.conf.dist b/modules/mod-playerbots/conf/playerbots.conf.dist
+index 5f6424f9..0b2d9fa8 100644
+--- a/modules/mod-playerbots/conf/playerbots.conf.dist
++++ b/modules/mod-playerbots/conf/playerbots.conf.dist
+@@ -551,6 +551,15 @@ AiPlayerbot.PvPTactical.Healer.MinDistance = 22.0
+ AiPlayerbot.PvPTactical.RetreatStep = 7.0
+ AiPlayerbot.PvPTactical.TargetLeashDistance = 55.0
+ 
++# Melee bots move to a target's side/rear when fighting players. The interval
++# prevents constant orbiting while still allowing the bot to react when its
++# opponent turns. Angles are degrees measured away from the target's front.
++AiPlayerbot.PvPTactical.Melee.Enable = 1
++AiPlayerbot.PvPTactical.Melee.DecisionInterval = 600
++AiPlayerbot.PvPTactical.Melee.FlankDistance = 1.5
++AiPlayerbot.PvPTactical.Melee.MinAngle = 100.0
++AiPlayerbot.PvPTactical.Melee.MaxAngle = 145.0
++
+ #
+ #
+ ####################################################################################################
+diff --git a/modules/mod-playerbots/src/Ai/Base/ActionContext.h b/modules/mod-playerbots/src/Ai/Base/ActionContext.h
+index 9d290c80..9d92cd9f 100644
+--- a/modules/mod-playerbots/src/Ai/Base/ActionContext.h
++++ b/modules/mod-playerbots/src/Ai/Base/ActionContext.h
+@@ -99,6 +99,7 @@ public:
+         creators["flee"] = &ActionContext::flee;
+         creators["flee with pet"] = &ActionContext::flee_with_pet;
+         creators["pvp tactical retreat"] = &ActionContext::pvp_tactical_retreat;
++        creators["pvp tactical melee flank"] = &ActionContext::pvp_tactical_melee_flank;
+         creators["avoid aoe"] = &ActionContext::avoid_aoe;
+         creators["combat formation move"] = &ActionContext::combat_formation_move;
+         creators["tank face"] = &ActionContext::tank_face;
+@@ -318,6 +319,7 @@ private:
+     static Action* flee(PlayerbotAI* botAI) { return new FleeAction(botAI); }
+     static Action* flee_with_pet(PlayerbotAI* botAI) { return new FleeWithPetAction(botAI); }
+     static Action* pvp_tactical_retreat(PlayerbotAI* botAI) { return new PvpTacticalRetreatAction(botAI); }
++    static Action* pvp_tactical_melee_flank(PlayerbotAI* botAI) { return new PvpTacticalMeleeFlankAction(botAI); }
+     static Action* avoid_aoe(PlayerbotAI* botAI) { return new AvoidAoeAction(botAI); }
+     static Action* combat_formation_move(PlayerbotAI* botAI) { return new CombatFormationMoveAction(botAI); }
+     static Action* tank_face(PlayerbotAI* botAI) { return new TankFaceAction(botAI); }
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp
+index 187f3c10..15079ef4 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp
+@@ -1925,6 +1925,53 @@ bool PvpTacticalRetreatAction::isUseful()
+     return sPlayerbotAIConfig.pvpTacticalEnabled && target && target->IsPlayer() && botAI->IsRanged(bot, true);
+ }
+ 
++bool PvpTacticalMeleeFlankAction::Execute(Event /*event*/)
++{
++    Unit* target = AI_VALUE(Unit*, "current target");
++    if (!target || !target->IsPlayer() || !botAI->IsMelee(bot, true))
++        return false;
++
++    float minAngle = std::clamp(sPlayerbotAIConfig.pvpTacticalMeleeMinAngle, 90.0f, 175.0f) * M_PI / 180.0f;
++    float maxAngle = std::clamp(sPlayerbotAIConfig.pvpTacticalMeleeMaxAngle, 90.0f, 175.0f) * M_PI / 180.0f;
++    if (minAngle > maxAngle)
++        std::swap(minAngle, maxAngle);
++
++    float const angle = frand(minAngle, maxAngle);
++    float const distance = std::max(1.0f, bot->GetMeleeRange(target) * 0.6f);
++    Position left = target->GetPosition();
++    Position right = target->GetPosition();
++    left.RelocatePolarOffset(angle, distance);
++    right.RelocatePolarOffset(-angle, distance);
++
++    std::vector<Position> candidates;
++    for (Position const& position : {left, right})
++    {
++        float x = position.GetPositionX();
++        float y = position.GetPositionY();
++        float z = position.GetPositionZ();
++        if (bot->GetMap()->CheckCollisionAndGetValidCoords(bot, bot->GetPositionX(), bot->GetPositionY(),
++                                                            bot->GetPositionZ(), x, y, z))
++            candidates.emplace_back(x, y, z);
++    }
++
++    if (candidates.empty())
++        return false;
++
++    Position destination = candidates.front();
++    for (Position const& candidate : candidates)
++        if (bot->GetExactDist2d(candidate) < bot->GetExactDist2d(destination))
++            destination = candidate;
++    return MoveTo(bot->GetMapId(), destination.GetPositionX(), destination.GetPositionY(),
++                  destination.GetPositionZ(), false, false, false, true, MovementPriority::MOVEMENT_COMBAT);
++}
++
++bool PvpTacticalMeleeFlankAction::isUseful()
++{
++    Unit* target = AI_VALUE(Unit*, "current target");
++    return sPlayerbotAIConfig.pvpTacticalEnabled && sPlayerbotAIConfig.pvpTacticalMeleeEnabled && target &&
++           target->IsPlayer() && botAI->IsMelee(bot, true);
++}
++
+ bool FleeAction::isUseful()
+ {
+     if (bot->GetCurrentSpell(CURRENT_CHANNELED_SPELL) != nullptr)
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.h b/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.h
+index 1792509d..0f93c94c 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.h
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.h
+@@ -114,6 +114,15 @@ private:
+     bool TryClassPeel(Unit* target, float distance);
+ };
+ 
++class PvpTacticalMeleeFlankAction : public MovementAction
++{
++public:
++    PvpTacticalMeleeFlankAction(PlayerbotAI* botAI) : MovementAction(botAI, "pvp tactical melee flank") {}
++
++    bool Execute(Event event) override;
++    bool isUseful() override;
++};
++
+ class AvoidAoeAction : public MovementAction
+ {
+ public:
+diff --git a/modules/mod-playerbots/src/Ai/Base/Strategy/CombatStrategy.cpp b/modules/mod-playerbots/src/Ai/Base/Strategy/CombatStrategy.cpp
+index 5a454ee6..d2b0f7b1 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Strategy/CombatStrategy.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Strategy/CombatStrategy.cpp
+@@ -54,6 +54,8 @@ void CombatStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
+         "pvp tactical ranged too close", { NextAction("pvp tactical retreat", ACTION_MOVE + 8) }));
+     triggers.push_back(
+         new TriggerNode("pvp tactical target too far", { NextAction("drop target", ACTION_HIGH + 1) }));
++    triggers.push_back(
++        new TriggerNode("pvp tactical melee flank", { NextAction("pvp tactical melee flank", ACTION_MOVE + 8) }));
+     // The pet-attack trigger is commented out because it was forcing the bot's pet to attack, overriding stay and follow commands.
+     // Pets will automatically attack the bot's enemy if they are in "defensive" or "aggressive"
+     // stance, or if the master issues an attack command.
+diff --git a/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.cpp b/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.cpp
+index 16cadcea..8093e772 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.cpp
+@@ -221,6 +221,30 @@ bool PvpTacticalTargetTooFarTrigger::IsActive()
+     return bot->GetDistance2d(target) > sPlayerbotAIConfig.pvpTacticalTargetLeashDistance;
+ }
+ 
++PvpTacticalMeleeFlankTrigger::PvpTacticalMeleeFlankTrigger(PlayerbotAI* botAI)
++    : Trigger(botAI, "pvp tactical melee flank", sPlayerbotAIConfig.pvpTacticalMeleeDecisionInterval)
++{
++}
++
++bool PvpTacticalMeleeFlankTrigger::IsActive()
++{
++    Unit* target = AI_VALUE(Unit*, "current target");
++    if (!sPlayerbotAIConfig.pvpTacticalMeleeEnabled || !target || !target->IsPlayer() ||
++        !IsPvpTacticalContextEnabled(bot) || !botAI->IsMelee(bot, true))
++        return false;
++
++    if (bot->HasRootAura() || bot->HasStunAura() || bot->HasUnitState(UNIT_STATE_LOST_CONTROL))
++        return false;
++
++    float const engageDistance = bot->GetMeleeRange(target) + sPlayerbotAIConfig.pvpTacticalMeleeFlankDistance;
++    if (bot->GetDistance2d(target) > engageDistance)
++        return false;
++
++    // Reposition only while inside the target's front half. Once behind it, the
++    // normal rotation continues until the opponent turns to face the bot again.
++    return target->HasInArc(M_PI, bot);
++}
++
+ bool OutOfRangeTrigger::IsActive()
+ {
+     Unit* target = AI_VALUE(Unit*, GetTargetName());
+diff --git a/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.h b/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.h
+index 7d632bd1..9d41a1e6 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.h
++++ b/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.h
+@@ -76,6 +76,14 @@ public:
+     bool IsActive() override;
+ };
+ 
++class PvpTacticalMeleeFlankTrigger : public Trigger
++{
++public:
++    PvpTacticalMeleeFlankTrigger(PlayerbotAI* botAI);
++
++    bool IsActive() override;
++};
++
+ class OutOfRangeTrigger : public Trigger
+ {
+ public:
+diff --git a/modules/mod-playerbots/src/Ai/Base/TriggerContext.h b/modules/mod-playerbots/src/Ai/Base/TriggerContext.h
+index bb8567be..02df6c74 100644
+--- a/modules/mod-playerbots/src/Ai/Base/TriggerContext.h
++++ b/modules/mod-playerbots/src/Ai/Base/TriggerContext.h
+@@ -117,6 +117,7 @@ public:
+         creators["enemy within melee"] = &TriggerContext::enemy_within_melee;
+         creators["pvp tactical ranged too close"] = &TriggerContext::pvp_tactical_ranged_too_close;
+         creators["pvp tactical target too far"] = &TriggerContext::pvp_tactical_target_too_far;
++        creators["pvp tactical melee flank"] = &TriggerContext::pvp_tactical_melee_flank;
+         creators["party member to heal out of spell range"] = &TriggerContext::party_member_to_heal_out_of_spell_range;
+ 
+         creators["combo points 5 available"] = &TriggerContext::ComboPoints5Available;
+@@ -369,6 +370,10 @@ private:
+     {
+         return new PvpTacticalTargetTooFarTrigger(botAI);
+     }
++    static Trigger* pvp_tactical_melee_flank(PlayerbotAI* botAI)
++    {
++        return new PvpTacticalMeleeFlankTrigger(botAI);
++    }
+     static Trigger* party_member_to_heal_out_of_spell_range(PlayerbotAI* botAI)
+     {
+         return new PartyMemberToHealOutOfSpellRangeTrigger(botAI);
+diff --git a/modules/mod-playerbots/src/PlayerbotAIConfig.cpp b/modules/mod-playerbots/src/PlayerbotAIConfig.cpp
+index d7490e84..85446bd4 100644
+--- a/modules/mod-playerbots/src/PlayerbotAIConfig.cpp
++++ b/modules/mod-playerbots/src/PlayerbotAIConfig.cpp
+@@ -139,6 +139,15 @@ bool PlayerbotAIConfig::Initialize()
+     pvpTacticalRetreatStep = sConfigMgr->GetOption<float>("AiPlayerbot.PvPTactical.RetreatStep", 7.0f);
+     pvpTacticalTargetLeashDistance =
+         sConfigMgr->GetOption<float>("AiPlayerbot.PvPTactical.TargetLeashDistance", 55.0f);
++    pvpTacticalMeleeEnabled = sConfigMgr->GetOption<bool>("AiPlayerbot.PvPTactical.Melee.Enable", true);
++    pvpTacticalMeleeDecisionInterval =
++        std::max<uint32>(200, sConfigMgr->GetOption<uint32>("AiPlayerbot.PvPTactical.Melee.DecisionInterval", 600));
++    pvpTacticalMeleeFlankDistance =
++        sConfigMgr->GetOption<float>("AiPlayerbot.PvPTactical.Melee.FlankDistance", 1.5f);
++    pvpTacticalMeleeMinAngle =
++        sConfigMgr->GetOption<float>("AiPlayerbot.PvPTactical.Melee.MinAngle", 100.0f);
++    pvpTacticalMeleeMaxAngle =
++        sConfigMgr->GetOption<float>("AiPlayerbot.PvPTactical.Melee.MaxAngle", 145.0f);
+ 
+     criticalHealth = sConfigMgr->GetOption<int32>("AiPlayerbot.CriticalHealth", 25);
+     lowHealth = sConfigMgr->GetOption<int32>("AiPlayerbot.LowHealth", 45);
+diff --git a/modules/mod-playerbots/src/PlayerbotAIConfig.h b/modules/mod-playerbots/src/PlayerbotAIConfig.h
+index 924b628b..d13055ff 100644
+--- a/modules/mod-playerbots/src/PlayerbotAIConfig.h
++++ b/modules/mod-playerbots/src/PlayerbotAIConfig.h
+@@ -136,6 +136,11 @@ public:
+     float pvpTacticalHealerMinDistance;
+     float pvpTacticalRetreatStep;
+     float pvpTacticalTargetLeashDistance;
++    bool pvpTacticalMeleeEnabled;
++    uint32 pvpTacticalMeleeDecisionInterval;
++    float pvpTacticalMeleeFlankDistance;
++    float pvpTacticalMeleeMinAngle;
++    float pvpTacticalMeleeMaxAngle;
+     std::set<uint32> aoeAvoidSpellWhitelist;
+     bool tellWhenAvoidAoe;
+     std::set<uint32> disallowedGameObjects;

@@ -35,6 +35,23 @@ foreach ($moduleDir in Get-ChildItem -LiteralPath $customRoot -Directory -ErrorA
 }
 
 foreach ($patch in Get-ChildItem -LiteralPath (Join-Path $repoRoot 'patches') -Filter '*.patch' -File | Sort-Object Name) {
+    $patchText = Get-Content -LiteralPath $patch.FullName -Raw
+    $patchModules = @([regex]::Matches($patchText, '(?m)^diff --git a/modules/([^/]+)/') |
+        ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+    $missingModules = @($patchModules | Where-Object {
+        -not (Test-Path -LiteralPath (Join-Path $sourceRoot "modules\$_"))
+    })
+    if ($missingModules.Count -gt 0) {
+        $excludedModules = @($lock.modules | Where-Object { $_.profiles -notcontains $Profile } |
+            ForEach-Object { $_.name })
+        if ($missingModules.Count -eq $patchModules.Count -and
+            @($missingModules | Where-Object { $_ -notin $excludedModules }).Count -eq 0 -and
+            $patchText -notmatch '(?m)^diff --git a/(?!modules/)') {
+            Write-Host "跳过不属于 $Profile 的模块补丁：$($patch.Name)"
+            continue
+        }
+        throw "补丁 $($patch.Name) 的目标模块缺失：$($missingModules -join ', ')"
+    }
     git -C $sourceRoot apply --check $patch.FullName
     if ($LASTEXITCODE -ne 0) { throw "补丁检查失败：$($patch.Name)" }
     git -C $sourceRoot apply $patch.FullName

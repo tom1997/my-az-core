@@ -1,0 +1,1450 @@
+diff --git a/modules/mod-playerbots/src/Ai/Base/ActionContext.h b/modules/mod-playerbots/src/Ai/Base/ActionContext.h
+index cfc2e63e..372dda36 100644
+--- a/modules/mod-playerbots/src/Ai/Base/ActionContext.h
++++ b/modules/mod-playerbots/src/Ai/Base/ActionContext.h
+@@ -106,6 +106,7 @@ public:
+         creators["pvp tactical emergency escape"] = &ActionContext::pvp_tactical_emergency_escape;
+         creators["pvp tactical hostile pet"] = &ActionContext::pvp_tactical_hostile_pet;
+         creators["pvp tactical class control"] = &ActionContext::pvp_tactical_class_control;
++        creators["pvp tactical spec policy"] = &ActionContext::pvp_tactical_spec_policy;
+         creators["pvp tactical caster pressure"] = &ActionContext::pvp_tactical_caster_pressure;
+         creators["pvp tactical fake cast"] = &ActionContext::pvp_tactical_fake_cast;
+         creators["pvp tactical target swap"] = &ActionContext::pvp_tactical_target_swap;
+@@ -352,6 +353,7 @@ private:
+         return new PvpTacticalHostilePetAction(botAI);
+     }
+     static Action* pvp_tactical_class_control(PlayerbotAI* botAI) { return new PvpTacticalClassControlAction(botAI); }
++    static Action* pvp_tactical_spec_policy(PlayerbotAI* botAI) { return new PvpTacticalSpecPolicyAction(botAI); }
+     static Action* pvp_tactical_caster_pressure(PlayerbotAI* botAI)
+     {
+         return new PvpTacticalCasterPressureAction(botAI);
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
+index 70a9faf5..4cf90639 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
+@@ -1088,10 +1088,27 @@ bool TryDuelPreparation(PlayerbotAI* botAI, Player* opponent)
+                 return true;
+             break;
+         case CLASS_PRIEST:
++            if (DetectPvpArchetype(botAI) == PvpArchetype::HolyPriest)
++            {
++                bool const fearMatchup = opponent->getClass() == CLASS_WARLOCK ||
++                                          opponent->getClass() == CLASS_WARRIOR ||
++                                          opponent->getClass() == CLASS_PRIEST;
++                if (fearMatchup && !botAI->HasAura("fear ward", bot) &&
++                    TrySpell(botAI, "fear ward", bot, false))
++                    return true;
++                if (!botAI->HasAura("prayer of mending", bot) &&
++                    TrySpell(botAI, "prayer of mending", bot, false))
++                    return true;
++                if (!botAI->HasAura("renew", bot) && TrySpell(botAI, "renew", bot, false))
++                    return true;
++            }
+             if (!botAI->HasAura("power word: shield", bot) && TrySpell(botAI, "power word: shield", bot, false))
+                 return true;
+             break;
+         case CLASS_SHAMAN:
++            if (DetectPvpArchetype(botAI) == PvpArchetype::RestorationShaman &&
++                !botAI->HasAura("water shield", bot) && TrySpell(botAI, "water shield", bot, false))
++                return true;
+             if (!botAI->HasAura("lightning shield", bot) && !botAI->HasAura("water shield", bot) &&
+                 (TrySpell(botAI, "lightning shield", bot, false) || TrySpell(botAI, "water shield", bot, false)))
+                 return true;
+@@ -1253,7 +1270,9 @@ bool TryPvpPetMicro(PlayerbotAI* botAI, Unit* target, PvpSnapshot const& snapsho
+     {
+         if (GetPvpControlState(controlTarget) != PvpControlState::None ||
+             (snapshot.intent != PvpIntent::Control && snapshot.intent != PvpIntent::Peel &&
+-             snapshot.intent != PvpIntent::Finish && snapshot.intent != PvpIntent::Survive))
++             snapshot.intent != PvpIntent::Finish && snapshot.intent != PvpIntent::Survive &&
++             snapshot.specPlan.phase != PvpSpecPhase::Setup &&
++             snapshot.specPlan.phase != PvpSpecPhase::Commit))
+             return false;
+         if (GetPvpDrWeight(controlTarget, spellId) <= 0.25f)
+             return false;
+@@ -1286,7 +1305,8 @@ void ResetHunterCcPlan(PlayerbotAI* botAI)
+ 
+ bool TryHunterScatterTrapPlan(PlayerbotAI* botAI, Unit* primaryTarget, PvpSnapshot const& snapshot)
+ {
+-    if (snapshot.archetype != PvpArchetype::MarksmanshipHunter)
++    if (snapshot.archetype != PvpArchetype::MarksmanshipHunter &&
++        snapshot.archetype != PvpArchetype::SurvivalHunter)
+         return false;
+     Player* bot = botAI->GetBot();
+     PvpTacticalState& state = GetPvpTacticalState(botAI);
+@@ -2135,6 +2155,646 @@ bool PvpTacticalTargetSwapAction::Execute(Event /*event*/)
+     return true;
+ }
+ 
++bool PvpTacticalSpecPolicyAction::isUseful()
++{
++    if (!bot->IsAlive() || bot->IsNonMeleeSpellCast(false))
++        return false;
++    switch (DetectPvpArchetype(botAI))
++    {
++        case PvpArchetype::FuryWarrior:
++        case PvpArchetype::ProtectionWarrior:
++        case PvpArchetype::HolyPaladin:
++        case PvpArchetype::ProtectionPaladin:
++        case PvpArchetype::BloodDeathKnight:
++        case PvpArchetype::FrostDeathKnight:
++        case PvpArchetype::BeastMasteryHunter:
++        case PvpArchetype::SurvivalHunter:
++        case PvpArchetype::AssassinationRogue:
++        case PvpArchetype::CombatRogue:
++        case PvpArchetype::HolyPriest:
++        case PvpArchetype::EnhancementShaman:
++        case PvpArchetype::RestorationShaman:
++        case PvpArchetype::FireMage:
++        case PvpArchetype::DemonologyWarlock:
++        case PvpArchetype::FeralDruid:
++            return ResolvePvpClassActionTarget(botAI) != nullptr;
++        default:
++            return false;
++    }
++}
++
++bool PvpTacticalSpecPolicyAction::Execute(Event /*event*/)
++{
++    Unit* target = ResolvePvpClassActionTarget(botAI);
++    if (!target || !target->IsPlayer() || !target->IsAlive())
++        return false;
++
++    PvpSnapshot const snapshot = GetPvpSnapshot(botAI);
++    PvpSpecPlan const& plan = snapshot.specPlan;
++    PvpTacticalState& state = GetPvpTacticalState(botAI);
++    uint32 const now = getMSTime();
++    float const distance = bot->GetDistance2d(target);
++    bool const melee = bot->IsWithinMeleeRange(target);
++    bool const commit = plan.phase == PvpSpecPhase::Commit || plan.phase == PvpSpecPhase::Finish;
++    bool const survive = plan.phase == PvpSpecPhase::Survive;
++    bool const targetProtected = snapshot.targetMajorDefensive ||
++        snapshot.targetControlState == PvpControlState::DamageBreakable ||
++        snapshot.targetControlState == PvpControlState::DamageImmune;
++    bool const targetConnected = melee ||
++        ((botAI->IsRanged(bot, true) || botAI->IsHeal(bot)) && distance <= 35.0f) ||
++        snapshot.targetControlState == PvpControlState::DamageSafe;
++    Unit* controlTarget = plan.controlTarget.IsEmpty() ? nullptr : botAI->GetUnit(plan.controlTarget);
++    Unit* support = ResolvePvpSupportTarget(botAI, 0.20f);
++    if (!support)
++        support = bot;
++
++    if (!bot->duel && plan.phase != PvpSpecPhase::Survive &&
++        plan.phase != PvpSpecPhase::Peel && plan.phase != PvpSpecPhase::Recover &&
++        snapshot.recommendedTarget != snapshot.primaryTarget)
++        if (botAI->DoSpecificAction("pvp tactical target swap", Event(), true))
++            return true;
++
++    if ((bot->getClass() == CLASS_HUNTER || bot->getClass() == CLASS_WARLOCK) &&
++        CanDamagePvpTarget(botAI, target))
++        if (Pet* pet = bot->GetPet(); pet && pet->IsAlive() && pet->GetVictim() != target)
++            if (botAI->DoSpecificAction("pvp tactical pet attack", Event(), true))
++                return true;
++
++    auto cast = [&](std::string const& spell, Unit* unit, char const* reason,
++                    bool respectDiminishing = false)
++    {
++        if (!unit || !TrySpell(botAI, spell, unit, respectDiminishing))
++            return false;
++        DebugPvpTactical(botAI, reason, unit);
++        return true;
++    };
++    auto pressure = [&](std::string const& spell, Unit* unit, char const* reason)
++    {
++        if (!TryPvpPressureSpell(botAI, spell, unit))
++            return false;
++        DebugPvpTactical(botAI, reason, unit);
++        return true;
++    };
++    auto primaryDefensiveReady = [&](uint32 spacingMs = 3500u)
++    {
++        return !state.lastPrimaryDefensiveAtMs || now - state.lastPrimaryDefensiveAtMs >= spacingMs;
++    };
++    auto secondaryDefensiveReady = [&](uint32 spacingMs = 2500u)
++    {
++        return !state.lastSecondaryDefensiveAtMs || now - state.lastSecondaryDefensiveAtMs >= spacingMs;
++    };
++    auto markPrimaryDefensive = [&]() { state.lastPrimaryDefensiveAtMs = now; };
++    auto markSecondaryDefensive = [&]() { state.lastSecondaryDefensiveAtMs = now; };
++    auto castBurst = [&](std::string const& spell, Unit* unit, char const* reason)
++    {
++        if (plan.reservePrimaryBurst ||
++            !ShouldCommitPvpPrimaryBurst(plan.phase, plan.commitScore, targetProtected, targetConnected) ||
++            (state.lastPrimaryBurstAtMs && now - state.lastPrimaryBurstAtMs < 1500))
++            return false;
++        if (!cast(spell, unit, reason))
++            return false;
++        state.lastPrimaryBurstAtMs = now;
++        return true;
++    };
++
++    switch (snapshot.archetype)
++    {
++        case PvpArchetype::FeralDruid:
++        {
++            bool const instantNature = botAI->HasAura("predator's swiftness", bot);
++            PvpProcUse const predatoryUse = SelectPvpProcUse(
++                instantNature ? 1 : 0, 1, bot->GetHealthPct() <= 55.0f,
++                !plan.reserveControl, commit);
++            if ((botAI->IsMovementImpaired(bot) || bot->HasRootAura()) &&
++                bot->GetShapeshiftForm() != FORM_NONE)
++            {
++                botAI->RemoveShapeshift();
++                DebugPvpTactical(botAI, "feral-shift-root", target);
++                return true;
++            }
++            if (survive && primaryDefensiveReady())
++            {
++                if (cast("barkskin", bot, "feral-barkskin"))
++                {
++                    markPrimaryDefensive();
++                    return true;
++                }
++                if (bot->GetHealthPct() <= 35.0f && cast("survival instincts", bot, "feral-survival-instincts"))
++                {
++                    markPrimaryDefensive();
++                    return true;
++                }
++            }
++            if (survive && bot->GetHealthPct() <= 30.0f && !botAI->HasAura("dire bear form", bot) &&
++                cast("dire bear form", bot, "feral-survive-bear"))
++                return true;
++            if (survive && botAI->HasAura("dire bear form", bot) && secondaryDefensiveReady() &&
++                cast("frenzied regeneration", bot, "feral-frenzied-regeneration"))
++            {
++                markSecondaryDefensive();
++                return true;
++            }
++            if (predatoryUse == PvpProcUse::Heal &&
++                cast("healing touch", bot, "feral-predatory-heal"))
++                return true;
++            if (predatoryUse == PvpProcUse::Control)
++            {
++                Unit* cycloneTarget = controlTarget ? controlTarget : target;
++                if (cast("cyclone", cycloneTarget, "feral-predatory-cyclone", true))
++                    return true;
++            }
++            if (!botAI->HasAura("cat form", bot) && cast("cat form", bot, "feral-pressure-cat"))
++                return true;
++            if (commit && melee && castBurst("berserk", bot, "feral-berserk"))
++                return true;
++            if (!melee)
++                return false;
++            if (!botAI->HasAura("mangle (cat)", target) &&
++                pressure("mangle (cat)", target, "feral-mangle"))
++                return true;
++            if (!botAI->HasAura("rake", target, false, true) && pressure("rake", target, "feral-rake"))
++                return true;
++            if (bot->GetComboPoints() >= 5)
++            {
++                if (!botAI->HasAura("rip", target, false, true) && pressure("rip", target, "feral-rip"))
++                    return true;
++                if (!botAI->HasAura("savage roar", bot) && cast("savage roar", bot, "feral-savage-roar"))
++                    return true;
++                if (pressure("ferocious bite", target, "feral-bite"))
++                    return true;
++            }
++            return pressure("shred", target, "feral-shred") ||
++                   pressure("mangle (cat)", target, "feral-mangle-filler");
++        }
++        case PvpArchetype::SurvivalHunter:
++        {
++            Aura* lockAndLoad = botAI->GetAura("lock and load", bot, false, true);
++            bool const trapReserved = ShouldReserveSurvivalTrap(
++                controlTarget && controlTarget != target,
++                controlTarget && GetPvpControlState(controlTarget) != PvpControlState::None,
++                plan.phase);
++            if (lockAndLoad && (!state.lastExplosiveShotAtMs || now - state.lastExplosiveShotAtMs >= 1100) &&
++                cast("explosive shot", target, "survival-lock-and-load"))
++            {
++                state.lastExplosiveShotAtMs = now;
++                return true;
++            }
++            if (controlTarget && controlTarget != target && !plan.reserveControl &&
++                cast("wyvern sting", controlTarget, "survival-wyvern", true))
++                return true;
++            if (!trapReserved && commit && !botAI->HasAura("black arrow", target, false, true) &&
++                pressure("black arrow", target, "survival-black-arrow"))
++                return true;
++            if (!botAI->HasAura("serpent sting", target, false, true) &&
++                pressure("serpent sting", target, "survival-serpent-sting"))
++                return true;
++            if ((!state.lastExplosiveShotAtMs || now - state.lastExplosiveShotAtMs >= 1100) &&
++                cast("explosive shot", target, "survival-explosive-shot"))
++            {
++                state.lastExplosiveShotAtMs = now;
++                return true;
++            }
++            if (bot->isMoving())
++                return pressure("arcane shot", target, "survival-moving-arcane") ||
++                       pressure("aimed shot", target, "survival-moving-aimed");
++            return pressure("steady shot", target, "survival-steady-shot") ||
++                   pressure("arcane shot", target, "survival-arcane-shot");
++        }
++        case PvpArchetype::EnhancementShaman:
++        {
++            Aura* maelstrom = botAI->GetAura("maelstrom weapon", bot, false, true);
++            uint8 const stacks = maelstrom ? maelstrom->GetStackAmount() : 0;
++            PvpProcUse const maelstromUse = SelectPvpProcUse(
++                stacks, 5, survive || support->GetHealthPct() <= 55.0f,
++                !plan.reserveControl && controlTarget && controlTarget != target, true);
++            SpellInfo const* enemySpell = snapshot.enemyCastSpellId ?
++                sSpellMgr->GetSpellInfo(snapshot.enemyCastSpellId) : nullptr;
++            bool const incomingFear = enemySpell &&
++                (enemySpell->GetAllEffectsMechanicMask() & (1ULL << MECHANIC_FEAR));
++            if (incomingFear && cast("tremor totem", bot, "enhancement-tremor"))
++                return true;
++            if (maelstromUse != PvpProcUse::Hold)
++            {
++                if (maelstromUse == PvpProcUse::Heal &&
++                    cast("healing wave", support, "enhancement-maelstrom-heal"))
++                    return true;
++                if (maelstromUse == PvpProcUse::Control &&
++                    cast("hex", controlTarget, "enhancement-maelstrom-hex", true))
++                    return true;
++                if (maelstromUse == PvpProcUse::Damage &&
++                    pressure("lightning bolt", target, "enhancement-maelstrom-damage"))
++                    return true;
++            }
++            if ((commit || survive) && melee && castBurst("feral spirit", bot, "enhancement-feral-spirit"))
++                return true;
++            if (snapshot.magicPressureScore >= 0.45f && target->IsNonMeleeSpellCast(false) &&
++                cast("grounding totem", bot, "enhancement-grounding"))
++                return true;
++            bool const valuablePurge = botAI->HasAura("power word: shield", target, false, true) ||
++                                       botAI->HasAura("hand of freedom", target, false, true) ||
++                                       botAI->HasAura("ice barrier", target, false, true) ||
++                                       botAI->HasAura("sacred shield", target, false, true);
++            if (valuablePurge && bot->GetPowerPct(POWER_MANA) >= 35.0f &&
++                (!state.lastSpecUtilityAtMs || now - state.lastSpecUtilityAtMs >= 2000) &&
++                cast("purge", target, "enhancement-selective-purge"))
++            {
++                state.lastSpecUtilityAtMs = now;
++                return true;
++            }
++            if (melee)
++                return pressure("stormstrike", target, "enhancement-stormstrike") ||
++                       pressure("lava lash", target, "enhancement-lava-lash") ||
++                       pressure("earth shock", target, "enhancement-earth-shock");
++            return NeedsSlow(botAI, "frost shock", target) &&
++                   cast("frost shock", target, "enhancement-frost-shock");
++        }
++        case PvpArchetype::FireMage:
++        {
++            if (melee && secondaryDefensiveReady())
++            {
++                if (cast("dragon's breath", target, "fire-dragon-breath", true))
++                {
++                    markSecondaryDefensive();
++                    return true;
++                }
++                if (cast("blast wave", target, "fire-blast-wave", true))
++                {
++                    markSecondaryDefensive();
++                    ContinuePvpKiteAfterInstant(botAI, target, false);
++                    return true;
++                }
++            }
++            bool const plannedPolymorph = controlTarget == target ||
++                (snapshot.controlWindow.active && snapshot.controlWindow.targetGuid == target->GetGUID());
++            if (!plannedPolymorph && !botAI->HasAura("living bomb", target, false, true) &&
++                pressure("living bomb", target, "fire-living-bomb"))
++                return true;
++            if (botAI->HasAura("hot streak", bot) && !snapshot.targetMajorDefensive &&
++                pressure("pyroblast", target, "fire-hot-streak"))
++                return true;
++            if (commit && castBurst("combustion", bot, "fire-combustion"))
++                return true;
++            if (bot->isMoving())
++                return pressure("fire blast", target, "fire-moving-fire-blast");
++            return pressure("scorch", target, "fire-scorch") ||
++                   pressure("fireball", target, "fire-fireball") ||
++                   pressure("fire blast", target, "fire-fire-blast");
++        }
++        case PvpArchetype::DemonologyWarlock:
++        {
++            Pet* pet = bot->GetPet();
++            if ((!pet || !pet->IsAlive()) && snapshot.castSafetyScore >= 0.62f)
++            {
++                if (!botAI->HasAura("fel domination", bot) && cast("fel domination", bot, "demo-fel-domination"))
++                    return true;
++                if (pressure("summon felguard", bot, "demo-summon-felguard"))
++                    return true;
++            }
++            if (pet && pet->IsAlive() && pet->GetHealthPct() < 35.0f && bot->GetHealthPct() > 65.0f &&
++                snapshot.incomingBurstScore < 0.35f && pressure("health funnel", pet, "demo-health-funnel"))
++                return true;
++            bool const petConnected = pet && pet->IsAlive() && pet->GetVictim() == target;
++            bool const targetConstrained = melee || snapshot.targetControlState == PvpControlState::DamageSafe;
++            if (commit && (petConnected || targetConstrained) && distance <= 15.0f &&
++                castBurst("metamorphosis", bot, "demo-metamorphosis"))
++                return true;
++            if (botAI->HasAura("metamorphosis", bot))
++            {
++                if (distance > 8.0f && distance <= 25.0f && cast("demon charge", target, "demo-demon-charge"))
++                    return true;
++                if (distance <= 10.0f && cast("immolation aura", bot, "demo-immolation-aura"))
++                    return true;
++            }
++            if (!botAI->HasAura("corruption", target, false, true) &&
++                pressure("corruption", target, "demo-corruption"))
++                return true;
++            return pressure("soul fire", target, "demo-soul-fire") ||
++                   pressure("incinerate", target, "demo-incinerate") ||
++                   pressure("shadow bolt", target, "demo-shadow-bolt");
++        }
++        case PvpArchetype::RestorationShaman:
++        {
++            if (!botAI->HasAura("water shield", bot) && cast("water shield", bot, "resto-shaman-water-shield"))
++                return true;
++            bool const earthShieldValid = !state.earthShieldTargetGuid.IsEmpty() &&
++                botAI->GetUnit(state.earthShieldTargetGuid) &&
++                botAI->HasAura("earth shield", botAI->GetUnit(state.earthShieldTargetGuid), false, true);
++            if (!earthShieldValid &&
++                (!state.lastEarthShieldSwapAtMs || now - state.lastEarthShieldSwapAtMs >= 8000) &&
++                cast("earth shield", support, "resto-shaman-earth-shield"))
++            {
++                state.earthShieldTargetGuid = support->GetGUID();
++                state.lastEarthShieldSwapAtMs = now;
++                return true;
++            }
++            if (support->GetHealthPct() <= 32.0f && primaryDefensiveReady() &&
++                cast("nature's swiftness", bot, "resto-shaman-natures-swiftness"))
++            {
++                markPrimaryDefensive();
++                return true;
++            }
++            if (botAI->HasAura("nature's swiftness", bot) &&
++                cast("healing wave", support, "resto-shaman-emergency-heal"))
++                return true;
++            if (support->GetHealthPct() < 92.0f && !botAI->HasAura("riptide", support, false, true) &&
++                cast("riptide", support, "resto-shaman-riptide"))
++                return true;
++            if (support->GetHealthPct() <= 70.0f)
++                return pressure(support->GetHealthPct() <= 45.0f ? "healing wave" : "lesser healing wave",
++                                support, "resto-shaman-hard-heal");
++            if (bot->GetPowerPct(POWER_MANA) < 28.0f && snapshot.incomingBurstScore < 0.30f &&
++                cast("mana tide totem", bot, "resto-shaman-mana-tide"))
++                return true;
++            if (controlTarget && snapshot.triage.dangerScore < 0.40f && !plan.reserveControl &&
++                cast("hex", controlTarget, "resto-shaman-hex", true))
++                return true;
++            return false;
++        }
++        case PvpArchetype::HolyPaladin:
++        {
++            if (botAI->HasAura("divine plea", bot) && snapshot.incomingBurstScore >= 0.45f)
++            {
++                botAI->RemoveAura("divine plea");
++                DebugPvpTactical(botAI, "holy-paladin-cancel-plea", target);
++                return true;
++            }
++            if (!botAI->HasAura("sacred shield", support, false, true) &&
++                cast("sacred shield", support, "holy-paladin-sacred-shield"))
++                return true;
++            if (support != bot && (botAI->IsMovementImpaired(support) || support->HasRootAura()) &&
++                cast("hand of freedom", support, "holy-paladin-freedom"))
++                return true;
++            if (bot->GetHealthPct() <= 22.0f && primaryDefensiveReady(5000) &&
++                cast("divine shield", bot, "holy-paladin-divine-shield"))
++            {
++                markPrimaryDefensive();
++                return true;
++            }
++            if (snapshot.physicalPressureScore >= 0.70f && support != bot && support->GetHealthPct() <= 38.0f &&
++                primaryDefensiveReady() && cast("hand of protection", support, "holy-paladin-bop"))
++            {
++                markPrimaryDefensive();
++                return true;
++            }
++            if (support != bot && support->GetHealthPct() <= 55.0f && secondaryDefensiveReady() &&
++                cast("hand of sacrifice", support, "holy-paladin-sacrifice"))
++            {
++                markSecondaryDefensive();
++                return true;
++            }
++            if (support->GetHealthPct() < 88.0f && cast("holy shock", support, "holy-paladin-holy-shock"))
++                return true;
++            if (support->GetHealthPct() <= 72.0f)
++                return pressure(support->GetHealthPct() <= 45.0f ? "holy light" : "flash of light",
++                                support, "holy-paladin-hard-heal");
++            if (bot->GetPowerPct(POWER_MANA) < 30.0f && snapshot.incomingBurstScore < 0.25f &&
++                snapshot.triage.dangerScore < 0.35f && cast("divine plea", bot, "holy-paladin-divine-plea"))
++                return true;
++            return false;
++        }
++        case PvpArchetype::AssassinationRogue:
++        {
++            uint8 const combo = bot->GetComboPoints();
++            uint32 const energy = bot->GetPower(POWER_ENERGY);
++            bool const poisonNeedsRefresh = !botAI->HasAura("crippling poison", target, false, true) ||
++                                            !botAI->HasAura("wound poison", target, false, true);
++            if (melee && poisonNeedsRefresh && energy >= 35 &&
++                (!state.lastSpecUtilityAtMs || now - state.lastSpecUtilityAtMs >= 3000) &&
++                cast("shiv", target, "assassination-shiv"))
++            {
++                state.lastSpecUtilityAtMs = now;
++                return true;
++            }
++            if (plan.phase == PvpSpecPhase::Reset && !botAI->HasAura("stealth", bot) &&
++                cast("vanish", bot, "assassination-reset-vanish"))
++                return true;
++            if (commit && target->GetHealthPct() <= 30.0f && !melee &&
++                cast("cloak of shadows", bot, "assassination-offensive-cloak"))
++                return true;
++            if (melee && combo >= 4 && plan.phase == PvpSpecPhase::Setup && energy >= 60 &&
++                !plan.reserveControl && cast("kidney shot", target, "assassination-kidney", true))
++                return true;
++            if (melee && combo >= 4)
++                return pressure("envenom", target, "assassination-envenom") ||
++                       pressure("eviscerate", target, "assassination-eviscerate");
++            return melee && (pressure("mutilate", target, "assassination-mutilate") ||
++                             pressure("backstab", target, "assassination-backstab"));
++        }
++        case PvpArchetype::FrostDeathKnight:
++        {
++            if (ShouldSpendPvpMobility(snapshot.observedCooldowns.mobility, distance,
++                                       botAI->IsMovementImpaired(bot), survive) &&
++                distance <= 30.0f &&
++                cast("death grip", target, "frost-dk-post-mobility-grip"))
++            {
++                state.lastPrimaryMobilityAtMs = now;
++                return true;
++            }
++            if (NeedsSlow(botAI, "chains of ice", target) &&
++                cast("chains of ice", target, "frost-dk-chains"))
++                return true;
++            if (survive && cast("hungering cold", bot, "frost-dk-reset-cold", true))
++                return true;
++            if (commit && melee)
++            {
++                if (castBurst("unbreakable armor", bot, "frost-dk-unbreakable-armor") ||
++                    castBurst("deathchill", bot, "frost-dk-deathchill") ||
++                    castBurst("empower rune weapon", bot, "frost-dk-empower-rune-weapon"))
++                    return true;
++            }
++            if (botAI->HasAura("rime", bot) && pressure("howling blast", target, "frost-dk-rime"))
++                return true;
++            if (botAI->HasAura("killing machine", bot))
++                return pressure("frost strike", target, "frost-dk-killing-machine") ||
++                       pressure("obliterate", target, "frost-dk-killing-machine-obliterate");
++            return melee && (pressure("obliterate", target, "frost-dk-obliterate") ||
++                             pressure("frost strike", target, "frost-dk-frost-strike"));
++        }
++        case PvpArchetype::BeastMasteryHunter:
++        {
++            Pet* pet = bot->GetPet();
++            if (pet && pet->IsAlive() && pet->GetHealthPct() <= 45.0f &&
++                cast("mend pet", pet, "bm-mend-pet"))
++                return true;
++            if (ShouldSpendPvpMobility(snapshot.observedCooldowns.mobility, distance,
++                                       botAI->IsMovementImpaired(bot) || bot->HasRootAura(), survive) &&
++                primaryDefensiveReady() &&
++                cast("master's call", bot, "bm-masters-call"))
++            {
++                markPrimaryDefensive();
++                return true;
++            }
++            bool const petConnected = pet && pet->IsAlive() && pet->GetVictim() == target;
++            if (commit && petConnected && !snapshot.targetMajorDefensive &&
++                castBurst("bestial wrath", bot, "bm-bestial-wrath"))
++                return true;
++            if (petConnected && pressure("kill command", target, "bm-kill-command"))
++                return true;
++            if (bot->isMoving())
++                return pressure("arcane shot", target, "bm-moving-arcane") ||
++                       pressure("multi-shot", target, "bm-moving-multishot");
++            return pressure("steady shot", target, "bm-steady-shot") ||
++                   pressure("arcane shot", target, "bm-arcane-shot");
++        }
++        case PvpArchetype::FuryWarrior:
++        {
++            if ((bot->HasAuraWithMechanic(1ULL << MECHANIC_FEAR) ||
++                 bot->HasAuraWithMechanic(1ULL << MECHANIC_SAPPED)) &&
++                cast("berserker rage", bot, "fury-berserker-rage"))
++                return true;
++            bool const targetSlowed = botAI->HasAura("hamstring", target, false, true) ||
++                                      target->HasRootAura() || target->HasAuraType(SPELL_AURA_MOD_STUN);
++            if (ShouldSpendPvpMobility(snapshot.observedCooldowns.mobility, distance,
++                                       botAI->IsMovementImpaired(bot), survive) &&
++                cast("heroic fury", bot, "fury-heroic-fury"))
++                return true;
++            if (commit && melee && targetSlowed)
++            {
++                if (castBurst("death wish", bot, "fury-death-wish") ||
++                    (plan.phase == PvpSpecPhase::Finish && castBurst("recklessness", bot, "fury-recklessness")))
++                    return true;
++            }
++            if (target->GetHealthPct() <= 20.0f && pressure("execute", target, "fury-execute"))
++                return true;
++            return melee && (pressure("bloodthirst", target, "fury-bloodthirst") ||
++                             pressure("whirlwind", target, "fury-whirlwind") ||
++                             pressure("slam", target, "fury-slam"));
++        }
++        case PvpArchetype::ProtectionWarrior:
++        {
++            if (target->IsNonMeleeSpellCast(false) && snapshot.enemyCastHighValue &&
++                cast("spell reflection", bot, "prot-warrior-reflect"))
++                return true;
++            if (target->IsNonMeleeSpellCast(false) && melee &&
++                cast("shield bash", target, "prot-warrior-shield-bash"))
++                return true;
++            if (melee && snapshot.incomingBurstScore >= 0.55f &&
++                cast("disarm", target, "prot-warrior-disarm"))
++                return true;
++            if (melee && GetPvpControlState(target) == PvpControlState::None &&
++                (!state.lastSpecUtilityAtMs || now - state.lastSpecUtilityAtMs >= 4500))
++            {
++                if (cast("concussion blow", target, "prot-warrior-concussion", true) ||
++                    cast("shockwave", target, "prot-warrior-shockwave", true))
++                {
++                    state.lastSpecUtilityAtMs = now;
++                    return true;
++                }
++            }
++            if (distance > 8.0f && distance <= 25.0f && target->IsNonMeleeSpellCast(false) &&
++                (cast("charge", target, "prot-warrior-charge") ||
++                 cast("intercept", target, "prot-warrior-intercept")))
++                return true;
++            return melee && (pressure("shield slam", target, "prot-warrior-shield-slam") ||
++                             pressure("revenge", target, "prot-warrior-revenge") ||
++                             pressure("devastate", target, "prot-warrior-devastate"));
++        }
++        case PvpArchetype::ProtectionPaladin:
++        {
++            if (!botAI->HasAura("sacred shield", bot) && cast("sacred shield", bot, "prot-paladin-sacred-shield"))
++                return true;
++            if (support != bot && (botAI->IsMovementImpaired(support) || support->HasRootAura()) &&
++                cast("hand of freedom", support, "prot-paladin-freedom"))
++                return true;
++            if (support != bot && support->GetHealthPct() <= 35.0f && snapshot.physicalPressureScore >= 0.60f &&
++                primaryDefensiveReady() && cast("hand of protection", support, "prot-paladin-bop"))
++            {
++                markPrimaryDefensive();
++                return true;
++            }
++            if (target->IsNonMeleeSpellCast(false) && distance <= 30.0f &&
++                cast("avenger's shield", target, "prot-paladin-avengers-shield", true))
++                return true;
++            if (plan.phase == PvpSpecPhase::Peel && melee &&
++                cast("hammer of justice", target, "prot-paladin-peel-hoj", true))
++                return true;
++            if (!commit && plan.phase != PvpSpecPhase::Pressure)
++                return false;
++            return melee && (pressure("shield of righteousness", target, "prot-paladin-shield-righteous") ||
++                             pressure("hammer of the righteous", target, "prot-paladin-hammer-righteous") ||
++                             pressure("judgement of wisdom", target, "prot-paladin-judgement"));
++        }
++        case PvpArchetype::BloodDeathKnight:
++        {
++            if (bot->GetHealthPct() <= 38.0f && primaryDefensiveReady() &&
++                cast("vampiric blood", bot, "blood-dk-vampiric-blood"))
++            {
++                markPrimaryDefensive();
++                return true;
++            }
++            if (bot->GetHealthPct() <= 65.0f && secondaryDefensiveReady() &&
++                cast("rune tap", bot, "blood-dk-rune-tap"))
++            {
++                markSecondaryDefensive();
++                return true;
++            }
++            if (snapshot.physicalPressureScore >= 0.55f &&
++                cast("mark of blood", target, "blood-dk-mark-of-blood"))
++                return true;
++            if (plan.reserveSurvivalResource || bot->GetHealthPct() <= 78.0f)
++                if (pressure("death strike", target, "blood-dk-death-strike"))
++                    return true;
++            if (commit && melee && castBurst("dancing rune weapon", target, "blood-dk-dancing-rune-weapon"))
++                return true;
++            return melee && (pressure("heart strike", target, "blood-dk-heart-strike") ||
++                             pressure("death strike", target, "blood-dk-death-strike-fallback"));
++        }
++        case PvpArchetype::CombatRogue:
++        {
++            uint8 const combo = bot->GetComboPoints();
++            if (distance >= 12.0f &&
++                ShouldSpendPvpMobility(snapshot.observedCooldowns.mobility, distance,
++                                       botAI->IsMovementImpaired(bot), survive) &&
++                cast("sprint", bot, "combat-rogue-sprint"))
++                return true;
++            if (commit && melee && !snapshot.targetMajorDefensive)
++            {
++                if (castBurst("killing spree", target, "combat-rogue-killing-spree") ||
++                    castBurst("adrenaline rush", bot, "combat-rogue-adrenaline-rush"))
++                    return true;
++                bool const usefulSecondTarget = snapshot.recommendedTarget != snapshot.primaryTarget;
++                if (usefulSecondTarget && cast("blade flurry", bot, "combat-rogue-blade-flurry"))
++                    return true;
++            }
++            if (melee && combo >= 4)
++                return pressure("eviscerate", target, "combat-rogue-eviscerate");
++            return melee && (pressure("sinister strike", target, "combat-rogue-sinister-strike") ||
++                             pressure("revealing strike", target, "combat-rogue-revealing-strike"));
++        }
++        case PvpArchetype::HolyPriest:
++        {
++            SpellInfo const* enemySpell = snapshot.enemyCastSpellId ?
++                sSpellMgr->GetSpellInfo(snapshot.enemyCastSpellId) : nullptr;
++            bool const incomingPolymorph = enemySpell &&
++                (enemySpell->GetAllEffectsMechanicMask() & (1ULL << MECHANIC_POLYMORPH)) &&
++                target->GetTarget() == bot->GetGUID() && snapshot.enemyCastProgress >= 0.70f;
++            if (incomingPolymorph && cast("shadow word: death", target, "holy-priest-death-poly"))
++                return true;
++            if (support->GetHealthPct() <= 42.0f && snapshot.triage.incomingBurstScore >= 0.70f &&
++                primaryDefensiveReady() && cast("guardian spirit", support, "holy-priest-guardian-spirit"))
++            {
++                markPrimaryDefensive();
++                return true;
++            }
++            if (!botAI->HasAura("prayer of mending", support, false, true) &&
++                cast("prayer of mending", support, "holy-priest-prayer-of-mending"))
++                return true;
++            if (support->GetHealthPct() < 92.0f && !botAI->HasAura("renew", support, false, true) &&
++                cast("renew", support, "holy-priest-renew"))
++                return true;
++            if (support->GetHealthPct() <= 72.0f && !botAI->HasAura("power word: shield", support, false, true) &&
++                cast("power word: shield", support, "holy-priest-shield"))
++                return true;
++            if (support->GetHealthPct() <= 68.0f)
++                return pressure(support->GetHealthPct() <= 38.0f ? "greater heal" : "flash heal",
++                                support, "holy-priest-hard-heal");
++            return false;
++        }
++        default:
++            return false;
++    }
++}
++
+ bool PvpTacticalClassControlAction::Execute(Event /*event*/)
+ {
+     Unit* target = ResolvePvpClassActionTarget(botAI);
+@@ -2203,6 +2863,8 @@ bool PvpTacticalClassControlAction::Execute(Event /*event*/)
+                 return true;
+             return ShouldSpendPvpGapCloser(botAI, target) && TrySpell(botAI, "intercept", target, false);
+         case CLASS_PALADIN:
++            if (snapshot.archetype != PvpArchetype::HolyPaladin &&
++                snapshot.archetype != PvpArchetype::ProtectionPaladin)
+             if (Unit* support = ResolvePvpSupportTarget(botAI, 0.58f))
+             {
+                 if (snapshot.triage.mobilityNeed >= 0.45f && TrySpell(botAI, "hand of freedom", support, false))
+@@ -2236,6 +2898,15 @@ bool PvpTacticalClassControlAction::Execute(Event /*event*/)
+                 return true;
+             if (NeedsSlow(botAI, "chains of ice", target) && TrySpell(botAI, "chains of ice", target, false))
+                 return true;
++            if (snapshot.archetype == PvpArchetype::FrostDeathKnight)
++            {
++                bool const observedMobilitySpent =
++                    snapshot.observedCooldowns.mobility == ObservedPvpCooldownState::RecentlyUsed ||
++                    snapshot.observedCooldowns.mobility == ObservedPvpCooldownState::LikelyUnavailable;
++                if (!observedMobilitySpent && snapshot.intent != PvpIntent::Finish &&
++                    snapshot.intent != PvpIntent::Survive)
++                    return false;
++            }
+             return ShouldSpendPvpGapCloser(botAI, target, 10.0f) && TrySpell(botAI, "death grip", target, false);
+         case CLASS_HUNTER:
+         {
+@@ -2256,19 +2927,6 @@ bool PvpTacticalClassControlAction::Execute(Event /*event*/)
+                 return true;
+             if (melee && TrySpell(botAI, "disengage", bot, false))
+                 return true;
+-            if (snapshot.archetype == PvpArchetype::SurvivalHunter)
+-            {
+-                // Survival's core pressure is instant and should fire while a
+-                // retreat spline continues. This also gives the tactical layer
+-                // a direct recovery path after the stock invalid-target trigger
+-                // briefly loses its normal rotation candidate.
+-                if (!botAI->HasAura("explosive shot", target) &&
+-                    TrySpell(botAI, "explosive shot", target, false))
+-                    return true;
+-                if (!botAI->HasAura("black arrow", target) &&
+-                    TrySpell(botAI, "black arrow", target, false))
+-                    return true;
+-            }
+             if (snapshot.archetype == PvpArchetype::MarksmanshipHunter &&
+                 (PlayerbotAI::IsHeal(target->ToPlayer(), true) || target->GetHealthPct() <= 60.0f) &&
+                 !botAI->HasAura("aimed shot", target) && TrySpell(botAI, "aimed shot", target, false))
+@@ -2362,7 +3020,7 @@ bool PvpTacticalClassControlAction::Execute(Event /*event*/)
+                     return true;
+             }
+ 
+-            if (melee && comboPoints >= 5)
++            if (snapshot.archetype == PvpArchetype::SubtletyRogue && melee && comboPoints >= 5)
+             {
+                 if (GetPvpControlState(target) == PvpControlState::None)
+                 {
+@@ -2388,11 +3046,13 @@ bool PvpTacticalClassControlAction::Execute(Event /*event*/)
+             if (defensiveControl && distance <= 15.0f && TrySpell(botAI, "blind", target))
+                 return true;
+ 
+-            if (melee && comboPoints < 5 && bot->GetPower(POWER_ENERGY) >= 35 &&
++            if (snapshot.archetype == PvpArchetype::SubtletyRogue && melee && comboPoints < 5 &&
++                bot->GetPower(POWER_ENERGY) >= 35 &&
+                 (TrySpell(botAI, "hemorrhage", target, false) || TrySpell(botAI, "backstab", target, false) ||
+                  TrySpell(botAI, "sinister strike", target, false)))
+                 return true;
+-            return ShouldSpendPvpGapCloser(botAI, target) && TrySpell(botAI, "shadowstep", target, false);
++            return snapshot.archetype == PvpArchetype::SubtletyRogue &&
++                   ShouldSpendPvpGapCloser(botAI, target) && TrySpell(botAI, "shadowstep", target, false);
+         }
+         case CLASS_DRUID:
+         {
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.h b/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.h
+index 211fa8c2..65ff949a 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.h
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.h
+@@ -21,6 +21,14 @@ public:
+     bool isUseful() override;
+ };
+ 
++class PvpTacticalSpecPolicyAction : public Action
++{
++public:
++    PvpTacticalSpecPolicyAction(PlayerbotAI* botAI) : Action(botAI, "pvp tactical spec policy") {}
++    bool Execute(Event event) override;
++    bool isUseful() override;
++};
++
+ class PvpTacticalCasterPressureAction : public Action
+ {
+ public:
+diff --git a/modules/mod-playerbots/src/Ai/Base/Strategy/CombatStrategy.cpp b/modules/mod-playerbots/src/Ai/Base/Strategy/CombatStrategy.cpp
+index 73f82d7d..7851f7c6 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Strategy/CombatStrategy.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Strategy/CombatStrategy.cpp
+@@ -70,6 +70,7 @@ void CombatStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
+                                                          NextAction("pvp tactical emergency escape", PvpPriority::Breakout - 2),
+                                                          NextAction("pvp tactical hostile pet", PvpPriority::Control + 4),
+                                                          NextAction("pvp tactical class control", PvpPriority::Control),
++                                                         NextAction("pvp tactical spec policy", PvpPriority::Control - 1),
+                                                          NextAction("pvp tactical pet attack", PvpPriority::Pressure + 3),
+                                                          NextAction("pvp tactical target swap", PvpPriority::Pressure + 2),
+                                                          NextAction("pvp tactical caster pressure", PvpPriority::Pressure + 1) }));
+diff --git a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp
+index 45708346..5e82e3d5 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp
+@@ -5,6 +5,7 @@
+ #include "PvpTacticalValue.h"
+ 
+ #include "AiObjectContext.h"
++#include "AiFactory.h"
+ #include "Group.h"
+ #include "LastMovementValue.h"
+ #include "MotionMaster.h"
+@@ -77,11 +78,6 @@ bool HasMajorOffensive(Unit* unit)
+                       sizeof(MAJOR_OFFENSIVE_AURAS) / sizeof(MAJOR_OFFENSIVE_AURAS[0]));
+ }
+ 
+-bool HasPvpSpell(PlayerbotAI* botAI, char const* spell)
+-{
+-    return botAI && botAI->HasSpell(spell);
+-}
+-
+ bool IsHardControlled(Unit* unit)
+ {
+     if (!unit)
+@@ -875,6 +871,17 @@ void PvpTacticalState::Reset()
+     instantKiteUntilMs = 0;
+     lastCadencedControlAtMs = 0;
+     lastCadencedControlSpellId = 0;
++    observedMobilityAtMs = 0;
++    observedDefensiveAtMs = 0;
++    observedImmunityAtMs = 0;
++    observedPolicyTargetAtMs = 0;
++    lastPrimaryBurstAtMs = 0;
++    lastPrimaryMobilityAtMs = 0;
++    lastPrimaryDefensiveAtMs = 0;
++    lastSecondaryDefensiveAtMs = 0;
++    lastSpecUtilityAtMs = 0;
++    lastExplosiveShotAtMs = 0;
++    lastEarthShieldSwapAtMs = 0;
+     trackedPrimaryTarget.Clear();
+     movementTargetGuid.Clear();
+     observedEnemyCasterGuid.Clear();
+@@ -882,6 +889,8 @@ void PvpTacticalState::Reset()
+     controlWindowTargetGuid.Clear();
+     instantKiteThreatGuid.Clear();
+     lastCadencedControlTargetGuid.Clear();
++    observedPolicyTargetGuid.Clear();
++    earthShieldTargetGuid.Clear();
+     desiredDistance = 0.0f;
+     movementProgressX = 0.0f;
+     movementProgressY = 0.0f;
+@@ -896,6 +905,8 @@ void PvpTacticalState::Reset()
+     interruptCommitPct = 0.0f;
+     ownFakeCastCancelPct = 0.0f;
+     observedEnemyCastProgress = 0.0f;
++    observedPolicyTargetX = 0.0f;
++    observedPolicyTargetY = 0.0f;
+     druidOriginalForm = 0;
+     rangeMotion = PvpRangeMotion::Hold;
+     duelOrbitDirection = 0;
+@@ -943,53 +954,232 @@ PvpArchetype DetectPvpArchetype(PlayerbotAI* botAI)
+     if (!bot)
+         return PvpArchetype::Generic;
+ 
++    uint32 const tab = AiFactory::GetPlayerSpecTab(bot);
+     switch (bot->getClass())
+     {
+         case CLASS_WARRIOR:
+-            return HasPvpSpell(botAI, "mortal strike") && HasPvpSpell(botAI, "bladestorm") ?
+-                       PvpArchetype::ArmsWarrior : PvpArchetype::Generic;
++            if (tab == WARRIOR_TAB_ARMS)
++                return PvpArchetype::ArmsWarrior;
++            if (tab == WARRIOR_TAB_FURY)
++                return PvpArchetype::FuryWarrior;
++            if (tab == WARRIOR_TAB_PROTECTION)
++                return PvpArchetype::ProtectionWarrior;
++            break;
+         case CLASS_PALADIN:
+-            return !PlayerbotAI::IsHeal(bot, true) &&
+-                   (HasPvpSpell(botAI, "crusader strike") || HasPvpSpell(botAI, "divine storm")) ?
+-                       PvpArchetype::RetributionPaladin : PvpArchetype::Generic;
++            if (tab == PALADIN_TAB_HOLY)
++                return PvpArchetype::HolyPaladin;
++            if (tab == PALADIN_TAB_PROTECTION)
++                return PvpArchetype::ProtectionPaladin;
++            if (tab == PALADIN_TAB_RETRIBUTION)
++                return PvpArchetype::RetributionPaladin;
++            break;
+         case CLASS_DEATH_KNIGHT:
+-            return HasPvpSpell(botAI, "scourge strike") || HasPvpSpell(botAI, "summon gargoyle") ?
+-                       PvpArchetype::UnholyDeathKnight : PvpArchetype::Generic;
++            if (tab == DEATH_KNIGHT_TAB_BLOOD)
++                return PvpArchetype::BloodDeathKnight;
++            if (tab == DEATH_KNIGHT_TAB_FROST)
++                return PvpArchetype::FrostDeathKnight;
++            if (tab == DEATH_KNIGHT_TAB_UNHOLY)
++                return PvpArchetype::UnholyDeathKnight;
++            break;
+         case CLASS_HUNTER:
+-            if (HasPvpSpell(botAI, "chimera shot") && HasPvpSpell(botAI, "aimed shot"))
++            if (tab == HUNTER_TAB_BEAST_MASTERY)
++                return PvpArchetype::BeastMasteryHunter;
++            if (tab == HUNTER_TAB_MARKSMANSHIP)
+                 return PvpArchetype::MarksmanshipHunter;
+-            return HasPvpSpell(botAI, "explosive shot") || HasPvpSpell(botAI, "black arrow") ?
+-                       PvpArchetype::SurvivalHunter : PvpArchetype::Generic;
++            if (tab == HUNTER_TAB_SURVIVAL)
++                return PvpArchetype::SurvivalHunter;
++            break;
+         case CLASS_ROGUE:
+-            return HasPvpSpell(botAI, "shadowstep") || HasPvpSpell(botAI, "shadow dance") ?
+-                       PvpArchetype::SubtletyRogue : PvpArchetype::Generic;
++            if (tab == ROGUE_TAB_ASSASSINATION)
++                return PvpArchetype::AssassinationRogue;
++            if (tab == ROGUE_TAB_COMBAT)
++                return PvpArchetype::CombatRogue;
++            if (tab == ROGUE_TAB_SUBTLETY)
++                return PvpArchetype::SubtletyRogue;
++            break;
+         case CLASS_PRIEST:
+-            if (HasPvpSpell(botAI, "penance") || HasPvpSpell(botAI, "pain suppression"))
++            if (tab == PRIEST_TAB_DISCIPLINE)
+                 return PvpArchetype::DisciplinePriest;
+-            return HasPvpSpell(botAI, "shadowform") && HasPvpSpell(botAI, "mind flay") ?
+-                       PvpArchetype::ShadowPriest : PvpArchetype::Generic;
++            if (tab == PRIEST_TAB_HOLY)
++                return PvpArchetype::HolyPriest;
++            if (tab == PRIEST_TAB_SHADOW)
++                return PvpArchetype::ShadowPriest;
++            break;
+         case CLASS_SHAMAN:
+-            return HasPvpSpell(botAI, "lava burst") && HasPvpSpell(botAI, "thunderstorm") ?
+-                       PvpArchetype::ElementalShaman : PvpArchetype::Generic;
++            if (tab == SHAMAN_TAB_ELEMENTAL)
++                return PvpArchetype::ElementalShaman;
++            if (tab == SHAMAN_TAB_ENHANCEMENT)
++                return PvpArchetype::EnhancementShaman;
++            if (tab == SHAMAN_TAB_RESTORATION)
++                return PvpArchetype::RestorationShaman;
++            break;
+         case CLASS_MAGE:
+-            if (HasPvpSpell(botAI, "arcane barrage"))
++            if (tab == MAGE_TAB_ARCANE)
+                 return PvpArchetype::ArcaneMage;
+-            return HasPvpSpell(botAI, "deep freeze") ? PvpArchetype::FrostMage : PvpArchetype::Generic;
++            if (tab == MAGE_TAB_FIRE)
++                return PvpArchetype::FireMage;
++            if (tab == MAGE_TAB_FROST)
++                return PvpArchetype::FrostMage;
++            break;
+         case CLASS_WARLOCK:
+-            if (HasPvpSpell(botAI, "chaos bolt"))
++            if (tab == WARLOCK_TAB_AFFLICTION)
++                return PvpArchetype::AfflictionWarlock;
++            if (tab == WARLOCK_TAB_DEMONOLOGY)
++                return PvpArchetype::DemonologyWarlock;
++            if (tab == WARLOCK_TAB_DESTRUCTION)
+                 return PvpArchetype::DestructionWarlock;
+-            return HasPvpSpell(botAI, "unstable affliction") || HasPvpSpell(botAI, "haunt") ?
+-                       PvpArchetype::AfflictionWarlock : PvpArchetype::Generic;
++            break;
+         case CLASS_DRUID:
+-            if (PlayerbotAI::IsHeal(bot, true) &&
+-                (HasPvpSpell(botAI, "swiftmend") || HasPvpSpell(botAI, "tree of life")))
++            if (tab == DRUID_TAB_BALANCE)
++                return PvpArchetype::BalanceDruid;
++            if (tab == DRUID_TAB_FERAL)
++                return PvpArchetype::FeralDruid;
++            if (tab == DRUID_TAB_RESTORATION)
+                 return PvpArchetype::RestorationDruid;
+-            return HasPvpSpell(botAI, "moonkin form") &&
+-                   (HasPvpSpell(botAI, "starfall") || HasPvpSpell(botAI, "insect swarm")) ?
+-                       PvpArchetype::BalanceDruid : PvpArchetype::Generic;
++            break;
+         default:
+-            return PvpArchetype::Generic;
++            break;
+     }
++    return PvpArchetype::Generic;
++}
++
++ObservedPvpCooldownState ClassifyObservedPvpCooldown(uint32 now, uint32 observedAtMs,
++                                                     uint32 recentMs, uint32 unavailableMs)
++{
++    if (!observedAtMs)
++        return ObservedPvpCooldownState::Unknown;
++    uint32 const elapsed = now - observedAtMs;
++    if (elapsed <= recentMs)
++        return ObservedPvpCooldownState::RecentlyUsed;
++    if (elapsed <= unavailableMs)
++        return ObservedPvpCooldownState::LikelyUnavailable;
++    return ObservedPvpCooldownState::LikelyAvailable;
++}
++
++PvpSpecPhase SelectPvpSpecPhase(bool allyCritical, bool selfCritical, bool targetFinish,
++                                bool targetProtected, bool safeRecovery, bool resetRequested,
++                                float incomingBurstScore, float killWindowScore)
++{
++    // A nearly secured kill may be worth finishing through moderate pressure,
++    // but never through a true lethal enemy go. This is the shared answer to
++    // "Finish or Reset?" used by every specialization policy.
++    if (targetFinish && killWindowScore >= 0.82f && incomingBurstScore < 0.85f && !targetProtected)
++        return PvpSpecPhase::Finish;
++    if (selfCritical || incomingBurstScore >= 0.78f)
++        return PvpSpecPhase::Survive;
++    if (allyCritical)
++        return PvpSpecPhase::Peel;
++    if (targetProtected)
++        return safeRecovery ? PvpSpecPhase::Recover : PvpSpecPhase::Setup;
++    if (resetRequested)
++        return PvpSpecPhase::Reset;
++    if (safeRecovery)
++        return PvpSpecPhase::Recover;
++    if (targetFinish)
++        return PvpSpecPhase::Finish;
++    if (killWindowScore >= 0.62f)
++        return PvpSpecPhase::Commit;
++    if (killWindowScore >= 0.35f)
++        return PvpSpecPhase::Setup;
++    return PvpSpecPhase::Pressure;
++}
++
++bool ShouldCommitPvpPrimaryBurst(PvpSpecPhase phase, float commitScore,
++                                 bool targetProtected, bool targetConnected)
++{
++    return !targetProtected && targetConnected && commitScore >= 0.62f &&
++           (phase == PvpSpecPhase::Commit || phase == PvpSpecPhase::Finish);
++}
++
++bool ShouldSpendPvpMobility(ObservedPvpCooldownState observedEnemyMobility,
++                            float targetDistance, bool movementImpaired, bool emergency)
++{
++    if (emergency && movementImpaired)
++        return true;
++    bool const enemyMobilitySpent = observedEnemyMobility == ObservedPvpCooldownState::RecentlyUsed ||
++                                    observedEnemyMobility == ObservedPvpCooldownState::LikelyUnavailable;
++    return enemyMobilitySpent && targetDistance >= 8.0f;
++}
++
++bool ShouldReserveSurvivalTrap(bool controlCandidate, bool controlAlreadyActive,
++                               PvpSpecPhase phase)
++{
++    return controlCandidate && !controlAlreadyActive && phase != PvpSpecPhase::Finish;
++}
++
++PvpProcUse SelectPvpProcUse(uint8 stacks, uint8 requiredStacks, bool criticalHeal,
++                            bool controlSetup, bool damageWindow)
++{
++    if (stacks < requiredStacks)
++        return PvpProcUse::Hold;
++    if (criticalHeal)
++        return PvpProcUse::Heal;
++    if (controlSetup)
++        return PvpProcUse::Control;
++    return damageWindow ? PvpProcUse::Damage : PvpProcUse::Hold;
++}
++
++PvpSpecPlan BuildPvpSpecPlan(PlayerbotAI* botAI, PvpSnapshot const& snapshot)
++{
++    PvpSpecPlan plan;
++    Player* bot = botAI ? botAI->GetBot() : nullptr;
++    Unit* target = botAI ? botAI->GetUnit(snapshot.primaryTarget) : nullptr;
++    if (!bot || !target)
++        return plan;
++
++    plan.killTarget = snapshot.primaryTarget;
++    plan.controlTarget = snapshot.ccTarget;
++    bool const targetProtected = snapshot.targetMajorDefensive ||
++        snapshot.targetControlState == PvpControlState::DamageImmune ||
++        snapshot.targetControlState == PvpControlState::DamageBreakable;
++    bool const safeRecovery = bot->GetHealthPct() < 55.0f &&
++        (snapshot.controlWindow.active || targetProtected || snapshot.incomingBurstScore < 0.30f);
++    bool const resetRequested = snapshot.intent == PvpIntent::Reset ||
++        (bot->GetHealthPct() < 40.0f && target->GetHealthPct() > 55.0f &&
++         snapshot.killWindowScore < 0.45f);
++    bool const allyCritical = snapshot.triage.targetGuid != bot->GetGUID() &&
++        snapshot.triage.dangerScore >= 0.72f;
++    bool const selfCritical = bot->GetHealthPct() <= 25.0f;
++    bool const targetFinish = target->GetHealthPct() <= 30.0f || snapshot.killWindowScore >= 0.72f;
++
++    float observedOpportunity = 0.0f;
++    if (snapshot.observedCooldowns.mobility == ObservedPvpCooldownState::RecentlyUsed ||
++        snapshot.observedCooldowns.mobility == ObservedPvpCooldownState::LikelyUnavailable)
++        observedOpportunity += 0.30f;
++    if (snapshot.observedCooldowns.majorDefensive == ObservedPvpCooldownState::LikelyUnavailable ||
++        snapshot.observedCooldowns.immunity == ObservedPvpCooldownState::LikelyUnavailable)
++        observedOpportunity += 0.12f;
++    if (snapshot.targetControlState == PvpControlState::DamageSafe)
++        observedOpportunity += 0.12f;
++    if (bot->GetDistance2d(target) <= 12.0f)
++        observedOpportunity += 0.12f;
++    plan.commitScore = std::clamp(snapshot.killWindowScore + observedOpportunity -
++                                      (targetProtected ? 0.65f : 0.0f),
++                                  0.0f, 1.0f);
++    plan.resetScore = std::clamp((100.0f - bot->GetHealthPct()) / 100.0f * 0.65f +
++                                     snapshot.incomingBurstScore * 0.45f -
++                                     snapshot.killWindowScore * 0.50f,
++                                 0.0f, 1.0f);
++    plan.phase = SelectPvpSpecPhase(allyCritical, selfCritical, targetFinish,
++                                    targetProtected, safeRecovery, resetRequested,
++                                    snapshot.incomingBurstScore, snapshot.killWindowScore);
++    if ((plan.phase == PvpSpecPhase::Pressure || plan.phase == PvpSpecPhase::Setup) &&
++        plan.commitScore >= 0.62f && !targetProtected)
++        plan.phase = PvpSpecPhase::Commit;
++    plan.reservePrimaryBurst = targetProtected ||
++        (plan.phase != PvpSpecPhase::Commit && plan.phase != PvpSpecPhase::Finish) ||
++        plan.commitScore < 0.62f;
++    plan.reservePrimaryMobility =
++        snapshot.observedCooldowns.mobility != ObservedPvpCooldownState::RecentlyUsed &&
++        snapshot.observedCooldowns.mobility != ObservedPvpCooldownState::LikelyUnavailable &&
++        bot->GetDistance2d(target) < 12.0f;
++    plan.reservePrimaryDefensive = plan.phase != PvpSpecPhase::Survive &&
++        snapshot.defensiveNeedScore < 0.58f;
++    plan.reserveControl = snapshot.controlWindow.active ||
++        snapshot.targetControlState != PvpControlState::None || plan.phase == PvpSpecPhase::Finish;
++    plan.reserveSurvivalResource =
++        snapshot.archetype == PvpArchetype::BloodDeathKnight && bot->GetHealthPct() < 72.0f;
++    return plan;
+ }
+ 
+ Unit* ResolvePvpThreatTarget(PlayerbotAI* botAI, float maxDistance)
+@@ -1301,7 +1491,8 @@ PvpSnapshot PvpSnapshotValue::Calculate()
+             snapshot.pet.resourcePct = pet->GetPowerPct(POWER_FOCUS);
+         else if (pet->GetMaxPower(POWER_MANA))
+             snapshot.pet.resourcePct = pet->GetPowerPct(POWER_MANA);
+-        snapshot.pet.controlSpellId = FindPetSpell(botAI, pet, { "gnaw", "spell lock", "seduction", "intimidation" });
++        snapshot.pet.controlSpellId = FindPetSpell(
++            botAI, pet, { "gnaw", "spell lock", "seduction", "intimidation", "intercept" });
+         snapshot.pet.defensiveSpellId = FindPetSpell(botAI, pet, { "huddle", "roar of sacrifice", "master's call" });
+         snapshot.pet.controlReady = snapshot.pet.controlSpellId && !pet->HasSpellCooldown(snapshot.pet.controlSpellId);
+         snapshot.pet.defensiveReady = snapshot.pet.defensiveSpellId && !pet->HasSpellCooldown(snapshot.pet.defensiveSpellId);
+@@ -1317,6 +1508,11 @@ PvpSnapshot PvpSnapshotValue::Calculate()
+     {
+         state.trackedPrimaryTarget.Clear();
+         state.targetAcquiredAtMs = 0;
++        state.observedPolicyTargetGuid.Clear();
++        state.observedPolicyTargetAtMs = 0;
++        state.observedMobilityAtMs = 0;
++        state.observedDefensiveAtMs = 0;
++        state.observedImmunityAtMs = 0;
+         return snapshot;
+     }
+     if (state.trackedPrimaryTarget != current->GetGUID())
+@@ -1329,6 +1525,47 @@ PvpSnapshot PvpSnapshotValue::Calculate()
+     snapshot.targetControlState = GetPvpControlState(current);
+     snapshot.controlWindow = GetPvpControlWindow(botAI, current, snapshot.archetype);
+ 
++    // The ledger only records public evidence. A large visible displacement is
++    // treated as observed mobility; visible defensive/immunity auras refresh
++    // their observation timestamp. It never asks the hostile Player object for
++    // spell cooldowns or talents.
++    if (state.observedPolicyTargetGuid != current->GetGUID())
++    {
++        state.observedPolicyTargetGuid = current->GetGUID();
++        state.observedPolicyTargetAtMs = now;
++        state.observedPolicyTargetX = current->GetPositionX();
++        state.observedPolicyTargetY = current->GetPositionY();
++        state.observedMobilityAtMs = 0;
++        state.observedDefensiveAtMs = 0;
++        state.observedImmunityAtMs = 0;
++    }
++    else
++    {
++        uint32 const observedElapsed = now - state.observedPolicyTargetAtMs;
++        float const observedDx = current->GetPositionX() - state.observedPolicyTargetX;
++        float const observedDy = current->GetPositionY() - state.observedPolicyTargetY;
++        if (observedElapsed >= 100 && observedElapsed <= 900 &&
++            std::sqrt(observedDx * observedDx + observedDy * observedDy) >= 10.0f)
++            state.observedMobilityAtMs = now;
++        state.observedPolicyTargetAtMs = now;
++        state.observedPolicyTargetX = current->GetPositionX();
++        state.observedPolicyTargetY = current->GetPositionY();
++    }
++    bool const explicitImmunity = current->HasAura(45438) || current->HasAura(642);
++    if (snapshot.targetMajorDefensive)
++        state.observedDefensiveAtMs = now;
++    if (explicitImmunity)
++        state.observedImmunityAtMs = now;
++    snapshot.observedCooldowns.mobilityObservedAtMs = state.observedMobilityAtMs;
++    snapshot.observedCooldowns.defensiveObservedAtMs = state.observedDefensiveAtMs;
++    snapshot.observedCooldowns.immunityObservedAtMs = state.observedImmunityAtMs;
++    snapshot.observedCooldowns.mobility =
++        ClassifyObservedPvpCooldown(now, state.observedMobilityAtMs, 2500, 12000);
++    snapshot.observedCooldowns.majorDefensive =
++        ClassifyObservedPvpCooldown(now, state.observedDefensiveAtMs, 2500, 45000);
++    snapshot.observedCooldowns.immunity =
++        ClassifyObservedPvpCooldown(now, state.observedImmunityAtMs, 2500, 90000);
++
+     if (Unit* hostilePet = ResolvePvpHostilePet(botAI, 50.0f))
+     {
+         snapshot.hostilePet.petGuid = hostilePet->GetGUID();
+@@ -1494,6 +1731,8 @@ PvpSnapshot PvpSnapshotValue::Calculate()
+     else
+         snapshot.intent = PvpIntent::Pressure;
+ 
++    snapshot.specPlan = BuildPvpSpecPlan(botAI, snapshot);
++
+     Spell* ownCast = bot->GetCurrentSpell(CURRENT_GENERIC_SPELL);
+     if (!ownCast)
+     {
+diff --git a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h
+index 2cf3008d..6e744ea9 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h
++++ b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h
+@@ -43,22 +43,89 @@ enum class PvpArchetype : uint8
+ {
+     Generic,
+     ArmsWarrior,
++    FuryWarrior,
++    ProtectionWarrior,
++    HolyPaladin,
++    ProtectionPaladin,
+     RetributionPaladin,
++    BloodDeathKnight,
++    FrostDeathKnight,
+     UnholyDeathKnight,
++    BeastMasteryHunter,
+     MarksmanshipHunter,
+     SurvivalHunter,
++    AssassinationRogue,
++    CombatRogue,
+     SubtletyRogue,
+     DisciplinePriest,
++    HolyPriest,
+     ShadowPriest,
+     ElementalShaman,
++    EnhancementShaman,
++    RestorationShaman,
++    FireMage,
+     FrostMage,
++    DemonologyWarlock,
+     AfflictionWarlock,
+     DestructionWarlock,
++    FeralDruid,
+     RestorationDruid,
+     ArcaneMage,
+     BalanceDruid
+ };
+ 
++enum class PvpSpecPhase : uint8
++{
++    Pressure,
++    Setup,
++    Commit,
++    Finish,
++    Survive,
++    Recover,
++    Reset,
++    Peel
++};
++
++enum class ObservedPvpCooldownState : uint8
++{
++    Unknown,
++    LikelyAvailable,
++    RecentlyUsed,
++    LikelyUnavailable
++};
++
++enum class PvpProcUse : uint8
++{
++    Hold,
++    Damage,
++    Heal,
++    Control
++};
++
++struct ObservedPvpCooldownLedger
++{
++    ObservedPvpCooldownState mobility = ObservedPvpCooldownState::Unknown;
++    ObservedPvpCooldownState majorDefensive = ObservedPvpCooldownState::Unknown;
++    ObservedPvpCooldownState immunity = ObservedPvpCooldownState::Unknown;
++    uint32 mobilityObservedAtMs = 0;
++    uint32 defensiveObservedAtMs = 0;
++    uint32 immunityObservedAtMs = 0;
++};
++
++struct PvpSpecPlan
++{
++    PvpSpecPhase phase = PvpSpecPhase::Pressure;
++    ObjectGuid killTarget;
++    ObjectGuid controlTarget;
++    bool reservePrimaryBurst = true;
++    bool reservePrimaryMobility = true;
++    bool reservePrimaryDefensive = true;
++    bool reserveControl = true;
++    bool reserveSurvivalResource = false;
++    float commitScore = 0.0f;
++    float resetScore = 0.0f;
++};
++
+ enum class PvpControlState : uint8
+ {
+     None,
+@@ -204,6 +271,17 @@ struct PvpTacticalState
+     uint32 instantKiteUntilMs = 0;
+     uint32 lastCadencedControlAtMs = 0;
+     uint32 lastCadencedControlSpellId = 0;
++    uint32 observedMobilityAtMs = 0;
++    uint32 observedDefensiveAtMs = 0;
++    uint32 observedImmunityAtMs = 0;
++    uint32 observedPolicyTargetAtMs = 0;
++    uint32 lastPrimaryBurstAtMs = 0;
++    uint32 lastPrimaryMobilityAtMs = 0;
++    uint32 lastPrimaryDefensiveAtMs = 0;
++    uint32 lastSecondaryDefensiveAtMs = 0;
++    uint32 lastSpecUtilityAtMs = 0;
++    uint32 lastExplosiveShotAtMs = 0;
++    uint32 lastEarthShieldSwapAtMs = 0;
+     ObjectGuid trackedPrimaryTarget;
+     ObjectGuid movementTargetGuid;
+     ObjectGuid observedEnemyCasterGuid;
+@@ -211,6 +289,8 @@ struct PvpTacticalState
+     ObjectGuid controlWindowTargetGuid;
+     ObjectGuid instantKiteThreatGuid;
+     ObjectGuid lastCadencedControlTargetGuid;
++    ObjectGuid observedPolicyTargetGuid;
++    ObjectGuid earthShieldTargetGuid;
+     float desiredDistance = 0.0f;
+     float movementProgressX = 0.0f;
+     float movementProgressY = 0.0f;
+@@ -225,6 +305,8 @@ struct PvpTacticalState
+     float interruptCommitPct = 0.0f;
+     float ownFakeCastCancelPct = 0.0f;
+     float observedEnemyCastProgress = 0.0f;
++    float observedPolicyTargetX = 0.0f;
++    float observedPolicyTargetY = 0.0f;
+     uint32 druidOriginalForm = 0;
+     PvpRangeMotion rangeMotion = PvpRangeMotion::Hold;
+     int8 duelOrbitDirection = 0;
+@@ -310,6 +392,8 @@ struct PvpSnapshot
+     PvpPetSnapshot pet;
+     PvpHostilePetSnapshot hostilePet;
+     PvpControlWindow controlWindow;
++    ObservedPvpCooldownLedger observedCooldowns;
++    PvpSpecPlan specPlan;
+     uint32 capturedAtMs = 0;
+     uint32 enemyCastSpellId = 0;
+     uint32 enemyCastRemainingMs = 0;
+@@ -360,6 +444,20 @@ Unit* ResolvePvpControlTarget(PlayerbotAI* botAI, Unit* primaryTarget = nullptr)
+ bool IsPvpTacticalEligible(Player* bot);
+ bool IsPvpTacticalContextEnabled(Player* bot);
+ PvpArchetype DetectPvpArchetype(PlayerbotAI* botAI);
++ObservedPvpCooldownState ClassifyObservedPvpCooldown(uint32 now, uint32 observedAtMs,
++                                                     uint32 recentMs, uint32 unavailableMs);
++PvpSpecPhase SelectPvpSpecPhase(bool allyCritical, bool selfCritical, bool targetFinish,
++                                bool targetProtected, bool safeRecovery, bool resetRequested,
++                                float incomingBurstScore, float killWindowScore);
++bool ShouldCommitPvpPrimaryBurst(PvpSpecPhase phase, float commitScore,
++                                 bool targetProtected, bool targetConnected);
++bool ShouldSpendPvpMobility(ObservedPvpCooldownState observedEnemyMobility,
++                            float targetDistance, bool movementImpaired, bool emergency);
++bool ShouldReserveSurvivalTrap(bool controlCandidate, bool controlAlreadyActive,
++                               PvpSpecPhase phase);
++PvpProcUse SelectPvpProcUse(uint8 stacks, uint8 requiredStacks, bool criticalHeal,
++                            bool controlSetup, bool damageWindow);
++PvpSpecPlan BuildPvpSpecPlan(PlayerbotAI* botAI, PvpSnapshot const& snapshot);
+ PvpControlState ClassifyPvpControlMetadata(uint64 mechanicMask, uint32 auraInterruptFlags, bool damageImmune);
+ PvpControlState ClassifyPvpControlFallback(bool metadataDamageSafe, bool stunned, bool rooted, bool silenced,
+                                            bool feared, bool confused, bool charmed, bool areaCharmed);
+diff --git a/modules/mod-playerbots/t/PvpTacticalPolicyTests.cxx b/modules/mod-playerbots/t/PvpTacticalPolicyTests.cxx
+index 487b6b36..173c870f 100644
+--- a/modules/mod-playerbots/t/PvpTacticalPolicyTests.cxx
++++ b/modules/mod-playerbots/t/PvpTacticalPolicyTests.cxx
+@@ -392,4 +392,64 @@ TEST(PvpDamagePolicy, AreaDamageChecksBothImpactAndCasterVicinity)
+     EXPECT_FALSE(ShouldBlockPvpAreaDamage(true, false, false));
+     EXPECT_FALSE(ShouldBlockPvpAreaDamage(false, true, true));
+ }
++
++TEST(PvpSpecPolicy, ObservedCooldownsAgeWithoutReadingHiddenEnemyState)
++{
++    EXPECT_EQ(ObservedPvpCooldownState::Unknown,
++              ClassifyObservedPvpCooldown(10000, 0, 2500, 12000));
++    EXPECT_EQ(ObservedPvpCooldownState::RecentlyUsed,
++              ClassifyObservedPvpCooldown(10000, 8000, 2500, 12000));
++    EXPECT_EQ(ObservedPvpCooldownState::LikelyUnavailable,
++              ClassifyObservedPvpCooldown(10000, 5000, 2500, 12000));
++    EXPECT_EQ(ObservedPvpCooldownState::LikelyAvailable,
++              ClassifyObservedPvpCooldown(20001, 8000, 2500, 12000));
++}
++
++TEST(PvpSpecPolicy, FinishCanBeatOptionalResetButNeverAFullLethalGo)
++{
++    EXPECT_EQ(PvpSpecPhase::Finish,
++              SelectPvpSpecPhase(false, true, true, false, false, true, 0.70f, 0.90f));
++    EXPECT_EQ(PvpSpecPhase::Survive,
++              SelectPvpSpecPhase(false, true, true, false, false, true, 0.90f, 0.90f));
++    EXPECT_EQ(PvpSpecPhase::Recover,
++              SelectPvpSpecPhase(false, false, false, true, true, false, 0.10f, 0.0f));
++    EXPECT_EQ(PvpSpecPhase::Peel,
++              SelectPvpSpecPhase(true, false, false, false, false, false, 0.30f, 0.20f));
++}
++
++TEST(PvpSpecPolicy, BurstRequiresARealConnectedCommitWindow)
++{
++    EXPECT_TRUE(ShouldCommitPvpPrimaryBurst(PvpSpecPhase::Commit, 0.72f, false, true));
++    EXPECT_TRUE(ShouldCommitPvpPrimaryBurst(PvpSpecPhase::Finish, 0.90f, false, true));
++    EXPECT_FALSE(ShouldCommitPvpPrimaryBurst(PvpSpecPhase::Pressure, 0.90f, false, true));
++    EXPECT_FALSE(ShouldCommitPvpPrimaryBurst(PvpSpecPhase::Commit, 0.72f, true, true));
++    EXPECT_FALSE(ShouldCommitPvpPrimaryBurst(PvpSpecPhase::Commit, 0.72f, false, false));
++}
++
++TEST(PvpSpecPolicy, MobilityIsSavedUntilEnemyMovementOrAnEmergencyRoot)
++{
++    EXPECT_FALSE(ShouldSpendPvpMobility(ObservedPvpCooldownState::Unknown, 20.0f, false, false));
++    EXPECT_TRUE(ShouldSpendPvpMobility(ObservedPvpCooldownState::RecentlyUsed, 20.0f, false, false));
++    EXPECT_TRUE(ShouldSpendPvpMobility(ObservedPvpCooldownState::LikelyUnavailable, 9.0f, false, false));
++    EXPECT_FALSE(ShouldSpendPvpMobility(ObservedPvpCooldownState::LikelyUnavailable, 5.0f, false, false));
++    EXPECT_TRUE(ShouldSpendPvpMobility(ObservedPvpCooldownState::Unknown, 5.0f, true, true));
++}
++
++TEST(PvpSpecPolicy, SurvivalTrapResourceIsNotSpentOnRoutineBlackArrow)
++{
++    EXPECT_TRUE(ShouldReserveSurvivalTrap(true, false, PvpSpecPhase::Pressure));
++    EXPECT_TRUE(ShouldReserveSurvivalTrap(true, false, PvpSpecPhase::Commit));
++    EXPECT_FALSE(ShouldReserveSurvivalTrap(true, true, PvpSpecPhase::Commit));
++    EXPECT_FALSE(ShouldReserveSurvivalTrap(true, false, PvpSpecPhase::Finish));
++    EXPECT_FALSE(ShouldReserveSurvivalTrap(false, false, PvpSpecPhase::Pressure));
++}
++
++TEST(PvpSpecPolicy, ProcResourcesChooseSurvivalControlThenDamage)
++{
++    EXPECT_EQ(PvpProcUse::Hold, SelectPvpProcUse(4, 5, true, true, true));
++    EXPECT_EQ(PvpProcUse::Heal, SelectPvpProcUse(5, 5, true, true, true));
++    EXPECT_EQ(PvpProcUse::Control, SelectPvpProcUse(5, 5, false, true, true));
++    EXPECT_EQ(PvpProcUse::Damage, SelectPvpProcUse(5, 5, false, false, true));
++    EXPECT_EQ(PvpProcUse::Hold, SelectPvpProcUse(5, 5, false, false, false));
++}
+ }

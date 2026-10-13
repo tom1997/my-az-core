@@ -1,6 +1,6 @@
 # Mythic Plus 使用说明
 
-本发行版集成 `silviu20092/mod-mythic-plus`：纯 C++、无需 Eluna 或客户端补丁，适合现有 Playerbot 与 Dungeon Clear 队伍。它提供钥石、层数、计时、死亡罚时、词缀、排行榜记录和通关奖励。
+本发行版集成 `silviu20092/mod-mythic-plus`：纯 C++、无需 Eluna。另附 `mod-mythic-plus-ui` 客户端插件，用于显示计时器、可配置 Boss/小怪目标和通关结算。
 
 ## 首次使用
 
@@ -34,4 +34,16 @@
 
 原模块的金币与 TBC 正义徽章奖励由自有模块替换为每层 20～80 金币。可以在 `mod_mythic_rewards.conf` 中调整限时/超时装备总数、关闭周奖励、禁用武器或修改职责候选窗口。`scripts/generate-mythic-items.ps1` 用于在 Core 数据库结构变更后重新生成物品 SQL。
 
-这套模块接近 7.x 的“钥石＋限时＋词缀”核心循环，但没有官方客户端的敌方部队 UI、每周宝库和完整评分界面。Playerbot 不理解所有现代词缀，首轮建议从 +1 到 +3 验证走位与生存，再逐步提高。
+这套模块接近 7.x 的“钥石＋限时＋词缀”核心循环。`client-addon\MythicPlusUI` 需要复制到客户端 `Interface\AddOns\MythicPlusUI` 并在角色选择界面启用。
+
+目标由世界数据库中的 `mythic_plus_ui_objective` 配置。`objective_type = 0` 是 Boss，`objective_type = 1` 是小怪；小怪的 `entry = 0` 表示任意可计入的小怪。例如：
+
+```sql
+INSERT INTO mythic_plus_ui_objective
+    (map_id, objective_type, entry, required_count, label)
+VALUES
+    (574, 0, 23954, 1, '伊米隆国王'),
+    (574, 1, 0, 80, '敌方部队');
+```
+
+配置了目标的副本会要求“最终 Boss 已击杀且所有目标完成”后结算，因此先杀尾王再补敌方部队也能正确完成。进度、尾王状态和死亡罚时会在重新进入实例时恢复；未配置目标的副本保持原本“击杀最终 Boss即完成”的行为。Playerbot 不理解所有现代词缀，首轮建议从 +1 到 +3 验证走位与生存，再逐步提高。

@@ -1,0 +1,500 @@
+diff --git a/modules/mod-playerbots/src/Ai/Base/ActionContext.h b/modules/mod-playerbots/src/Ai/Base/ActionContext.h
+index 9f25c8c..4cdcd7e 100644
+--- a/modules/mod-playerbots/src/Ai/Base/ActionContext.h
++++ b/modules/mod-playerbots/src/Ai/Base/ActionContext.h
+@@ -103,6 +103,7 @@ public:
+         creators["pvp tactical pressure hunter"] = &ActionContext::pvp_tactical_pressure_hunter;
+         creators["pvp tactical melee flank"] = &ActionContext::pvp_tactical_melee_flank;
+         creators["pvp tactical class control"] = &ActionContext::pvp_tactical_class_control;
++        creators["pvp tactical duel opener"] = &ActionContext::pvp_tactical_duel_opener;
+         creators["avoid aoe"] = &ActionContext::avoid_aoe;
+         creators["combat formation move"] = &ActionContext::combat_formation_move;
+         creators["tank face"] = &ActionContext::tank_face;
+@@ -329,6 +330,7 @@ private:
+     }
+     static Action* pvp_tactical_melee_flank(PlayerbotAI* botAI) { return new PvpTacticalMeleeFlankAction(botAI); }
+     static Action* pvp_tactical_class_control(PlayerbotAI* botAI) { return new PvpTacticalClassControlAction(botAI); }
++    static Action* pvp_tactical_duel_opener(PlayerbotAI* botAI) { return new PvpTacticalDuelOpenerAction(botAI); }
+     static Action* avoid_aoe(PlayerbotAI* botAI) { return new AvoidAoeAction(botAI); }
+     static Action* combat_formation_move(PlayerbotAI* botAI) { return new CombatFormationMoveAction(botAI); }
+     static Action* tank_face(PlayerbotAI* botAI) { return new TankFaceAction(botAI); }
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/AttackAction.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/AttackAction.cpp
+index d052b5c..4b84080 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/AttackAction.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/AttackAction.cpp
+@@ -12,6 +12,7 @@
+ #include "PlayerbotAI.h"
+ #include "PlayerbotTextMgr.h"
+ #include "Playerbots.h"
++#include "PvpTacticalActions.h"
+ #include "ServerFacade.h"
+ #include "Unit.h"
+ #include "WaitForAttackStrategy.h"
+@@ -263,6 +264,9 @@ bool AttackDuelOpponentAction::isUseful()
+     if (bot->duel->State != DUEL_STATE_IN_PROGRESS)
+         return false;
+ 
++    if (ShouldHoldDuelAttackForOpener(botAI, opponent))
++        return false;
++
+     Unit* desired = IsFullyDamageImmune(opponent) ? GetDuelSecondaryTarget(bot, opponent) : opponent;
+     Unit* current = AI_VALUE(Unit*, "current target");
+     if (desired == opponent && current == opponent && botAI->HasAura("polymorph", opponent))
+@@ -310,6 +314,9 @@ bool AttackDuelOpponentAction::Execute(Event /*event*/)
+     if (bot->duel->State != DUEL_STATE_IN_PROGRESS)
+         return false;
+ 
++    if (ShouldHoldDuelAttackForOpener(botAI, opponent))
++        return false;
++
+     if (IsFullyDamageImmune(opponent))
+     {
+         if (Unit* secondary = GetDuelSecondaryTarget(bot, opponent))
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp
+index 55cfbde..2955fdf 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp
+@@ -1901,6 +1901,49 @@ bool PvpTacticalRetreatAction::Execute(Event /*event*/)
+         if (duelFlag)
+         {
+             float const safeRadius = std::clamp(sPlayerbotAIConfig.pvpTacticalDuelSafeRadius, 20.0f, 39.0f);
++            // A pre-placed hunter trap is a control anchor. Circle across it
++            // instead of abandoning it with a straight retreat, so a melee
++            // pursuer has to cross the trap to keep pressure.
++            if (bot->getClass() == CLASS_HUNTER && state.hasDuelAnchor && distance <= 15.0f)
++            {
++                float const orbitRadius = 5.0f;
++                float const currentAngle = std::atan2(bot->GetPositionY() - state.duelAnchorY,
++                                                      bot->GetPositionX() - state.duelAnchorX);
++                bool orbitFound = false;
++                Position orbitBest;
++                float orbitScore = -FLT_MAX;
++                for (float const turn : { float(M_PI / 2.0), float(-M_PI / 2.0), float(2.0 * M_PI / 3.0),
++                                          float(-2.0 * M_PI / 3.0), float(M_PI) })
++                {
++                    float x = state.duelAnchorX + std::cos(currentAngle + turn) * orbitRadius;
++                    float y = state.duelAnchorY + std::sin(currentAngle + turn) * orbitRadius;
++                    float z = state.duelAnchorZ;
++                    if (!bot->GetMap()->CheckCollisionAndGetValidCoords(bot, bot->GetPositionX(), bot->GetPositionY(),
++                                                                         bot->GetPositionZ(), x, y, z) ||
++                        duelFlag->GetDistance2d(x, y) > safeRadius)
++                        continue;
++                    float const score = target->GetDistance2d(x, y) - bot->GetDistance2d(x, y) * 0.15f;
++                    if (!orbitFound || score > orbitScore)
++                    {
++                        orbitFound = true;
++                        orbitScore = score;
++                        orbitBest.Relocate(x, y, z);
++                    }
++                }
++                if (orbitFound)
++                {
++                    ClaimPvpMovement(botAI, PvpMovementOwner::Retreat, target);
++                    SetPvpMovementDestination(botAI, orbitBest.GetPositionX(), orbitBest.GetPositionY());
++                    bool const moved = MoveTo(bot->GetMapId(), orbitBest.GetPositionX(), orbitBest.GetPositionY(),
++                                              orbitBest.GetPositionZ(), false, false, false, true,
++                                              MovementPriority::MOVEMENT_COMBAT);
++                    if (!moved)
++                        ClearPvpMovement(botAI, PvpMovementOwner::Retreat);
++                    else
++                        DebugPvpTactical(botAI, "hunter-trap-orbit", target);
++                    return moved;
++                }
++            }
+             float const awayAngle = target->GetAngle(bot);
+             std::vector<float> const offsets = { M_PI / 2.0f, -M_PI / 2.0f, M_PI / 3.0f, -M_PI / 3.0f,
+                                                   M_PI / 4.0f, -M_PI / 4.0f, 0.0f };
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
+index 2bfc629..ab3c7c1 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
+@@ -1,6 +1,7 @@
+ /* Class-aware PvP control actions. */
+ #include "PvpTacticalActions.h"
+ #include "AiObjectContext.h"
++#include "AiFactory.h"
+ #include "Aura.h"
+ #include "Event.h"
+ #include "GameObject.h"
+@@ -66,6 +67,22 @@ int32 BreakableControlRemainingMs(PlayerbotAI* /*botAI*/, Unit* target)
+     return remaining;
+ }
+ 
++int32 MechanicControlRemainingMs(Unit* target, Mechanics mechanic)
++{
++    if (!target)
++        return 0;
++    int32 remaining = 0;
++    for (auto const& applied : target->GetAppliedAuras())
++    {
++        Aura* aura = applied.second ? applied.second->GetBase() : nullptr;
++        SpellInfo const* spellInfo = aura ? aura->GetSpellInfo() : nullptr;
++        if (!spellInfo || spellInfo->IsPositive() || !(spellInfo->GetAllEffectsMechanicMask() & (1ULL << mechanic)))
++            continue;
++        remaining = std::max(remaining, aura->GetDuration());
++    }
++    return remaining;
++}
++
+ bool TryControlWindowRecovery(PlayerbotAI* botAI, Unit* target)
+ {
+     Player* bot = botAI->GetBot();
+@@ -321,15 +338,249 @@ bool TryRogueReset(PlayerbotAI* botAI, Unit* target)
+             return true;
+         }
+ 
+-    // Hold stealth long enough to pool energy and let short cooldowns recover,
+-    // then reopen even if no healing item was available.
+-    if (elapsed >= 8000)
++    // A reset is a burst setup, not only a fixed delay. Pool energy before
++    // reopening, unless the opponent is about to become actionable or closes
++    // into immediate danger. The hard timeout prevents permanent stealth.
++    int32 const controlRemaining = BreakableControlRemainingMs(botAI, target);
++    bool const opponentWaking = controlRemaining > 0 && controlRemaining <= 1500;
++    bool const dangerClose = bot->GetDistance2d(target) <= 10.0f;
++    bool const energyReady = bot->GetPower(POWER_ENERGY) >= 80;
++    if ((elapsed >= 4000 && energyReady) || opponentWaking || dangerClose || elapsed >= 12000)
+     {
+         state.rogueResetting = false;
+         return false;
+     }
+     return true;
+ }
++
++bool IsFeralCat(PlayerbotAI* botAI)
++{
++    Player* bot = botAI->GetBot();
++    return bot->getClass() == CLASS_DRUID && AiFactory::GetPlayerSpecTab(bot) == DRUID_TAB_FERAL &&
++           !botAI->IsTank(bot, true);
++}
++
++void InitializeDuelOpener(PlayerbotAI* botAI, Player* opponent, bool countdown)
++{
++    PvpTacticalState& state = GetPvpTacticalState(botAI);
++    if (!state.duelOpenerInitialized || state.targetGuid != opponent->GetGUID() ||
++        (countdown && !state.duelWasCountdown))
++    {
++        state.duelOpenerInitialized = true;
++        state.duelOpenerComplete = false;
++        state.duelWasCountdown = countdown;
++        state.duelOpenerStep = 0;
++        state.duelOpenerStartedAtMs = countdown ? 0 : getMSTime();
++        state.hasDuelAnchor = false;
++        state.targetGuid = opponent->GetGUID();
++        ClearPvpMovement(botAI, PvpMovementOwner::DuelPrepare);
++        DebugPvpTactical(botAI, "duel-opener-initialize", opponent);
++    }
++    else if (!countdown && !state.duelOpenerStartedAtMs)
++        state.duelOpenerStartedAtMs = getMSTime();
++}
++
++bool TryDuelPreparation(PlayerbotAI* botAI, Player* opponent)
++{
++    Player* bot = botAI->GetBot();
++    PvpTacticalState& state = GetPvpTacticalState(botAI);
++    switch (bot->getClass())
++    {
++        case CLASS_WARRIOR:
++            if (!botAI->HasAura("battle shout", bot) && !botAI->HasAura("commanding shout", bot))
++                return TrySpell(botAI, "battle shout", bot, false) || TrySpell(botAI, "commanding shout", bot, false);
++            break;
++        case CLASS_PALADIN:
++            if (!botAI->HasAura("sacred shield", bot) && TrySpell(botAI, "sacred shield", bot, false))
++                return true;
++            break;
++        case CLASS_DEATH_KNIGHT:
++            if (!botAI->HasAura("bone shield", bot) && TrySpell(botAI, "bone shield", bot, false))
++                return true;
++            if (!botAI->HasAura("horn of winter", bot) && TrySpell(botAI, "horn of winter", bot, false))
++                return true;
++            break;
++        case CLASS_HUNTER:
++            if (!botAI->HasAura("aspect of the dragonhawk", bot) && !botAI->HasAura("aspect of the hawk", bot) &&
++                (TrySpell(botAI, "aspect of the dragonhawk", bot, false) ||
++                 TrySpell(botAI, "aspect of the hawk", bot, false)))
++                return true;
++            if (!state.hasDuelAnchor && TrySpell(botAI, "freezing trap", bot, false))
++            {
++                state.hasDuelAnchor = true;
++                state.duelAnchorX = bot->GetPositionX();
++                state.duelAnchorY = bot->GetPositionY();
++                state.duelAnchorZ = bot->GetPositionZ();
++                DebugPvpTactical(botAI, "hunter-trap-anchor", opponent);
++                return true;
++            }
++            break;
++        case CLASS_ROGUE:
++            if (!botAI->HasAura("stealth", bot) && TrySpell(botAI, "stealth", bot, false))
++                return true;
++            break;
++        case CLASS_PRIEST:
++            if (!botAI->HasAura("power word: shield", bot) && TrySpell(botAI, "power word: shield", bot, false))
++                return true;
++            break;
++        case CLASS_SHAMAN:
++            if (!botAI->HasAura("lightning shield", bot) && !botAI->HasAura("water shield", bot) &&
++                (TrySpell(botAI, "lightning shield", bot, false) || TrySpell(botAI, "water shield", bot, false)))
++                return true;
++            break;
++        case CLASS_MAGE:
++            if (!botAI->HasAura("ice barrier", bot) && TrySpell(botAI, "ice barrier", bot, false))
++                return true;
++            break;
++        case CLASS_WARLOCK:
++            if (!botAI->HasAura("fel armor", bot) && !botAI->HasAura("demon armor", bot) &&
++                (TrySpell(botAI, "fel armor", bot, false) || TrySpell(botAI, "demon armor", bot, false)))
++                return true;
++            break;
++        case CLASS_DRUID:
++            if (IsFeralCat(botAI))
++            {
++                if (!botAI->HasAura("cat form", bot) && TrySpell(botAI, "cat form", bot, false))
++                    return true;
++                if (!botAI->HasAura("prowl", bot) && TrySpell(botAI, "prowl", bot, false))
++                    return true;
++            }
++            break;
++        default:
++            break;
++    }
++    return false;
++}
++
++bool MoveStealthOpenerToTarget(PlayerbotAI* botAI, Player* opponent)
++{
++    Player* bot = botAI->GetBot();
++    if (bot->IsWithinMeleeRange(opponent))
++        return false;
++    if (IsPvpMovementActive(botAI, bot, PvpMovementOwner::DuelPrepare))
++        return false;
++
++    float const stopDistance = 2.0f;
++    float const angle = opponent->GetAngle(bot);
++    float x = opponent->GetPositionX() + std::cos(angle) * stopDistance;
++    float y = opponent->GetPositionY() + std::sin(angle) * stopDistance;
++    float z = opponent->GetPositionZ();
++    if (!bot->GetMap()->CheckCollisionAndGetValidCoords(bot, bot->GetPositionX(), bot->GetPositionY(),
++                                                         bot->GetPositionZ(), x, y, z))
++        return false;
++
++    ClaimPvpMovement(botAI, PvpMovementOwner::DuelPrepare, opponent);
++    SetPvpMovementDestination(botAI, x, y);
++    bot->GetMotionMaster()->Clear(false);
++    bot->GetMotionMaster()->MovePoint(0, x, y, z, FORCED_MOVEMENT_NONE, 0.0f, 0.0f, true, false);
++    DebugPvpTactical(botAI, "stealth-opener-approach", opponent);
++    return true;
++}
++}
++
++bool PvpTacticalDuelOpenerAction::isUseful()
++{
++    return sPlayerbotAIConfig.pvpTacticalEnabled && bot->duel && bot->duel->Opponent &&
++           (bot->duel->State == DUEL_STATE_COUNTDOWN || bot->duel->State == DUEL_STATE_IN_PROGRESS);
++}
++
++bool PvpTacticalDuelOpenerAction::Execute(Event /*event*/)
++{
++    Player* opponent = bot->duel && bot->duel->Opponent ? bot->duel->Opponent : nullptr;
++    if (!opponent)
++        return false;
++
++    bool const countdown = bot->duel->State == DUEL_STATE_COUNTDOWN;
++    InitializeDuelOpener(botAI, opponent, countdown);
++    PvpTacticalState& state = GetPvpTacticalState(botAI);
++    if (countdown)
++        return TryDuelPreparation(botAI, opponent);
++
++    if (state.duelOpenerComplete)
++        return false;
++    if (getMSTime() - state.duelOpenerStartedAtMs >= 8000)
++    {
++        state.duelOpenerComplete = true;
++        ClearPvpMovement(botAI, PvpMovementOwner::DuelPrepare);
++        DebugPvpTactical(botAI, "duel-opener-timeout", opponent);
++        return false;
++    }
++
++    if (bot->getClass() == CLASS_ROGUE && botAI->HasAura("stealth", bot))
++    {
++        if (MoveStealthOpenerToTarget(botAI, opponent))
++            return true;
++        if (!bot->IsWithinMeleeRange(opponent))
++            return false;
++        if (state.duelOpenerStep == 0 && !opponent->IsInCombat() && TrySpell(botAI, "sap", opponent))
++        {
++            state.duelOpenerStep = 1;
++            DebugPvpTactical(botAI, "rogue-opener-sap", opponent);
++            return true;
++        }
++        if (state.duelOpenerStep == 1)
++        {
++            int32 const sapRemaining = MechanicControlRemainingMs(opponent, MECHANIC_SAPPED);
++            if (sapRemaining > 1500 && bot->GetPower(POWER_ENERGY) < 80)
++            {
++                bot->AttackStop();
++                botAI->PetFollow();
++                DebugPvpTactical(botAI, "rogue-opener-pool-energy", opponent);
++                return true;
++            }
++        }
++        if (TrySpell(botAI, "cheap shot", opponent))
++        {
++            state.duelOpenerComplete = true;
++            DebugPvpTactical(botAI, "rogue-opener-cheap-shot", opponent);
++            return true;
++        }
++        if (TrySpell(botAI, "garrote", opponent))
++        {
++            state.duelOpenerComplete = true;
++            DebugPvpTactical(botAI, "rogue-opener-garrote-fallback", opponent);
++            return true;
++        }
++        return false;
++    }
++
++    if (IsFeralCat(botAI) && botAI->HasAura("prowl", bot))
++    {
++        if (MoveStealthOpenerToTarget(botAI, opponent))
++            return true;
++        if (!bot->IsWithinMeleeRange(opponent))
++            return false;
++        if (TrySpell(botAI, "pounce", opponent))
++        {
++            state.duelOpenerComplete = true;
++            DebugPvpTactical(botAI, "feral-opener-pounce", opponent);
++            return true;
++        }
++        if (TrySpell(botAI, "ravage", opponent))
++        {
++            state.duelOpenerComplete = true;
++            DebugPvpTactical(botAI, "feral-opener-ravage-fallback", opponent);
++            return true;
++        }
++        return false;
++    }
++
++    // Ranged and non-stealth melee classes prepared their defensive state in
++    // the countdown. Their normal class strategy now owns the first cast.
++    state.duelOpenerComplete = true;
++    return false;
++}
++
++bool ShouldHoldDuelAttackForOpener(PlayerbotAI* botAI, Player* opponent)
++{
++    if (!sPlayerbotAIConfig.pvpTacticalEnabled || !botAI || !opponent)
++        return false;
++    PvpTacticalState& state = GetPvpTacticalState(botAI);
++    if (!state.duelOpenerInitialized || state.duelOpenerComplete || state.targetGuid != opponent->GetGUID())
++        return false;
++    Player* bot = botAI->GetBot();
++    return (bot->getClass() == CLASS_ROGUE && botAI->HasAura("stealth", bot)) ||
++           (IsFeralCat(botAI) && botAI->HasAura("prowl", bot));
+ }
+ 
+ bool PvpTacticalClassControlAction::isUseful()
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.h b/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.h
+index 827e38c..28d1a76 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.h
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.h
+@@ -3,6 +3,8 @@
+ #define PLAYERBOTS_PVP_TACTICAL_ACTIONS_H
+ #include "Action.h"
+ 
++class Player;
++
+ class PvpTacticalClassControlAction : public Action
+ {
+ public:
+@@ -10,4 +12,14 @@ public:
+     bool Execute(Event event) override;
+     bool isUseful() override;
+ };
++
++class PvpTacticalDuelOpenerAction : public Action
++{
++public:
++    PvpTacticalDuelOpenerAction(PlayerbotAI* botAI) : Action(botAI, "pvp tactical duel opener") {}
++    bool Execute(Event event) override;
++    bool isUseful() override;
++};
++
++bool ShouldHoldDuelAttackForOpener(PlayerbotAI* botAI, Player* opponent);
+ #endif
+diff --git a/modules/mod-playerbots/src/Ai/Base/Strategy/DuelStrategy.cpp b/modules/mod-playerbots/src/Ai/Base/Strategy/DuelStrategy.cpp
+index 9086268..a7b797c 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Strategy/DuelStrategy.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Strategy/DuelStrategy.cpp
+@@ -15,7 +15,8 @@ void DuelStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
+     triggers.push_back(
+         new TriggerNode("no attackers", { NextAction("attack duel opponent", 70.0f) }));
+     triggers.push_back(
+-        new TriggerNode("pvp tactical duel maintenance", { NextAction("attack duel opponent", 69.0f) }));
++        new TriggerNode("pvp tactical duel maintenance", { NextAction("pvp tactical duel opener", 75.0f),
++                                                            NextAction("attack duel opponent", 69.0f) }));
+ }
+ 
+ DuelStrategy::DuelStrategy(PlayerbotAI* botAI) : PassThroughStrategy(botAI) {}
+diff --git a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp
+index dd53601..1ecd432 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp
+@@ -31,18 +31,27 @@ void PvpTacticalState::Reset()
+     lastDebugAtMs = 0;
+     rogueResetStartedAtMs = 0;
+     lastAntiStealthProbeAtMs = 0;
++    duelOpenerStartedAtMs = 0;
+     desiredDistance = 0.0f;
+     movementProgressX = 0.0f;
+     movementProgressY = 0.0f;
+     destinationAngle = 0.0f;
+     threatAngleAtIssue = 0.0f;
+     failedAngle = 0.0f;
++    duelAnchorX = 0.0f;
++    duelAnchorY = 0.0f;
++    duelAnchorZ = 0.0f;
+     druidOriginalForm = 0;
+     retreating = false;
+     hasDestinationAngle = false;
+     hasThreatAngle = false;
+     druidRecovering = false;
+     rogueResetting = false;
++    duelOpenerInitialized = false;
++    duelOpenerComplete = false;
++    duelWasCountdown = false;
++    hasDuelAnchor = false;
++    duelOpenerStep = 0;
+ }
+ 
+ bool IsPvpTacticalEligible(Player* bot)
+diff --git a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h
+index c9fbedd..4d93752 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h
++++ b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h
+@@ -48,18 +48,27 @@ struct PvpTacticalState
+     uint32 lastDebugAtMs = 0;
+     uint32 rogueResetStartedAtMs = 0;
+     uint32 lastAntiStealthProbeAtMs = 0;
++    uint32 duelOpenerStartedAtMs = 0;
+     float desiredDistance = 0.0f;
+     float movementProgressX = 0.0f;
+     float movementProgressY = 0.0f;
+     float destinationAngle = 0.0f;
+     float threatAngleAtIssue = 0.0f;
+     float failedAngle = 0.0f;
++    float duelAnchorX = 0.0f;
++    float duelAnchorY = 0.0f;
++    float duelAnchorZ = 0.0f;
+     uint32 druidOriginalForm = 0;
+     bool retreating = false;
+     bool hasDestinationAngle = false;
+     bool hasThreatAngle = false;
+     bool druidRecovering = false;
+     bool rogueResetting = false;
++    bool duelOpenerInitialized = false;
++    bool duelOpenerComplete = false;
++    bool duelWasCountdown = false;
++    bool hasDuelAnchor = false;
++    uint8 duelOpenerStep = 0;
+ 
+     void Reset();
+ };

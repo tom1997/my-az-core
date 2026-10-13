@@ -1,0 +1,7 @@
+## Interface: 30300
+## Title: Mythic Plus UI
+## Notes: Server-authoritative Mythic Plus timer and objectives
+## Author: my-az-core
+## Version: 0.1.0
+
+MythicPlusUI.lua

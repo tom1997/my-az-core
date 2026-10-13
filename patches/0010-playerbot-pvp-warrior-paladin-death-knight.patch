@@ -1,0 +1,130 @@
+diff --git a/modules/mod-playerbots/src/Ai/Base/ActionContext.h b/modules/mod-playerbots/src/Ai/Base/ActionContext.h
+index 68b73c0..b3a1336 100644
+--- a/modules/mod-playerbots/src/Ai/Base/ActionContext.h
++++ b/modules/mod-playerbots/src/Ai/Base/ActionContext.h
+@@ -51,6 +51,7 @@
+ #include "PetsAction.h"
+ #include "PositionAction.h"
+ #include "PullActions.h"
++#include "PvpTacticalActions.h"
+ #include "RandomBotUpdateAction.h"
+ #include "ReachTargetActions.h"
+ #include "ReleaseSpiritAction.h"
+@@ -101,6 +102,7 @@ public:
+         creators["pvp tactical retreat"] = &ActionContext::pvp_tactical_retreat;
+         creators["pvp tactical pressure hunter"] = &ActionContext::pvp_tactical_pressure_hunter;
+         creators["pvp tactical melee flank"] = &ActionContext::pvp_tactical_melee_flank;
++        creators["pvp tactical class control"] = &ActionContext::pvp_tactical_class_control;
+         creators["avoid aoe"] = &ActionContext::avoid_aoe;
+         creators["combat formation move"] = &ActionContext::combat_formation_move;
+         creators["tank face"] = &ActionContext::tank_face;
+@@ -325,6 +327,7 @@ private:
+         return new PvpTacticalPressureHunterAction(botAI);
+     }
+     static Action* pvp_tactical_melee_flank(PlayerbotAI* botAI) { return new PvpTacticalMeleeFlankAction(botAI); }
++    static Action* pvp_tactical_class_control(PlayerbotAI* botAI) { return new PvpTacticalClassControlAction(botAI); }
+     static Action* avoid_aoe(PlayerbotAI* botAI) { return new AvoidAoeAction(botAI); }
+     static Action* combat_formation_move(PlayerbotAI* botAI) { return new CombatFormationMoveAction(botAI); }
+     static Action* tank_face(PlayerbotAI* botAI) { return new TankFaceAction(botAI); }
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
+new file mode 100644
+index 0000000..081b486
+--- /dev/null
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
+@@ -0,0 +1,64 @@
++/* Class-aware PvP control actions. */
++#include "PvpTacticalActions.h"
++#include "AiObjectContext.h"
++#include "Player.h"
++#include "PlayerbotAI.h"
++#include "Playerbots.h"
++#include "PvpTacticalValue.h"
++#include "SharedDefines.h"
++#include "Unit.h"
++
++namespace
++{
++bool TrySpell(PlayerbotAI* botAI, std::string const& spell, Unit* target, bool respectDiminishing = true)
++{
++    return CanUsePvpSpell(botAI, spell, target, respectDiminishing) && botAI->CastSpell(spell, target);
++}
++bool NeedsSlow(PlayerbotAI* botAI, std::string const& aura, Unit* target)
++{
++    return target && !botAI->HasAura(aura, target);
++}
++}
++
++bool PvpTacticalClassControlAction::isUseful()
++{
++    Unit* target = AI_VALUE(Unit*, "current target");
++    return target && target->IsPlayer() && target->IsAlive() && bot->IsAlive();
++}
++
++bool PvpTacticalClassControlAction::Execute(Event /*event*/)
++{
++    Unit* target = AI_VALUE(Unit*, "current target");
++    if (!target || !target->IsPlayer())
++        return false;
++    float const distance = bot->GetDistance2d(target);
++    bool const melee = bot->IsWithinMeleeRange(target);
++    bool const targetCasting = target->IsNonMeleeSpellCast(false);
++    switch (bot->getClass())
++    {
++        case CLASS_WARRIOR:
++            if (targetCasting && melee && (TrySpell(botAI, "pummel", target, false) || TrySpell(botAI, "shield bash", target, false)))
++                return true;
++            if (melee && NeedsSlow(botAI, "hamstring", target) && TrySpell(botAI, "hamstring", target, false))
++                return true;
++            if (distance >= 8.0f && distance <= 25.0f && TrySpell(botAI, "charge", target, false))
++                return true;
++            return distance > 8.0f && TrySpell(botAI, "intercept", target, false);
++        case CLASS_PALADIN:
++            if ((bot->HasRootAura() || bot->HasAuraType(SPELL_AURA_MOD_DECREASE_SPEED)) && TrySpell(botAI, "hand of freedom", bot, false))
++                return true;
++            if (melee && TrySpell(botAI, "hammer of justice", target))
++                return true;
++            return distance > 8.0f && TrySpell(botAI, "repentance", target);
++        case CLASS_DEATH_KNIGHT:
++            if (targetCasting && melee && TrySpell(botAI, "mind freeze", target, false))
++                return true;
++            if (targetCasting && TrySpell(botAI, "strangulate", target))
++                return true;
++            if (NeedsSlow(botAI, "chains of ice", target) && TrySpell(botAI, "chains of ice", target, false))
++                return true;
++            return distance > 10.0f && TrySpell(botAI, "death grip", target, false);
++        default:
++            return false;
++    }
++}
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.h b/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.h
+new file mode 100644
+index 0000000..827e38c
+--- /dev/null
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.h
+@@ -0,0 +1,13 @@
++/* Class-aware PvP control actions. */
++#ifndef PLAYERBOTS_PVP_TACTICAL_ACTIONS_H
++#define PLAYERBOTS_PVP_TACTICAL_ACTIONS_H
++#include "Action.h"
++
++class PvpTacticalClassControlAction : public Action
++{
++public:
++    PvpTacticalClassControlAction(PlayerbotAI* botAI) : Action(botAI, "pvp tactical class control") {}
++    bool Execute(Event event) override;
++    bool isUseful() override;
++};
++#endif
+diff --git a/modules/mod-playerbots/src/Ai/Base/Strategy/CombatStrategy.cpp b/modules/mod-playerbots/src/Ai/Base/Strategy/CombatStrategy.cpp
+index 11cf2e3..b803696 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Strategy/CombatStrategy.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Strategy/CombatStrategy.cpp
+@@ -58,6 +58,8 @@ void CombatStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
+         "pvp tactical pressure hunter", { NextAction("pvp tactical pressure hunter", ACTION_NORMAL + 3) }));
+     triggers.push_back(
+         new TriggerNode("pvp tactical melee flank", { NextAction("pvp tactical melee flank", ACTION_NORMAL + 4) }));
++    triggers.push_back(
++        new TriggerNode("pvp tactical player target", { NextAction("pvp tactical class control", 50.0f) }));
+     // The pet-attack trigger is commented out because it was forcing the bot's pet to attack, overriding stay and follow commands.
+     // Pets will automatically attack the bot's enemy if they are in "defensive" or "aggressive"
+     // stance, or if the master issues an attack command.

@@ -1,0 +1,1460 @@
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/AttackAction.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/AttackAction.cpp
+index fc3df8f9..6014f741 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/AttackAction.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/AttackAction.cpp
+@@ -13,6 +13,7 @@
+ #include "PlayerbotTextMgr.h"
+ #include "Playerbots.h"
+ #include "PvpTacticalActions.h"
++#include "PvpTacticalValue.h"
+ #include "ServerFacade.h"
+ #include "Unit.h"
+ #include "WaitForAttackStrategy.h"
+@@ -169,6 +170,15 @@ bool AttackAction::Attack(Unit* target, bool /*with_pet*/ /*true*/)
+     if (botAI->IsInVehicle() && !botAI->IsInVehicle(false, false, true))
+         return false;
+ 
++    if (!CanDamagePvpTarget(botAI, target))
++    {
++        bot->AttackStop();
++        if (bot->GetCurrentSpell(CURRENT_AUTOREPEAT_SPELL))
++            bot->InterruptSpell(CURRENT_AUTOREPEAT_SPELL);
++        botAI->PetFollow();
++        return false;
++    }
++
+     Unit* oldTarget = context->GetValue<Unit*>("current target")->Get();
+     bool shouldMelee = bot->IsWithinMeleeRange(target) || botAI->IsMelee(bot);
+ 
+@@ -269,7 +279,7 @@ bool AttackDuelOpponentAction::isUseful()
+ 
+     Unit* desired = IsFullyDamageImmune(opponent) ? GetDuelSecondaryTarget(bot, opponent) : opponent;
+     Unit* current = AI_VALUE(Unit*, "current target");
+-    if (desired == opponent && current == opponent && botAI->HasAura("polymorph", opponent))
++    if (desired == opponent && current == opponent && !CanDamagePvpTarget(botAI, opponent))
+         return false;
+     return !bot->IsInCombat() || current != desired;
+ }
+@@ -336,6 +346,9 @@ bool MeleeAction::isUseful()
+     if (botAI->IsInVehicle() && !botAI->IsInVehicle(false, false, true))
+         return false;
+ 
++    if (Unit* target = AI_VALUE(Unit*, "current target"); target && !CanDamagePvpTarget(botAI, target))
++        return false;
++
+     // Do not start autoattack while prowled — let opener spells break stealth intentionally.
+     // Future rogue stealth implementation should use this instead:
+     // return !(botAI->HasAura("stealth", bot) || botAI->HasAura("prowl", bot));
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/PetsAction.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/PetsAction.cpp
+index b1c19a58..219449e4 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/PetsAction.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/PetsAction.cpp
+@@ -14,6 +14,7 @@
+ #include "PlayerbotAIConfig.h"
+ #include "PlayerbotTextMgr.h"
+ #include "Playerbots.h"
++#include "PvpTacticalValue.h"
+ #include "SpellInfo.h"
+ #include "SpellMgr.h"
+ #include <algorithm>
+@@ -418,6 +419,13 @@ bool PetAttackAction::Execute(Event /*event*/)
+     if (!target)
+         return false;
+ 
++    if (!CanDamagePvpTarget(botAI, target))
++    {
++        pet->AttackStop();
++        botAI->PetFollow();
++        return false;
++    }
++
+     if (!bot->IsValidAttackTarget(target))
+         return false;
+ 
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/GenericSpellActions.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/GenericSpellActions.cpp
+index 9cb3dc1c..3cf2a763 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/GenericSpellActions.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/GenericSpellActions.cpp
+@@ -221,7 +221,8 @@ bool CastSpellAction::isUseful()
+         {
+             uint32 const castMs = spellInfo->IsChanneled() ? std::max<int32>(0, spellInfo->GetDuration()) :
+                                                             spellInfo->CalcCastTime(bot);
+-            if (!IsSafeForPvpCast(botAI, spellTarget, castMs))
++            if (!CanDamagePvpTarget(botAI, spellTarget, spellInfo) ||
++                !IsSafeForPvpCast(botAI, spellTarget, spellInfo, castMs))
+                 return false;
+ 
+             if (spellTarget->IsPlayer() && bot->IsHostileTo(spellTarget))
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
+index 7d6c4d91..136a7a41 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
+@@ -2,6 +2,8 @@
+ #include "PvpTacticalActions.h"
+ #include "AiObjectContext.h"
+ #include "AiFactory.h"
++#include "CharmInfo.h"
++#include "CreatureAI.h"
+ #include "SpellAuras.h"
+ #include "Event.h"
+ #include "GameObject.h"
+@@ -13,9 +15,11 @@
+ #include "PlayerbotAI.h"
+ #include "PlayerbotAIConfig.h"
+ #include "Playerbots.h"
++#include "Pet.h"
+ #include "PvpTacticalValue.h"
+ #include "Position.h"
+ #include "SharedDefines.h"
++#include "Spell.h"
+ #include "SpellDefines.h"
+ #include "SpellInfo.h"
+ #include "Timer.h"
+@@ -34,7 +38,8 @@ bool TrySpell(PlayerbotAI* botAI, std::string const& spell, Unit* target, bool r
+     SpellInfo const* spellInfo = spellId ? sSpellMgr->GetSpellInfo(spellId) : nullptr;
+     uint32 const castMs = spellInfo ? (spellInfo->IsChanneled() ? std::max<int32>(0, spellInfo->GetDuration()) :
+                                                                    spellInfo->CalcCastTime(botAI->GetBot())) : 0;
+-    return IsPvpTacticalActionAllowed(botAI, spell, target) && IsSafeForPvpCast(botAI, target, castMs) &&
++    return IsPvpTacticalActionAllowed(botAI, spell, target) && CanDamagePvpTarget(botAI, target, spellInfo) &&
++           IsSafeForPvpCast(botAI, target, spellInfo, castMs) &&
+            CanUsePvpSpell(botAI, spell, target, respectDiminishing) && botAI->CastSpell(spell, target);
+ }
+ 
+@@ -500,6 +505,225 @@ bool MoveStealthOpenerToTarget(PlayerbotAI* botAI, Player* opponent)
+     DebugPvpTactical(botAI, "stealth-opener-approach", opponent);
+     return true;
+ }
++
++bool EnforcePvpDamageGuard(PlayerbotAI* botAI, Unit* primaryTarget)
++{
++    Player* bot = botAI->GetBot();
++    bool changed = false;
++    if (Unit* victim = bot->GetVictim(); victim && !CanDamagePvpTarget(botAI, victim))
++    {
++        bot->AttackStop();
++        changed = true;
++    }
++    if (Spell* autoRepeat = bot->GetCurrentSpell(CURRENT_AUTOREPEAT_SPELL))
++    {
++        Unit* autoTarget = botAI->GetUnit(autoRepeat->m_targets.GetUnitTargetGUID());
++        if (autoTarget && !CanDamagePvpTarget(botAI, autoTarget))
++        {
++            bot->InterruptSpell(CURRENT_AUTOREPEAT_SPELL);
++            changed = true;
++        }
++    }
++    for (CurrentSpellTypes slot : { CURRENT_GENERIC_SPELL, CURRENT_CHANNELED_SPELL })
++    {
++        Spell* spell = bot->GetCurrentSpell(slot);
++        Unit* spellTarget = spell ? botAI->GetUnit(spell->m_targets.GetUnitTargetGUID()) : nullptr;
++        if (!spellTarget)
++            spellTarget = primaryTarget;
++        if (spell && spell->m_spellInfo && IsPvpDamageSpell(spell->m_spellInfo) &&
++            !CanDamagePvpTarget(botAI, spellTarget, spell->m_spellInfo))
++        {
++            bot->InterruptNonMeleeSpells(false);
++            changed = true;
++            break;
++        }
++    }
++    if (botAI->HasAura("blade flurry", bot) && HasBreakablePvpControlNearby(botAI, bot, 12.0f))
++    {
++        botAI->RemoveAura("blade flurry");
++        changed = true;
++    }
++    if (Pet* pet = bot->GetPet())
++        if (Unit* victim = pet->GetVictim(); victim && !CanDamagePvpTarget(botAI, victim))
++        {
++            botAI->PetFollow();
++            changed = true;
++        }
++    if (changed)
++        DebugPvpTactical(botAI, "damage-guard", primaryTarget);
++    return changed;
++}
++
++bool TryPvpPetMicro(PlayerbotAI* botAI, Unit* target, PvpSnapshot const& snapshot)
++{
++    Player* bot = botAI->GetBot();
++    Pet* pet = bot->GetPet();
++    if (!pet || !pet->IsAlive() || pet->IsNonMeleeSpellCast(false))
++        return false;
++
++    PvpTacticalState& state = GetPvpTacticalState(botAI);
++    uint32 const now = getMSTime();
++    if (now - state.lastPetControlAtMs < 500)
++        return false;
++
++    if (snapshot.pet.defensiveReady &&
++        (snapshot.pet.healthPct <= 35.0f || snapshot.defensiveNeedScore >= 0.72f))
++    {
++        uint32 const spellId = snapshot.pet.defensiveSpellId;
++        SpellInfo const* info = spellId ? sSpellMgr->GetSpellInfo(spellId) : nullptr;
++        Unit* defensiveTarget = info && info->GetMaxRange(true) > 0.0f ? static_cast<Unit*>(bot) :
++                                                                           static_cast<Unit*>(pet);
++        if (info && !pet->HasSpellCooldown(spellId) &&
++            pet->CastSpell(defensiveTarget, spellId, false) == SPELL_CAST_OK)
++        {
++            state.lastPetControlAtMs = now;
++            DebugPvpTactical(botAI, "pet-defensive", defensiveTarget);
++            return true;
++        }
++    }
++
++    if (!target || !snapshot.pet.controlReady)
++        return false;
++    uint32 const spellId = snapshot.pet.controlSpellId;
++    SpellInfo const* info = spellId ? sSpellMgr->GetSpellInfo(spellId) : nullptr;
++    if (!info || pet->HasSpellCooldown(spellId))
++        return false;
++
++    bool interrupt = false;
++    for (SpellEffectInfo const& effect : info->Effects)
++        interrupt = interrupt || effect.Effect == SPELL_EFFECT_INTERRUPT_CAST;
++    Unit* controlTarget = target;
++    bool const breakableControl =
++        info->AuraInterruptFlags & (AURA_INTERRUPT_FLAG_TAKE_DAMAGE | AURA_INTERRUPT_FLAG_DIRECT_DAMAGE);
++    if (!interrupt && breakableControl)
++    {
++        controlTarget = botAI->GetUnit(snapshot.ccTarget);
++        if (!controlTarget || controlTarget == target)
++            return false;
++    }
++    if (!pet->IsWithinLOSInMap(controlTarget))
++        return false;
++    if (interrupt)
++    {
++        if (!controlTarget->IsNonMeleeSpellCast(false) || !ShouldCommitPvpInterrupt(botAI, controlTarget))
++            return false;
++    }
++    else
++    {
++        if (GetPvpControlState(controlTarget) != PvpControlState::None ||
++            (snapshot.intent != PvpIntent::Control && snapshot.intent != PvpIntent::Peel &&
++             snapshot.intent != PvpIntent::Finish && snapshot.intent != PvpIntent::Survive))
++            return false;
++        if (GetPvpDrWeight(controlTarget, spellId) <= 0.25f)
++            return false;
++    }
++
++    float const maxRange = std::max(1.0f, info->GetMaxRange(false, pet));
++    if (pet->GetDistance2d(controlTarget) > maxRange)
++    {
++        pet->GetMotionMaster()->MoveChase(controlTarget, std::max(1.0f, maxRange * 0.75f));
++        return true;
++    }
++    pet->SetFacingToObject(controlTarget);
++    if (pet->CastSpell(controlTarget, spellId, false) != SPELL_CAST_OK)
++        return false;
++    state.lastPetControlAtMs = now;
++    if (interrupt)
++        MarkPvpInterruptCommitted(botAI);
++    DebugPvpTactical(botAI, interrupt ? "pet-interrupt" : "pet-control", controlTarget);
++    return true;
++}
++
++void ResetHunterCcPlan(PlayerbotAI* botAI)
++{
++    PvpTacticalState& state = GetPvpTacticalState(botAI);
++    state.hunterCcStage = PvpHunterCcStage::None;
++    state.hunterCcStartedAtMs = 0;
++    state.hunterCcTargetGuid.Clear();
++    ClearPvpMovement(botAI, PvpMovementOwner::HunterTrap);
++}
++
++bool TryHunterScatterTrapPlan(PlayerbotAI* botAI, Unit* primaryTarget, PvpSnapshot const& snapshot)
++{
++    if (snapshot.archetype != PvpArchetype::MarksmanshipHunter)
++        return false;
++    Player* bot = botAI->GetBot();
++    PvpTacticalState& state = GetPvpTacticalState(botAI);
++    uint32 const now = getMSTime();
++    if (state.hunterCcStage != PvpHunterCcStage::None && now - state.hunterCcStartedAtMs > 6500)
++    {
++        ResetHunterCcPlan(botAI);
++        return false;
++    }
++    if (state.hunterCcStage == PvpHunterCcStage::Complete)
++    {
++        ResetHunterCcPlan(botAI);
++        return false;
++    }
++
++    Unit* ccTarget = state.hunterCcTargetGuid.IsEmpty() ? ResolvePvpControlTarget(botAI, primaryTarget) :
++                                                          botAI->GetUnit(state.hunterCcTargetGuid);
++    if (!ccTarget || !ccTarget->IsPlayer() || !ccTarget->IsAlive() || ccTarget == primaryTarget)
++    {
++        if (state.hunterCcStage != PvpHunterCcStage::None)
++            ResetHunterCcPlan(botAI);
++        return false;
++    }
++
++    if (state.hunterCcStage == PvpHunterCcStage::None)
++    {
++        uint32 const trapId = botAI->GetAiObjectContext()->GetValue<uint32>("spell id", "freezing trap")->Get();
++        if (!trapId || bot->HasSpellCooldown(trapId) || GetPvpControlState(ccTarget) != PvpControlState::None)
++            return false;
++        state.hunterCcStage = PvpHunterCcStage::Scatter;
++        state.hunterCcStartedAtMs = now;
++        state.hunterCcTargetGuid = ccTarget->GetGUID();
++    }
++
++    if (state.hunterCcStage == PvpHunterCcStage::Scatter)
++    {
++        if (!TrySpell(botAI, "scatter shot", ccTarget))
++        {
++            ResetHunterCcPlan(botAI);
++            return false;
++        }
++        botAI->PetFollow();
++        state.hunterCcStage = PvpHunterCcStage::MoveForTrap;
++        DebugPvpTactical(botAI, "scatter-trap-scatter", ccTarget);
++        return true;
++    }
++
++    if (bot->GetDistance2d(ccTarget) > 4.0f)
++    {
++        if (IsPvpMovementActive(botAI, bot, PvpMovementOwner::HunterTrap))
++            return true;
++        float const angle = ccTarget->GetAngle(bot);
++        float x = ccTarget->GetPositionX() + std::cos(angle) * 2.0f;
++        float y = ccTarget->GetPositionY() + std::sin(angle) * 2.0f;
++        float z = ccTarget->GetPositionZ();
++        if (!bot->GetMap()->CheckCollisionAndGetValidCoords(bot, bot->GetPositionX(), bot->GetPositionY(),
++                                                             bot->GetPositionZ(), x, y, z))
++        {
++            ResetHunterCcPlan(botAI);
++            return false;
++        }
++        ClaimPvpMovement(botAI, PvpMovementOwner::HunterTrap, ccTarget);
++        SetPvpMovementDestination(botAI, x, y);
++        bot->GetMotionMaster()->Clear(false);
++        bot->GetMotionMaster()->MovePoint(0, x, y, z, FORCED_MOVEMENT_NONE, 0.0f, 0.0f, true, false);
++        DebugPvpTactical(botAI, "scatter-trap-move", ccTarget);
++        return true;
++    }
++
++    ClearPvpMovement(botAI, PvpMovementOwner::HunterTrap);
++    bot->GetMotionMaster()->Clear(false);
++    bot->StopMoving();
++    if (!TrySpell(botAI, "freezing trap", bot, false))
++        return false;
++    state.hunterCcStage = PvpHunterCcStage::Complete;
++    DebugPvpTactical(botAI, "scatter-trap-complete", ccTarget);
++    return true;
++}
+ }
+ 
+ bool PvpTacticalDuelOpenerAction::isUseful()
+@@ -633,9 +857,13 @@ bool PvpTacticalTargetSwapAction::isUseful()
+     PvpSnapshot const snapshot = GetPvpSnapshot(botAI);
+     if (snapshot.recommendedTarget.IsEmpty() || snapshot.recommendedTarget == snapshot.primaryTarget)
+         return false;
++    Unit* recommended = botAI->GetUnit(snapshot.recommendedTarget);
++    if (!recommended || !CanDamagePvpTarget(botAI, recommended))
++        return false;
+     PvpTacticalState& state = GetPvpTacticalState(botAI);
+     uint32 const now = getMSTime();
+-    if (state.lastTargetSwapAtMs && now - state.lastTargetSwapAtMs < sPlayerbotAIConfig.pvpTacticalTargetSwapMinHoldMs)
++    if (state.trackedPrimaryTarget != snapshot.primaryTarget || !state.targetAcquiredAtMs ||
++        now - state.targetAcquiredAtMs < sPlayerbotAIConfig.pvpTacticalTargetSwapMinHoldMs)
+         return false;
+     return snapshot.recommendedTargetScore >=
+            snapshot.currentTargetScore + sPlayerbotAIConfig.pvpTacticalTargetSwapAdvantage;
+@@ -652,7 +880,9 @@ bool PvpTacticalTargetSwapAction::Execute(Event /*event*/)
+     context->GetValue<Unit*>("current target")->Set(target);
+     bot->Attack(target, bot->IsWithinMeleeRange(target) || !PlayerbotAI::IsRanged(bot));
+     PvpTacticalState& state = GetPvpTacticalState(botAI);
+-    state.lastTargetSwapAtMs = getMSTime();
++    uint32 const now = getMSTime();
++    state.trackedPrimaryTarget = target->GetGUID();
++    state.targetAcquiredAtMs = now;
+     state.targetGuid = target->GetGUID();
+     DebugPvpTactical(botAI, "target-swap", target);
+     return true;
+@@ -667,6 +897,10 @@ bool PvpTacticalClassControlAction::Execute(Event /*event*/)
+     bool const melee = bot->IsWithinMeleeRange(target);
+     bool const targetCasting = target->IsNonMeleeSpellCast(false);
+     PvpSnapshot const snapshot = GetPvpSnapshot(botAI);
++    if (EnforcePvpDamageGuard(botAI, target))
++        return true;
++    if (TryPvpPetMicro(botAI, target, snapshot))
++        return true;
+     if (TryAntiStealthProbe(botAI, target))
+         return true;
+     if (TryControlWindowRecovery(botAI, target))
+@@ -716,7 +950,7 @@ bool PvpTacticalClassControlAction::Execute(Event /*event*/)
+             return distance > 8.0f && TrySpell(botAI, "repentance", target);
+         case CLASS_DEATH_KNIGHT:
+             if (snapshot.archetype == PvpArchetype::UnholyDeathKnight &&
+-                botAI->IsRanged(target->ToPlayer(), true) && snapshot.incomingBurstScore >= 0.45f &&
++                snapshot.magicPressureScore >= 0.35f &&
+                 TrySpell(botAI, "anti-magic shell", bot, false))
+                 return true;
+             if (targetCasting && melee && TryInterrupt(botAI, "mind freeze", target))
+@@ -729,6 +963,8 @@ bool PvpTacticalClassControlAction::Execute(Event /*event*/)
+         case CLASS_HUNTER:
+             if (targetCasting && TryInterrupt(botAI, "silencing shot", target))
+                 return true;
++            if (TryHunterScatterTrapPlan(botAI, target, snapshot))
++                return true;
+             if (melee && TrySelfAreaControl(botAI, "freezing trap", target))
+                 return true;
+             if (melee && NeedsSlow(botAI, "wing clip", target) && TrySpell(botAI, "wing clip", target, false))
+@@ -739,9 +975,6 @@ bool PvpTacticalClassControlAction::Execute(Event /*event*/)
+                 (PlayerbotAI::IsHeal(target->ToPlayer(), true) || target->GetHealthPct() <= 60.0f) &&
+                 !botAI->HasAura("aimed shot", target) && TrySpell(botAI, "aimed shot", target, false))
+                 return true;
+-            if (Unit* ccTarget = ResolvePvpControlTarget(botAI, target))
+-                if (TrySpell(botAI, "scatter shot", ccTarget))
+-                    return true;
+             return distance <= 35.0f && NeedsSlow(botAI, "concussive shot", target) &&
+                    TrySpell(botAI, "concussive shot", target, false);
+         case CLASS_ROGUE:
+@@ -879,8 +1112,6 @@ bool PvpTacticalClassControlAction::Execute(Event /*event*/)
+                 return true;
+             return NeedsSlow(botAI, "slow", target) && TrySpell(botAI, "slow", target, false);
+         case CLASS_WARLOCK:
+-            if (targetCasting && TryInterrupt(botAI, "spell lock", target))
+-                return true;
+             if (melee && TrySpell(botAI, "death coil", target))
+                 return true;
+             if (distance <= 30.0f && TrySpell(botAI, "shadowfury", target))
+diff --git a/modules/mod-playerbots/src/Ai/Base/Strategy/CombatStrategy.cpp b/modules/mod-playerbots/src/Ai/Base/Strategy/CombatStrategy.cpp
+index ff4af55e..ac4d3baa 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Strategy/CombatStrategy.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Strategy/CombatStrategy.cpp
+@@ -52,13 +52,13 @@ void CombatStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
+         )
+     );
+     triggers.push_back(new TriggerNode(
+-        "pvp tactical ranged too close", { NextAction("pvp tactical retreat", ACTION_NORMAL + 4) }));
++        "pvp tactical ranged too close", { NextAction("pvp tactical retreat", PvpPriority::Position + 4) }));
+     triggers.push_back(
+         new TriggerNode("pvp tactical target too far", { NextAction("drop target", ACTION_HIGH + 1) }));
+     triggers.push_back(new TriggerNode(
+-        "pvp tactical pressure hunter", { NextAction("pvp tactical pressure hunter", ACTION_NORMAL + 3) }));
++        "pvp tactical pressure hunter", { NextAction("pvp tactical pressure hunter", PvpPriority::Position + 3) }));
+     triggers.push_back(
+-        new TriggerNode("pvp tactical melee flank", { NextAction("pvp tactical melee flank", ACTION_MOVE - 1) }));
++        new TriggerNode("pvp tactical melee flank", { NextAction("pvp tactical melee flank", PvpPriority::Position - 1) }));
+     triggers.push_back(
+         new TriggerNode("pvp tactical player target", { NextAction("pvp tactical fake cast", PvpPriority::Breakout - 1),
+                                                          NextAction("pvp tactical class control", PvpPriority::Control),
+diff --git a/modules/mod-playerbots/src/Ai/Base/Strategy/DuelStrategy.cpp b/modules/mod-playerbots/src/Ai/Base/Strategy/DuelStrategy.cpp
+index a7b797c0..11875037 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Strategy/DuelStrategy.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Strategy/DuelStrategy.cpp
+@@ -5,6 +5,7 @@
+  */
+ 
+ #include "DuelStrategy.h"
++#include "PvpTacticalValue.h"
+ 
+ void DuelStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
+ {
+@@ -15,8 +16,8 @@ void DuelStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
+     triggers.push_back(
+         new TriggerNode("no attackers", { NextAction("attack duel opponent", 70.0f) }));
+     triggers.push_back(
+-        new TriggerNode("pvp tactical duel maintenance", { NextAction("pvp tactical duel opener", 75.0f),
+-                                                            NextAction("attack duel opponent", 69.0f) }));
++        new TriggerNode("pvp tactical duel maintenance", { NextAction("pvp tactical duel opener", PvpPriority::Breakout - 1),
++                                                            NextAction("attack duel opponent", PvpPriority::Defensive + 1) }));
+ }
+ 
+ DuelStrategy::DuelStrategy(PlayerbotAI* botAI) : PassThroughStrategy(botAI) {}
+diff --git a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp
+index 78027886..357be5ab 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp
+@@ -65,12 +65,14 @@ bool HasPvpSpell(PlayerbotAI* botAI, char const* spell)
+ 
+ bool IsHardControlled(Unit* unit)
+ {
+-    return unit && (unit->HasAuraType(SPELL_AURA_MOD_STUN) || unit->HasAuraType(SPELL_AURA_MOD_FEAR) ||
+-                    unit->HasAuraType(SPELL_AURA_MOD_CONFUSE) || unit->HasAuraType(SPELL_AURA_MOD_CHARM) ||
+-                    unit->HasAuraType(SPELL_AURA_AOE_CHARM) ||
+-                    unit->HasAuraWithMechanic(1ULL << MECHANIC_POLYMORPH) ||
+-                    unit->HasAuraWithMechanic(1ULL << MECHANIC_SLEEP) ||
+-                    unit->HasAuraWithMechanic(1ULL << MECHANIC_SAPPED));
++    if (!unit)
++        return false;
++    PvpControlState const state = GetPvpControlState(unit);
++    return state == PvpControlState::DamageBreakable ||
++           unit->HasAuraWithMechanic(1ULL << MECHANIC_BANISH) ||
++           unit->HasAuraType(SPELL_AURA_MOD_STUN) || unit->HasAuraType(SPELL_AURA_MOD_SILENCE) ||
++           unit->HasAuraType(SPELL_AURA_MOD_FEAR) || unit->HasAuraType(SPELL_AURA_MOD_CONFUSE) ||
++           unit->HasAuraType(SPELL_AURA_MOD_CHARM) || unit->HasAuraType(SPELL_AURA_AOE_CHARM);
+ }
+ 
+ bool HasActiveControlInGroup(Unit* target, DiminishingGroup group)
+@@ -111,50 +113,131 @@ Spell* CurrentPvpCast(Unit* caster)
+     return caster->GetCurrentSpell(CURRENT_CHANNELED_SPELL);
+ }
+ 
+-bool IsHealingOrControlSpell(SpellInfo const* info)
++bool IsHighValueHeal(SpellInfo const* info)
+ {
+     if (!info)
+         return false;
+-    uint64 const controlMask = (1ULL << MECHANIC_CHARM) | (1ULL << MECHANIC_DISORIENTED) |
+-                               (1ULL << MECHANIC_FEAR) | (1ULL << MECHANIC_ROOT) |
+-                               (1ULL << MECHANIC_SLEEP) | (1ULL << MECHANIC_SNARE) |
+-                               (1ULL << MECHANIC_STUN) | (1ULL << MECHANIC_FREEZE) |
+-                               (1ULL << MECHANIC_POLYMORPH) | (1ULL << MECHANIC_SAPPED) |
+-                               (1ULL << MECHANIC_SILENCE);
+-    if (info->GetAllEffectsMechanicMask() & controlMask)
+-        return true;
+     for (SpellEffectInfo const& effect : info->Effects)
+         if (effect.Effect == SPELL_EFFECT_HEAL || effect.Effect == SPELL_EFFECT_HEAL_MAX_HEALTH ||
+-            effect.Effect == SPELL_EFFECT_HEAL_PCT)
++            effect.Effect == SPELL_EFFECT_HEAL_PCT || effect.ApplyAuraName == SPELL_AURA_PERIODIC_HEAL)
+             return true;
+     return false;
+ }
+ 
+-bool CanThreatenInterrupt(Player* enemy, Player* bot)
++bool IsHardCcCast(SpellInfo const* info)
+ {
+-    if (!enemy || !bot)
++    if (!info)
+         return false;
++    uint64 const hardControlMask = (1ULL << MECHANIC_CHARM) | (1ULL << MECHANIC_DISORIENTED) |
++                                   (1ULL << MECHANIC_FEAR) | (1ULL << MECHANIC_SLEEP) |
++                                   (1ULL << MECHANIC_STUN) | (1ULL << MECHANIC_FREEZE) |
++                                   (1ULL << MECHANIC_KNOCKOUT) | (1ULL << MECHANIC_POLYMORPH) |
++                                   (1ULL << MECHANIC_BANISH) | (1ULL << MECHANIC_SHACKLE) |
++                                   (1ULL << MECHANIC_TURN) | (1ULL << MECHANIC_HORROR) |
++                                   (1ULL << MECHANIC_SAPPED);
++    return (info->GetAllEffectsMechanicMask() & hardControlMask) != 0;
++}
++
++bool IsSoftControlCast(SpellInfo const* info)
++{
++    if (!info)
++        return false;
++    uint64 const softControlMask = (1ULL << MECHANIC_ROOT) | (1ULL << MECHANIC_SNARE) |
++                                   (1ULL << MECHANIC_SILENCE) | (1ULL << MECHANIC_DAZE);
++    return (info->GetAllEffectsMechanicMask() & softControlMask) != 0;
++}
++
++bool IsHealingOrHardControlSpell(SpellInfo const* info)
++{
++    return IsHighValueHeal(info) || IsHardCcCast(info);
++}
++
++float ScoreEnemyInterruptThreat(Player* enemy, Player* bot)
++{
++    if (!enemy || !bot || !enemy->IsAlive() ||
++        GetPvpControlState(enemy) == PvpControlState::DamageImmune ||
++        enemy->HasAuraType(SPELL_AURA_MOD_STUN) || enemy->HasAuraType(SPELL_AURA_MOD_FEAR) ||
++        enemy->HasAuraType(SPELL_AURA_MOD_CONFUSE) || enemy->HasAuraType(SPELL_AURA_MOD_CHARM) ||
++        enemy->HasAuraType(SPELL_AURA_AOE_CHARM))
++        return 0.0f;
+     float const distance = bot->GetDistance2d(enemy);
+     switch (enemy->getClass())
+     {
+         case CLASS_ROGUE:
++            return distance <= 8.0f ? 1.0f : 0.0f;
+         case CLASS_WARRIOR:
+-            return distance <= 8.0f;
++            return distance <= 8.0f ? 0.85f : 0.0f;
+         case CLASS_DEATH_KNIGHT:
+-            return distance <= 10.0f;
++            return distance <= 10.0f ? 0.90f : 0.0f;
+         case CLASS_PALADIN:
+-            return distance <= 12.0f;
++            return distance <= 12.0f ? 0.05f : 0.0f;
+         case CLASS_SHAMAN:
++            return distance <= 30.0f ? 0.95f : 0.0f;
+         case CLASS_MAGE:
++            return distance <= 30.0f ? 0.95f : 0.0f;
+         case CLASS_HUNTER:
++            // Silencing Shot is specialization-dependent; without an observed
++            // public cast, only reserve a moderate probability for it.
++            return distance <= 35.0f ? 0.40f : 0.0f;
+         case CLASS_PRIEST:
++            // Shadowform is publicly visible. Holy/Discipline priests should
++            // not be treated as if Silence were guaranteed.
++            return distance <= 30.0f ? (enemy->HasAura(15473) ? 0.70f : 0.10f) : 0.0f;
+         case CLASS_WARLOCK:
+-            return distance <= 30.0f;
++            if (distance > 30.0f)
++                return 0.0f;
++            if (Pet* pet = enemy->GetPet())
++                if (pet->IsAlive() && pet->GetCreatureTemplate() &&
++                    pet->GetCreatureTemplate()->family == CREATURE_FAMILY_FELHUNTER)
++                    return 0.90f;
++            return 0.25f;
+         default:
+-            return false;
++            return 0.0f;
+     }
+ }
+ 
++void CalculatePressureMix(Player* player, float& magicPressure, float& physicalPressure)
++{
++    magicPressure = 0.0f;
++    physicalPressure = 0.0f;
++    if (!player)
++        return;
++
++    for (Unit* attacker : player->getAttackers())
++    {
++        Player* enemy = attacker ? attacker->ToPlayer() : nullptr;
++        if (!enemy)
++            continue;
++        float const weight = HasMajorOffensive(enemy) ? 0.42f : 0.24f;
++        switch (enemy->getClass())
++        {
++            case CLASS_WARRIOR:
++            case CLASS_ROGUE:
++            case CLASS_HUNTER:
++                physicalPressure += weight;
++                break;
++            case CLASS_MAGE:
++            case CLASS_PRIEST:
++            case CLASS_WARLOCK:
++                magicPressure += weight;
++                break;
++            case CLASS_PALADIN:
++            case CLASS_SHAMAN:
++            case CLASS_DRUID:
++            case CLASS_DEATH_KNIGHT:
++                magicPressure += weight * 0.55f;
++                physicalPressure += weight * 0.45f;
++                break;
++            default:
++                physicalPressure += weight * 0.50f;
++                magicPressure += weight * 0.50f;
++                break;
++        }
++    }
++    magicPressure = std::clamp(magicPressure, 0.0f, 1.0f);
++    physicalPressure = std::clamp(physicalPressure, 0.0f, 1.0f);
++}
++
+ float IncomingBurstAgainst(Player* player)
+ {
+     if (!player)
+@@ -235,6 +318,9 @@ float ScorePvpTarget(PlayerbotAI* botAI, Unit* candidate)
+         return 0.0f;
+ 
+     Player* player = candidate->ToPlayer();
++    PvpControlState const control = GetPvpControlState(player);
++    if (control == PvpControlState::DamageImmune)
++        return 0.0f;
+     float score = (100.0f - player->GetHealthPct()) / 100.0f * 0.32f;
+     if (PlayerbotAI::IsHeal(player, true))
+         score += 0.18f;
+@@ -246,6 +332,10 @@ float ScorePvpTarget(PlayerbotAI* botAI, Unit* candidate)
+         score += 0.30f;
+     if (HasMajorDefensive(player))
+         score -= 0.45f;
++    if (control == PvpControlState::DamageBreakable)
++        score -= 0.85f;
++    else if (control == PvpControlState::DamageSafe)
++        score += 0.05f;
+     score -= std::clamp(bot->GetDistance2d(player) / 80.0f, 0.0f, 0.30f);
+ 
+     if (Group* group = bot->GetGroup())
+@@ -283,6 +373,7 @@ void StartEnemyCastObservation(PlayerbotAI* botAI, Unit* caster, Spell* spell, b
+     state.observedEnemyCasterGuid = caster->GetGUID();
+     state.observedEnemyCastSpellId = spell->m_spellInfo->Id;
+     state.observedEnemyCastStartedAtMs = now;
++    state.observedEnemyCastExpectedEndAtMs = now + std::max<int32>(0, spell->GetCastTimeRemaining());
+     state.observedEnemyCastProgress = 0.0f;
+     state.interruptCommitted = false;
+ 
+@@ -309,6 +400,163 @@ uint32 FindPetSpell(PlayerbotAI* botAI, Pet* pet, std::initializer_list<char con
+ }
+ }
+ 
++PvpControlState GetPvpControlState(Unit* target)
++{
++    if (!target)
++        return PvpControlState::None;
++
++    if ((target->IsImmunedToDamage(SPELL_SCHOOL_MASK_NORMAL) &&
++         target->IsImmunedToDamage(SPELL_SCHOOL_MASK_MAGIC)) ||
++        target->HasAuraWithMechanic(1ULL << MECHANIC_BANISH))
++        return PvpControlState::DamageImmune;
++
++    uint64 const controlMask = (1ULL << MECHANIC_CHARM) | (1ULL << MECHANIC_DISORIENTED) |
++                               (1ULL << MECHANIC_FEAR) | (1ULL << MECHANIC_ROOT) |
++                               (1ULL << MECHANIC_SLEEP) | (1ULL << MECHANIC_STUN) |
++                               (1ULL << MECHANIC_FREEZE) | (1ULL << MECHANIC_KNOCKOUT) |
++                               (1ULL << MECHANIC_POLYMORPH) | (1ULL << MECHANIC_SHACKLE) |
++                               (1ULL << MECHANIC_TURN) | (1ULL << MECHANIC_HORROR) |
++                               (1ULL << MECHANIC_SAPPED) | (1ULL << MECHANIC_SILENCE);
++    uint64 const breakableMask = controlMask & ~((1ULL << MECHANIC_ROOT) |
++                                                 (1ULL << MECHANIC_STUN) |
++                                                 (1ULL << MECHANIC_SILENCE));
++    for (auto const& applied : target->GetAppliedAuras())
++    {
++        Aura* aura = applied.second ? applied.second->GetBase() : nullptr;
++        SpellInfo const* info = aura ? aura->GetSpellInfo() : nullptr;
++        if (!info || info->IsPositive() || aura->GetDuration() <= 0 ||
++            !(info->GetAllEffectsMechanicMask() & breakableMask))
++            continue;
++        if (info->AuraInterruptFlags & (AURA_INTERRUPT_FLAG_TAKE_DAMAGE | AURA_INTERRUPT_FLAG_DIRECT_DAMAGE))
++            return PvpControlState::DamageBreakable;
++    }
++
++    bool const damageSafe = target->HasAuraType(SPELL_AURA_MOD_STUN) ||
++                            target->HasAuraType(SPELL_AURA_MOD_ROOT) ||
++                            target->HasAuraType(SPELL_AURA_MOD_SILENCE) ||
++                            target->HasAuraType(SPELL_AURA_MOD_FEAR) ||
++                            target->HasAuraType(SPELL_AURA_MOD_CONFUSE) ||
++                            target->HasAuraType(SPELL_AURA_MOD_CHARM) ||
++                            target->HasAuraType(SPELL_AURA_AOE_CHARM) ||
++                            target->HasAuraWithMechanic(controlMask);
++    return damageSafe ? PvpControlState::DamageSafe : PvpControlState::None;
++}
++
++bool IsPvpDamageSpell(SpellInfo const* spellInfo)
++{
++    if (!spellInfo)
++        return false;
++    for (SpellEffectInfo const& effect : spellInfo->Effects)
++    {
++        switch (effect.Effect)
++        {
++            case SPELL_EFFECT_INSTAKILL:
++            case SPELL_EFFECT_SCHOOL_DAMAGE:
++            case SPELL_EFFECT_ENVIRONMENTAL_DAMAGE:
++            case SPELL_EFFECT_HEALTH_LEECH:
++            case SPELL_EFFECT_WEAPON_DAMAGE_NOSCHOOL:
++            case SPELL_EFFECT_WEAPON_PERCENT_DAMAGE:
++            case SPELL_EFFECT_WEAPON_DAMAGE:
++            case SPELL_EFFECT_NORMALIZED_WEAPON_DMG:
++                return true;
++            default:
++                break;
++        }
++        if (effect.ApplyAuraName == SPELL_AURA_PERIODIC_DAMAGE ||
++            effect.ApplyAuraName == SPELL_AURA_PERIODIC_DAMAGE_PERCENT ||
++            effect.ApplyAuraName == SPELL_AURA_PERIODIC_LEECH)
++            return true;
++    }
++    return false;
++}
++
++PvpCastPurpose GetPvpCastPurpose(SpellInfo const* spellInfo)
++{
++    if (IsHighValueHeal(spellInfo))
++        return PvpCastPurpose::Heal;
++    if (IsHardCcCast(spellInfo))
++        return PvpCastPurpose::Control;
++    if (IsPvpDamageSpell(spellInfo))
++        return PvpCastPurpose::Damage;
++    return IsSoftControlCast(spellInfo) ? PvpCastPurpose::Control : PvpCastPurpose::Utility;
++}
++
++bool HasBreakablePvpControlNearby(PlayerbotAI* botAI, Unit* center, float radius)
++{
++    Player* bot = botAI ? botAI->GetBot() : nullptr;
++    if (!bot || !center || !IsPvpTacticalContextEnabled(bot))
++        return false;
++
++    std::set<ObjectGuid> seen;
++    auto isNearbyBreakable = [&](Unit* candidate)
++    {
++        return candidate && candidate->IsPlayer() && candidate->IsAlive() && bot->IsHostileTo(candidate) &&
++               seen.insert(candidate->GetGUID()).second && center->GetDistance2d(candidate) <= radius &&
++               GetPvpControlState(candidate) == PvpControlState::DamageBreakable;
++    };
++    for (Unit* attacker : bot->getAttackers())
++        if (isNearbyBreakable(attacker))
++            return true;
++    for (ObjectGuid const& guid : botAI->GetAiObjectContext()->GetValue<GuidVector>("nearest enemy players")->Get())
++        if (isNearbyBreakable(botAI->GetUnit(guid)))
++            return true;
++    return false;
++}
++
++bool CanDamagePvpTarget(PlayerbotAI* botAI, Unit* target, SpellInfo const* spellInfo)
++{
++    Player* bot = botAI ? botAI->GetBot() : nullptr;
++    if (!bot || !target || !IsPvpTacticalContextEnabled(bot))
++        return true;
++    if (target->IsPlayer() && bot->IsHostileTo(target))
++    {
++        PvpControlState const control = GetPvpControlState(target);
++        if (control == PvpControlState::DamageBreakable || control == PvpControlState::DamageImmune)
++            return false;
++    }
++    if (!spellInfo || !IsPvpDamageSpell(spellInfo))
++        return true;
++
++    bool areaDamage = false;
++    float radius = 0.0f;
++    for (SpellEffectInfo const& effect : spellInfo->Effects)
++    {
++        bool damagingEffect = effect.ApplyAuraName == SPELL_AURA_PERIODIC_DAMAGE ||
++                               effect.ApplyAuraName == SPELL_AURA_PERIODIC_DAMAGE_PERCENT ||
++                               effect.ApplyAuraName == SPELL_AURA_PERIODIC_LEECH;
++        switch (effect.Effect)
++        {
++            case SPELL_EFFECT_INSTAKILL:
++            case SPELL_EFFECT_SCHOOL_DAMAGE:
++            case SPELL_EFFECT_ENVIRONMENTAL_DAMAGE:
++            case SPELL_EFFECT_HEALTH_LEECH:
++            case SPELL_EFFECT_WEAPON_DAMAGE_NOSCHOOL:
++            case SPELL_EFFECT_WEAPON_PERCENT_DAMAGE:
++            case SPELL_EFFECT_WEAPON_DAMAGE:
++            case SPELL_EFFECT_NORMALIZED_WEAPON_DMG:
++                damagingEffect = true;
++                break;
++            default:
++                break;
++        }
++        if (!damagingEffect)
++            continue;
++        if (!effect.IsTargetingArea() && effect.ChainTarget <= 1)
++            continue;
++        areaDamage = true;
++        if (effect.HasRadius())
++            radius = std::max(radius, effect.CalcRadius(bot));
++        if (effect.ChainTarget > 1)
++            radius = std::max(radius, 12.0f);
++    }
++    if (!areaDamage)
++        return true;
++    radius = std::max(radius, 8.0f);
++    Unit* center = target == bot ? static_cast<Unit*>(bot) : target;
++    return !HasBreakablePvpControlNearby(botAI, center, radius) &&
++           (center == bot || !HasBreakablePvpControlNearby(botAI, bot, radius));
++}
++
+ void PvpTacticalState::Reset()
+ {
+     mode = PvpTacticalMode::None;
+@@ -322,13 +570,18 @@ void PvpTacticalState::Reset()
+     rogueResetStartedAtMs = 0;
+     lastAntiStealthProbeAtMs = 0;
+     duelOpenerStartedAtMs = 0;
+-    lastTargetSwapAtMs = 0;
++    targetAcquiredAtMs = 0;
+     observedEnemyCastSpellId = 0;
+     observedEnemyCastStartedAtMs = 0;
++    observedEnemyCastExpectedEndAtMs = 0;
+     lastFakeCastObservedAtMs = 0;
+     lastOwnFakeCastAtMs = 0;
+     observedOwnCastSpellId = 0;
++    hunterCcStartedAtMs = 0;
++    lastPetControlAtMs = 0;
++    trackedPrimaryTarget.Clear();
+     observedEnemyCasterGuid.Clear();
++    hunterCcTargetGuid.Clear();
+     desiredDistance = 0.0f;
+     movementProgressX = 0.0f;
+     movementProgressY = 0.0f;
+@@ -354,6 +607,7 @@ void PvpTacticalState::Reset()
+     interruptCommitted = false;
+     ownFakeCastPlanned = false;
+     ownFakeCastEvaluated = false;
++    hunterCcStage = PvpHunterCcStage::None;
+     duelOpenerStep = 0;
+     enemyFakeCastStreak = 0;
+ }
+@@ -505,7 +759,8 @@ Unit* ResolvePvpControlTarget(PlayerbotAI* botAI, Unit* primaryTarget)
+         Unit* candidate = botAI->GetUnit(guid);
+         if (!candidate || !candidate->IsPlayer() || !candidate->IsAlive() || candidate == primaryTarget ||
+             !bot->IsHostileTo(candidate) || !bot->CanSeeOrDetect(candidate, false, true) ||
+-            bot->GetDistance2d(candidate) > 30.0f || HasMajorDefensive(candidate) || IsHardControlled(candidate))
++            bot->GetDistance2d(candidate) > 30.0f || HasMajorDefensive(candidate) ||
++            GetPvpControlState(candidate) != PvpControlState::None)
+             continue;
+         float score = PlayerbotAI::IsHeal(candidate->ToPlayer(), true) ? 1.0f : 0.35f;
+         if (CurrentPvpCast(candidate))
+@@ -525,13 +780,23 @@ PvpSnapshot PvpSnapshotValue::Calculate()
+     PvpSnapshot snapshot;
+     Player* bot = botAI ? botAI->GetBot() : nullptr;
+     if (!IsPvpTacticalEligible(bot) || !IsPvpTacticalContextEnabled(bot))
++    {
++        if (botAI)
++        {
++            PvpTacticalState& state = GetPvpTacticalState(botAI);
++            state.trackedPrimaryTarget.Clear();
++            state.targetAcquiredAtMs = 0;
++        }
+         return snapshot;
++    }
+ 
+     uint32 const now = getMSTime();
++    PvpTacticalState& state = GetPvpTacticalState(botAI);
+     snapshot.capturedAtMs = now;
+     snapshot.archetype = DetectPvpArchetype(botAI);
+     snapshot.triage = CalculateTriage(botAI);
+     snapshot.incomingBurstScore = IncomingBurstAgainst(bot);
++    CalculatePressureMix(bot, snapshot.magicPressureScore, snapshot.physicalPressureScore);
+     snapshot.defensiveNeedScore = std::max(snapshot.incomingBurstScore, snapshot.triage.dangerScore);
+     snapshot.castSafetyScore = std::clamp(1.0f - snapshot.incomingBurstScore * 0.65f, 0.0f, 1.0f);
+ 
+@@ -559,10 +824,19 @@ PvpSnapshot PvpSnapshotValue::Calculate()
+         current->GetMap() != bot->GetMap())
+         current = ResolvePvpThreatTarget(botAI);
+     if (!current)
++    {
++        state.trackedPrimaryTarget.Clear();
++        state.targetAcquiredAtMs = 0;
+         return snapshot;
++    }
++    if (state.trackedPrimaryTarget != current->GetGUID())
++    {
++        state.trackedPrimaryTarget = current->GetGUID();
++        state.targetAcquiredAtMs = now;
++    }
+     snapshot.primaryTarget = current->GetGUID();
+     snapshot.targetMajorDefensive = HasMajorDefensive(current);
+-    snapshot.targetHardControlled = IsHardControlled(current);
++    snapshot.targetControlState = GetPvpControlState(current);
+ 
+     std::vector<Unit*> candidates;
+     std::set<ObjectGuid> seen;
+@@ -597,25 +871,38 @@ PvpSnapshot PvpSnapshotValue::Calculate()
+         snapshot.enemyCastTotalMs = std::max<int32>(1, spell->GetCastTime());
+         snapshot.enemyCastProgress = std::clamp(
+             1.0f - float(snapshot.enemyCastRemainingMs) / float(snapshot.enemyCastTotalMs), 0.0f, 1.0f);
+-        snapshot.enemyCastHighValue = IsHealingOrControlSpell(spell->m_spellInfo);
++        snapshot.enemyCastHighValue = IsHealingOrHardControlSpell(spell->m_spellInfo);
+     }
+ 
+-    PvpTacticalState& state = GetPvpTacticalState(botAI);
++    if (state.observedEnemyCastSpellId && state.observedEnemyCasterGuid != current->GetGUID())
++    {
++        state.observedEnemyCasterGuid.Clear();
++        state.observedEnemyCastSpellId = 0;
++        state.observedEnemyCastExpectedEndAtMs = 0;
++        state.observedEnemyCastProgress = 0.0f;
++        state.interruptCommitted = false;
++    }
+     if (snapshot.enemyCastSpellId)
+     {
+         StartEnemyCastObservation(botAI, current, CurrentPvpCast(current), snapshot.enemyCastHighValue, now);
+         state.observedEnemyCastProgress = snapshot.enemyCastProgress;
++        state.observedEnemyCastExpectedEndAtMs = std::max(
++            state.observedEnemyCastExpectedEndAtMs, now + snapshot.enemyCastRemainingMs);
+     }
+     else if (state.observedEnemyCastSpellId && state.observedEnemyCasterGuid == current->GetGUID())
+     {
++        bool const endedEarly = state.observedEnemyCastExpectedEndAtMs &&
++                                int32(state.observedEnemyCastExpectedEndAtMs - now) > 100;
+         if (!state.interruptCommitted && state.observedEnemyCastProgress >= 0.12f &&
+-            state.observedEnemyCastProgress < 0.82f && now - state.observedEnemyCastStartedAtMs < 4000)
++            state.observedEnemyCastProgress < 0.95f && endedEarly &&
++            now - state.observedEnemyCastStartedAtMs < 4000)
+         {
+             state.enemyFakeCastStreak = std::min<uint8>(3, state.enemyFakeCastStreak + 1);
+             state.lastFakeCastObservedAtMs = now;
+         }
+         state.observedEnemyCasterGuid.Clear();
+         state.observedEnemyCastSpellId = 0;
++        state.observedEnemyCastExpectedEndAtMs = 0;
+         state.observedEnemyCastProgress = 0.0f;
+         state.interruptCommitted = false;
+     }
+@@ -623,23 +910,30 @@ PvpSnapshot PvpSnapshotValue::Calculate()
+         --state.enemyFakeCastStreak;
+ 
+     Player* enemy = current->ToPlayer();
+-    snapshot.enemyInterruptThreat = CanThreatenInterrupt(enemy, bot);
++    for (Unit* candidate : candidates)
++        if (Player* hostile = candidate->ToPlayer())
++            snapshot.enemyInterruptThreatScore = std::max(
++                snapshot.enemyInterruptThreatScore, ScoreEnemyInterruptThreat(hostile, bot));
+     float const distance = bot->GetDistance2d(current);
+     snapshot.connectScore = std::clamp((distance - 5.0f) / 20.0f +
+                                            (snapshot.enemyCastHighValue ? 0.25f : 0.0f) +
+                                            (current->GetHealthPct() <= 30.0f ? 0.20f : 0.0f),
+                                        0.0f, 1.0f);
+-    snapshot.killWindowScore = std::clamp((100.0f - current->GetHealthPct()) / 100.0f * 0.55f +
+-                                              (snapshot.targetHardControlled ? 0.20f : 0.0f) +
+-                                              (snapshot.targetMajorDefensive ? -0.55f : 0.0f) +
+-                                              (current->GetHealthPct() <= 35.0f ? 0.30f : 0.0f),
+-                                          0.0f, 1.0f);
++    float controlWindow = 0.0f;
++    if (snapshot.targetControlState == PvpControlState::DamageSafe)
++        controlWindow = 0.20f;
++    else if (snapshot.targetControlState == PvpControlState::DamageBreakable)
++        controlWindow = -0.80f;
++    snapshot.killWindowScore = snapshot.targetControlState == PvpControlState::DamageImmune ? 0.0f :
++        std::clamp((100.0f - current->GetHealthPct()) / 100.0f * 0.55f + controlWindow +
++                       (snapshot.targetMajorDefensive ? -0.55f : 0.0f) +
++                       (current->GetHealthPct() <= 35.0f ? 0.30f : 0.0f),
++                   0.0f, 1.0f);
+     snapshot.castSafetyScore = 1.0f - snapshot.incomingBurstScore * 0.55f;
+     if (current->GetVictim() == bot && distance < 12.0f)
+         snapshot.castSafetyScore -= 0.30f;
+-    if (snapshot.enemyInterruptThreat)
+-        snapshot.castSafetyScore -= 0.20f;
+-    if (snapshot.targetHardControlled)
++    snapshot.castSafetyScore -= snapshot.enemyInterruptThreatScore * 0.22f;
++    if (snapshot.targetControlState != PvpControlState::None)
+         snapshot.castSafetyScore += 0.25f;
+     snapshot.castSafetyScore = std::clamp(snapshot.castSafetyScore, 0.0f, 1.0f);
+ 
+@@ -648,14 +942,16 @@ PvpSnapshot PvpSnapshotValue::Calculate()
+         snapshot.intent = PvpIntent::Disengage;
+     else if (state.rogueResetting)
+         snapshot.intent = PvpIntent::Reset;
+-    else if (snapshot.killWindowScore >= 0.72f)
++    else if (snapshot.killWindowScore >= 0.72f &&
++             snapshot.targetControlState != PvpControlState::DamageBreakable &&
++             snapshot.targetControlState != PvpControlState::DamageImmune)
+         snapshot.intent = PvpIntent::Finish;
+     else if (snapshot.incomingBurstScore >= 0.72f || bot->GetHealthPct() <= 25.0f)
+         snapshot.intent = PvpIntent::Survive;
+     else if (snapshot.triage.targetGuid != bot->GetGUID() && snapshot.triage.dangerScore >= 0.65f)
+         snapshot.intent = PvpIntent::Peel;
+     else if (bot->GetHealthPct() <= sPlayerbotAIConfig.pvpTacticalRecoveryHealthPct &&
+-             snapshot.targetHardControlled)
++             snapshot.targetControlState != PvpControlState::None)
+         snapshot.intent = PvpIntent::Recover;
+     else if ((botAI->IsRanged(bot, true) || botAI->IsHeal(bot)) && !botAI->IsRanged(enemy, true) &&
+              distance < state.desiredDistance)
+@@ -812,12 +1108,14 @@ void DebugPvpTactical(PlayerbotAI* botAI, std::string const& message, Unit* targ
+     PvpSnapshot const snapshot = GetPvpSnapshot(botAI);
+     LOG_INFO("playerbots",
+              "[PvPTactical] bot={} event={} mode={} intent={} archetype={} owner={} target={} dist={:.1f} hp={:.1f} "
+-             "kill={:.2f} burst={:.2f} safety={:.2f} targetScore={:.2f}/{:.2f}",
++             "kill={:.2f} burst={:.2f} safety={:.2f} targetScore={:.2f}/{:.2f} control={} "
++             "interrupt={:.2f} pressure={:.2f}/{:.2f}",
+              bot->GetName(), message, uint32(state.mode), uint32(snapshot.intent), uint32(snapshot.archetype),
+              uint32(state.movementOwner), target ? target->GetName() : "none",
+              target ? bot->GetDistance2d(target) : 0.0f, bot->GetHealthPct(), snapshot.killWindowScore,
+              snapshot.incomingBurstScore, snapshot.castSafetyScore, snapshot.currentTargetScore,
+-             snapshot.recommendedTargetScore);
++             snapshot.recommendedTargetScore, uint32(snapshot.targetControlState),
++             snapshot.enemyInterruptThreatScore, snapshot.magicPressureScore, snapshot.physicalPressureScore);
+ }
+ 
+ bool CanUsePvpSpell(PlayerbotAI* botAI, std::string const& spell, Unit* target, bool respectDiminishing)
+@@ -846,6 +1144,9 @@ bool CanApplyPvpControl(PlayerbotAI* botAI, std::string const& spell, Unit* targ
+     DiminishingGroup const group = GetDiminishingReturnsGroupForSpell(spellInfo, false);
+     if (group == DIMINISHING_NONE || !IsPlannedControlAction(spell))
+         return true;
++    PvpControlState const activeControl = GetPvpControlState(target);
++    if (activeControl == PvpControlState::DamageBreakable || activeControl == PvpControlState::DamageImmune)
++        return false;
+     if (target->GetDiminishing(group) >= DIMINISHING_LEVEL_IMMUNE || HasActiveControlInGroup(target, group))
+         return false;
+     return target->GetDiminishing(group) != DIMINISHING_LEVEL_3 ||
+@@ -874,7 +1175,7 @@ float GetPvpDrWeight(Unit* target, uint32 spellId)
+ bool IsHighValuePvpCast(Unit* caster)
+ {
+     Spell* spell = CurrentPvpCast(caster);
+-    return spell && IsHealingOrControlSpell(spell->m_spellInfo);
++    return spell && IsHealingOrHardControlSpell(spell->m_spellInfo);
+ }
+ 
+ bool IsPvpInterruptAction(std::string const& action)
+@@ -905,7 +1206,7 @@ bool ShouldCommitPvpInterrupt(PlayerbotAI* botAI, Unit* caster)
+         return false;
+ 
+     PvpTacticalState& state = GetPvpTacticalState(botAI);
+-    bool const highValue = IsHealingOrControlSpell(spell->m_spellInfo);
++    bool const highValue = IsHealingOrHardControlSpell(spell->m_spellInfo);
+     StartEnemyCastObservation(botAI, caster, spell, highValue, getMSTime());
+     uint32 const total = std::max<int32>(1, spell->GetCastTime());
+     uint32 const remaining = std::max<int32>(0, spell->GetCastTimeRemaining());
+@@ -923,14 +1224,36 @@ void MarkPvpInterruptCommitted(PlayerbotAI* botAI)
+         GetPvpTacticalState(botAI).interruptCommitted = true;
+ }
+ 
+-bool IsSafeForPvpCast(PlayerbotAI* botAI, Unit* /*spellTarget*/, uint32 castMs)
++bool IsSafeForPvpCast(PlayerbotAI* botAI, Unit* spellTarget, SpellInfo const* spellInfo, uint32 castMs)
+ {
+     if (!botAI || castMs < 1000 || !IsPvpTacticalContextEnabled(botAI->GetBot()))
+         return true;
+     PvpSnapshot const snapshot = GetPvpSnapshot(botAI);
+-    if (snapshot.intent == PvpIntent::Survive || snapshot.incomingBurstScore > 0.78f)
+-        return false;
+-    float const minimumSafety = sPlayerbotAIConfig.pvpTacticalCastSafetyMin;
++    PvpCastPurpose const purpose = GetPvpCastPurpose(spellInfo);
++    float minimumSafety = sPlayerbotAIConfig.pvpTacticalCastSafetyMin;
++    switch (purpose)
++    {
++        case PvpCastPurpose::Damage:
++            if (snapshot.intent == PvpIntent::Survive || snapshot.incomingBurstScore > 0.78f)
++                return false;
++            break;
++        case PvpCastPurpose::Control:
++            minimumSafety -= 0.07f;
++            if (snapshot.incomingBurstScore > 0.90f)
++                return false;
++            break;
++        case PvpCastPurpose::Heal:
++        {
++            bool const urgent = snapshot.triage.dangerScore >= 0.80f || botAI->GetBot()->GetHealthPct() <= 35.0f ||
++                                (spellTarget && spellTarget->GetHealthPct() <= 35.0f);
++            minimumSafety -= urgent ? 0.20f : 0.08f;
++            break;
++        }
++        case PvpCastPurpose::Utility:
++            minimumSafety -= 0.10f;
++            break;
++    }
++    minimumSafety = std::clamp(minimumSafety, 0.25f, 0.90f);
+     if (castMs >= 2000 && snapshot.castSafetyScore < minimumSafety)
+         return false;
+     return castMs < 2000 || snapshot.castSafetyScore >= minimumSafety - 0.12f;
+@@ -944,7 +1267,7 @@ bool ShouldSpendPvpGapCloser(PlayerbotAI* botAI, Unit* target, float minimumDist
+     if (distance < minimumDistance || HasMajorDefensive(target))
+         return false;
+     PvpSnapshot const snapshot = GetPvpSnapshot(botAI);
+-    if (snapshot.targetHardControlled && distance < 12.0f)
++    if (snapshot.targetControlState == PvpControlState::DamageSafe && distance < 12.0f)
+         return false;
+     return snapshot.connectScore >= 0.45f || snapshot.enemyCastHighValue || target->GetHealthPct() <= 30.0f;
+ }
+@@ -969,6 +1292,14 @@ bool IsPvpTacticalActionAllowed(PlayerbotAI* botAI, std::string const& action, U
+     Unit* enemy = target && target->IsPlayer() && bot->IsHostileTo(target) ? target :
+                       botAI->GetUnit(snapshot.primaryTarget);
+ 
++    uint32 const actionSpellId = botAI->GetAiObjectContext()->GetValue<uint32>("spell id", action)->Get();
++    SpellInfo const* actionSpellInfo = actionSpellId ? sSpellMgr->GetSpellInfo(actionSpellId) : nullptr;
++    if (actionSpellInfo && IsPvpDamageSpell(actionSpellInfo) &&
++        !CanDamagePvpTarget(botAI, target ? target : enemy, actionSpellInfo))
++        return false;
++    if (action == "blade flurry" && enemy && HasBreakablePvpControlNearby(botAI, enemy, 12.0f))
++        return false;
++
+     if (action == "charge" || action == "intercept" || action == "shadowstep" || action == "death grip")
+         return enemy && ShouldSpendPvpGapCloser(botAI, enemy, action == "death grip" ? 10.0f : 8.0f);
+ 
+@@ -1034,7 +1365,7 @@ bool IsPvpTacticalActionAllowed(PlayerbotAI* botAI, std::string const& action, U
+ 
+     if (action == "chaos bolt")
+         return enemy && !snapshot.targetMajorDefensive &&
+-               (snapshot.targetHardControlled || snapshot.castSafetyScore >= 0.68f);
++               (snapshot.targetControlState == PvpControlState::DamageSafe || snapshot.castSafetyScore >= 0.68f);
+ 
+     return true;
+ }
+@@ -1050,7 +1381,7 @@ bool ShouldCancelPvpFakeCast(PlayerbotAI* botAI)
+ 
+     PvpSnapshot const snapshot = GetPvpSnapshot(botAI);
+     Unit* target = botAI->GetUnit(snapshot.primaryTarget);
+-    if (!target || !snapshot.enemyInterruptThreat || snapshot.intent == PvpIntent::Finish ||
++    if (!target || snapshot.enemyInterruptThreatScore < 0.35f || snapshot.intent == PvpIntent::Finish ||
+         snapshot.intent == PvpIntent::Survive || snapshot.castSafetyScore < 0.35f)
+         return false;
+ 
+diff --git a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h
+index b7b38ba9..c37793cc 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h
++++ b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h
+@@ -12,6 +12,7 @@
+ 
+ class Player;
+ class PlayerbotAI;
++class SpellInfo;
+ class Unit;
+ 
+ enum class PvpTacticalMode : uint8
+@@ -54,6 +55,30 @@ enum class PvpArchetype : uint8
+     RestorationDruid
+ };
+ 
++enum class PvpControlState : uint8
++{
++    None,
++    DamageSafe,
++    DamageBreakable,
++    DamageImmune
++};
++
++enum class PvpCastPurpose : uint8
++{
++    Damage,
++    Heal,
++    Control,
++    Utility
++};
++
++enum class PvpHunterCcStage : uint8
++{
++    None,
++    Scatter,
++    MoveForTrap,
++    Complete
++};
++
+ namespace PvpPriority
+ {
+ constexpr float Emergency = 80.0f;
+@@ -73,7 +98,8 @@ enum class PvpMovementOwner : uint8
+     Pressure,
+     DuelPrepare,
+     ReturnToAnchor,
+-    RogueReset
++    RogueReset,
++    HunterTrap
+ };
+ 
+ struct PvpTacticalState
+@@ -89,13 +115,18 @@ struct PvpTacticalState
+     uint32 rogueResetStartedAtMs = 0;
+     uint32 lastAntiStealthProbeAtMs = 0;
+     uint32 duelOpenerStartedAtMs = 0;
+-    uint32 lastTargetSwapAtMs = 0;
++    uint32 targetAcquiredAtMs = 0;
+     uint32 observedEnemyCastSpellId = 0;
+     uint32 observedEnemyCastStartedAtMs = 0;
++    uint32 observedEnemyCastExpectedEndAtMs = 0;
+     uint32 lastFakeCastObservedAtMs = 0;
+     uint32 lastOwnFakeCastAtMs = 0;
+     uint32 observedOwnCastSpellId = 0;
++    uint32 hunterCcStartedAtMs = 0;
++    uint32 lastPetControlAtMs = 0;
++    ObjectGuid trackedPrimaryTarget;
+     ObjectGuid observedEnemyCasterGuid;
++    ObjectGuid hunterCcTargetGuid;
+     float desiredDistance = 0.0f;
+     float movementProgressX = 0.0f;
+     float movementProgressY = 0.0f;
+@@ -121,6 +152,7 @@ struct PvpTacticalState
+     bool interruptCommitted = false;
+     bool ownFakeCastPlanned = false;
+     bool ownFakeCastEvaluated = false;
++    PvpHunterCcStage hunterCcStage = PvpHunterCcStage::None;
+     uint8 duelOpenerStep = 0;
+     uint8 enemyFakeCastStreak = 0;
+ 
+@@ -171,10 +203,12 @@ struct PvpSnapshot
+     float connectScore = 0.0f;
+     float currentTargetScore = 0.0f;
+     float recommendedTargetScore = 0.0f;
++    float enemyInterruptThreatScore = 0.0f;
++    float magicPressureScore = 0.0f;
++    float physicalPressureScore = 0.0f;
+     bool enemyCastHighValue = false;
+-    bool enemyInterruptThreat = false;
+     bool targetMajorDefensive = false;
+-    bool targetHardControlled = false;
++    PvpControlState targetControlState = PvpControlState::None;
+ };
+ 
+ class PvpSnapshotValue : public CalculatedValue<PvpSnapshot>
+@@ -203,6 +237,11 @@ Unit* ResolvePvpControlTarget(PlayerbotAI* botAI, Unit* primaryTarget = nullptr)
+ bool IsPvpTacticalEligible(Player* bot);
+ bool IsPvpTacticalContextEnabled(Player* bot);
+ PvpArchetype DetectPvpArchetype(PlayerbotAI* botAI);
++PvpControlState GetPvpControlState(Unit* target);
++PvpCastPurpose GetPvpCastPurpose(SpellInfo const* spellInfo);
++bool IsPvpDamageSpell(SpellInfo const* spellInfo);
++bool CanDamagePvpTarget(PlayerbotAI* botAI, Unit* target, SpellInfo const* spellInfo = nullptr);
++bool HasBreakablePvpControlNearby(PlayerbotAI* botAI, Unit* center, float radius);
+ void UpdatePvpTacticalState(PlayerbotAI* botAI, Unit* target);
+ void ClaimPvpMovement(PlayerbotAI* botAI, PvpMovementOwner owner, Unit* target);
+ void SetPvpMovementDestination(PlayerbotAI* botAI, float x, float y);
+@@ -217,7 +256,7 @@ bool HasPvpMajorDefensive(Unit* target);
+ bool HasPvpMajorOffensive(Unit* target);
+ bool ShouldCommitPvpInterrupt(PlayerbotAI* botAI, Unit* caster);
+ void MarkPvpInterruptCommitted(PlayerbotAI* botAI);
+-bool IsSafeForPvpCast(PlayerbotAI* botAI, Unit* spellTarget, uint32 castMs);
++bool IsSafeForPvpCast(PlayerbotAI* botAI, Unit* spellTarget, SpellInfo const* spellInfo, uint32 castMs);
+ bool ShouldSpendPvpGapCloser(PlayerbotAI* botAI, Unit* target, float minimumDistance = 8.0f);
+ bool ShouldUsePvpBurst(PlayerbotAI* botAI, Unit* target, float minimumScore = 0.65f);
+ bool IsPvpTacticalActionAllowed(PlayerbotAI* botAI, std::string const& action, Unit* target);
+diff --git a/modules/mod-playerbots/src/Ai/Class/Dk/Strategy/GenericDKStrategy.cpp b/modules/mod-playerbots/src/Ai/Class/Dk/Strategy/GenericDKStrategy.cpp
+index d5cb664e..c199ff22 100644
+--- a/modules/mod-playerbots/src/Ai/Class/Dk/Strategy/GenericDKStrategy.cpp
++++ b/modules/mod-playerbots/src/Ai/Class/Dk/Strategy/GenericDKStrategy.cpp
+@@ -7,6 +7,7 @@
+ #include "GenericDKStrategy.h"
+ #include "DKAiObjectContext.h"
+ #include "Playerbots.h"
++#include "PvpTacticalValue.h"
+ 
+ class GenericDKStrategyActionNodeFactory : public NamedObjectFactory<ActionNode>
+ {
+@@ -80,5 +81,6 @@ void GenericDKStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
+             }
+         )
+     );
+-    triggers.push_back(new TriggerNode("pvp tactical player target", { NextAction("pvp death grip", 45.0f) }));
++    triggers.push_back(new TriggerNode("pvp tactical player target",
++                                       { NextAction("pvp death grip", PvpPriority::Pressure + 3) }));
+ }
+diff --git a/modules/mod-playerbots/src/Ai/Class/Hunter/HunterActions.cpp b/modules/mod-playerbots/src/Ai/Class/Hunter/HunterActions.cpp
+index 07a41eed..d913ceec 100644
+--- a/modules/mod-playerbots/src/Ai/Class/Hunter/HunterActions.cpp
++++ b/modules/mod-playerbots/src/Ai/Class/Hunter/HunterActions.cpp
+@@ -10,6 +10,7 @@
+ #include "PlayerbotAI.h"
+ #include "PlayerbotAIConfig.h"
+ #include "Playerbots.h"
++#include "PvpTacticalValue.h"
+ 
+ namespace
+ {
+@@ -125,9 +126,17 @@ bool CastAutoShotAction::isUseful()
+     if (botAI->IsInVehicle() && !botAI->IsInVehicle(false, false, true))
+         return false;
+ 
+-    if (AI_VALUE(Unit*, "current target") && bot->GetCurrentSpell(CURRENT_AUTOREPEAT_SPELL) &&
++    Unit* target = AI_VALUE(Unit*, "current target");
++    if (target && !CanDamagePvpTarget(botAI, target))
++    {
++        if (bot->GetCurrentSpell(CURRENT_AUTOREPEAT_SPELL))
++            bot->InterruptSpell(CURRENT_AUTOREPEAT_SPELL);
++        return false;
++    }
++
++    if (target && bot->GetCurrentSpell(CURRENT_AUTOREPEAT_SPELL) &&
+         bot->GetCurrentSpell(CURRENT_AUTOREPEAT_SPELL)->m_targets.GetUnitTargetGUID() ==
+-            AI_VALUE(Unit*, "current target")->GetGUID())
++            target->GetGUID())
+     {
+         return false;
+     }
+diff --git a/modules/mod-playerbots/src/Ai/Class/Hunter/Strategy/GenericHunterStrategy.cpp b/modules/mod-playerbots/src/Ai/Class/Hunter/Strategy/GenericHunterStrategy.cpp
+index caf315d1..35d2aba6 100644
+--- a/modules/mod-playerbots/src/Ai/Class/Hunter/Strategy/GenericHunterStrategy.cpp
++++ b/modules/mod-playerbots/src/Ai/Class/Hunter/Strategy/GenericHunterStrategy.cpp
+@@ -5,6 +5,7 @@
+  */
+ 
+ #include "GenericHunterStrategy.h"
++#include "PvpTacticalValue.h"
+ 
+ class GenericHunterStrategyActionNodeFactory : public NamedObjectFactory<ActionNode>
+ {
+@@ -77,7 +78,7 @@ void GenericHunterStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
+     triggers.push_back(new TriggerNode("tranquilizing shot magic", { NextAction("tranquilizing shot", 61.0f) }));
+ 
+     // Ranged-based Triggers
+-    triggers.push_back(new TriggerNode("enemy within melee", { NextAction("pvp freezing trap", 39.0f),
++    triggers.push_back(new TriggerNode("enemy within melee", { NextAction("pvp freezing trap", PvpPriority::Control + 1),
+                                                                NextAction("explosive trap", 37.0f),
+                                                                NextAction("mongoose bite", 22.0f),
+                                                                NextAction("wing clip", 21.0f) }));
+@@ -85,9 +86,9 @@ void GenericHunterStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
+     triggers.push_back(new TriggerNode("enemy too close for auto shot", { NextAction("disengage", 35.0f),
+                                                                           NextAction("flee", 34.0f) }));
+     triggers.push_back(new TriggerNode("pvp tactical duel maintenance",
+-                                       { NextAction("cancel pvp feign death", 90.0f) }));
++                                       { NextAction("cancel pvp feign death", PvpPriority::Emergency + 10) }));
+     triggers.push_back(new TriggerNode("pvp tactical player target",
+-                                       { NextAction("pvp concussive shot", 46.0f) }));
++                                       { NextAction("pvp concussive shot", PvpPriority::Position - 4) }));
+ }
+ 
+ // ===== AoE Strategy, 2/3+ enemies =====
+diff --git a/modules/mod-playerbots/src/Ai/Class/Mage/MageActions.cpp b/modules/mod-playerbots/src/Ai/Class/Mage/MageActions.cpp
+index 92c18345..889d6f57 100644
+--- a/modules/mod-playerbots/src/Ai/Class/Mage/MageActions.cpp
++++ b/modules/mod-playerbots/src/Ai/Class/Mage/MageActions.cpp
+@@ -200,7 +200,8 @@ bool CastPvpPolymorphAction::isUseful()
+     uint32 const spellId = AI_VALUE2(uint32, "spell id", "polymorph");
+     SpellInfo const* spellInfo = spellId ? sSpellMgr->GetSpellInfo(spellId) : nullptr;
+     uint32 const castMs = spellInfo ? spellInfo->CalcCastTime(bot) : 0;
+-    return spellId && CanApplyPvpControl(botAI, "polymorph", target) && IsSafeForPvpCast(botAI, target, castMs) &&
++    return spellId && CanApplyPvpControl(botAI, "polymorph", target) &&
++           IsSafeForPvpCast(botAI, target, spellInfo, castMs) &&
+            !bot->HasSpellCooldown(spellId) && (!lastCastMs || getMSTime() - lastCastMs >= 18000);
+ }
+ 
+@@ -228,7 +229,8 @@ bool CastPvpPolymorphAction::Execute(Event /*event*/)
+ bool CastPvpMageSlowAction::isUseful()
+ {
+     Unit* target = AI_VALUE(Unit*, "current target");
+-    if (!target || !target->IsPlayer() || botAI->HasAura("polymorph", target) ||
++    if (!target || !target->IsPlayer() || !CanDamagePvpTarget(botAI, target) ||
++        botAI->HasAura("polymorph", target) ||
+         botAI->HasAura("slow", target) || botAI->HasAura("frostbolt", target) ||
+         botAI->HasAura("cone of cold", target))
+         return false;
+@@ -253,7 +255,7 @@ bool CastPvpMageSlowAction::Execute(Event /*event*/)
+         return false;
+ 
+     SpellInfo const* frostbolt = sSpellMgr->GetSpellInfo(frostboltId);
+-    if (frostbolt && !IsSafeForPvpCast(botAI, target, frostbolt->CalcCastTime(bot)))
++    if (frostbolt && !IsSafeForPvpCast(botAI, target, frostbolt, frostbolt->CalcCastTime(bot)))
+         return false;
+ 
+     if (bot->isMoving())
+diff --git a/modules/mod-playerbots/src/Ai/Class/Mage/Strategy/GenericMageStrategy.cpp b/modules/mod-playerbots/src/Ai/Class/Mage/Strategy/GenericMageStrategy.cpp
+index c930ea90..77390598 100644
+--- a/modules/mod-playerbots/src/Ai/Class/Mage/Strategy/GenericMageStrategy.cpp
++++ b/modules/mod-playerbots/src/Ai/Class/Mage/Strategy/GenericMageStrategy.cpp
+@@ -7,6 +7,7 @@
+ #include "GenericMageStrategy.h"
+ #include "AiFactory.h"
+ #include "Playerbots.h"
++#include "PvpTacticalValue.h"
+ #include "RangedCombatStrategy.h"
+ 
+ namespace
+@@ -104,9 +105,9 @@ void GenericMageStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
+     triggers.push_back(new TriggerNode("enemy is close and no firestarter strategy", { NextAction("frost nova", 50.0f) }));
+     triggers.push_back(new TriggerNode("enemy too close for spell and no firestarter strategy", { NextAction("blink back", 35.0f) }));
+     triggers.push_back(new TriggerNode("pvp tactical player target",
+-                                       { NextAction("hold pvp polymorph", 60.0f),
+-                                         NextAction("pvp polymorph", 48.0f),
+-                                         NextAction("pvp mage slow", 47.0f) }));
++                                       { NextAction("hold pvp polymorph", PvpPriority::Control + 2),
++                                         NextAction("pvp polymorph", PvpPriority::Control),
++                                         NextAction("pvp mage slow", PvpPriority::Position - 3) }));
+ 
+     // Mana Threshold Triggers
+     Player* bot = botAI->GetBot();
+diff --git a/modules/mod-playerbots/src/Ai/Class/Warlock/Strategy/GenericWarlockStrategy.cpp b/modules/mod-playerbots/src/Ai/Class/Warlock/Strategy/GenericWarlockStrategy.cpp
+index c89a10a4..6de3ea1e 100644
+--- a/modules/mod-playerbots/src/Ai/Class/Warlock/Strategy/GenericWarlockStrategy.cpp
++++ b/modules/mod-playerbots/src/Ai/Class/Warlock/Strategy/GenericWarlockStrategy.cpp
+@@ -5,6 +5,7 @@
+  */
+ 
+ #include "GenericWarlockStrategy.h"
++#include "PvpTacticalValue.h"
+ 
+ GenericWarlockStrategy::GenericWarlockStrategy(PlayerbotAI* botAI) : CombatStrategy(botAI)
+ {
+@@ -88,7 +89,8 @@ void GenericWarlockStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
+             }
+         )
+     );
+-    triggers.push_back(new TriggerNode("pvp tactical player target", { NextAction("pvp fear", 48.0f) }));
++    triggers.push_back(new TriggerNode("pvp tactical player target",
++                                       { NextAction("pvp fear", PvpPriority::Control) }));
+ }
+ 
+ // ===== AoE Strategy, 3+ enemies =====
+diff --git a/modules/mod-playerbots/src/Ai/Class/Warlock/WarlockActions.cpp b/modules/mod-playerbots/src/Ai/Class/Warlock/WarlockActions.cpp
+index 79abdb1f..cbb8cd5e 100644
+--- a/modules/mod-playerbots/src/Ai/Class/Warlock/WarlockActions.cpp
++++ b/modules/mod-playerbots/src/Ai/Class/Warlock/WarlockActions.cpp
+@@ -41,7 +41,8 @@ bool CastPvpFearAction::isUseful()
+     uint32 const spellId = AI_VALUE2(uint32, "spell id", "fear");
+     SpellInfo const* spellInfo = spellId ? sSpellMgr->GetSpellInfo(spellId) : nullptr;
+     uint32 const castMs = spellInfo ? spellInfo->CalcCastTime(bot) : 0;
+-    return spellId && CanApplyPvpControl(botAI, "fear", target) && IsSafeForPvpCast(botAI, target, castMs) &&
++    return spellId && CanApplyPvpControl(botAI, "fear", target) &&
++           IsSafeForPvpCast(botAI, target, spellInfo, castMs) &&
+            !bot->HasSpellCooldown(spellId) && (!lastCastMs || getMSTime() - lastCastMs >= 18000);
+ }
+ 
+diff --git a/modules/mod-playerbots/src/Bot/PlayerbotAI.cpp b/modules/mod-playerbots/src/Bot/PlayerbotAI.cpp
+index da952e2c..5ab0b19b 100644
+--- a/modules/mod-playerbots/src/Bot/PlayerbotAI.cpp
++++ b/modules/mod-playerbots/src/Bot/PlayerbotAI.cpp
+@@ -3591,8 +3591,12 @@ bool PlayerbotAI::CastSpell(uint32 spellId, Unit* target, Item* itemTarget)
+             case 27276:  // Devour Magic rank 5
+             case 27277:  // Devour Magic rank 6
+             case 48011:  // Devour Magic rank 7
+-                // No message - just break out of the switch and let normal cast logic continue
+-                break;
++                // These are explicitly scheduled pet abilities. Execute them
++                // through the pet instead of constructing a player-owned Spell.
++                if (!pet->IsAlive() || pet->HasSpellCooldown(spellId) || !pet->IsWithinLOSInMap(target))
++                    return false;
++                pet->SetFacingToObject(target);
++                return pet->CastSpell(target, spellId, false) == SPELL_CAST_OK;
+             default:
+                 bool autocast = false;
+                 for (unsigned int& m_autospell : pet->m_autospells)

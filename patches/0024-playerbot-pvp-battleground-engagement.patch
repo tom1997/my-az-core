@@ -1,0 +1,1030 @@
+diff --git a/modules/mod-playerbots/src/Ai/Base/ActionContext.h b/modules/mod-playerbots/src/Ai/Base/ActionContext.h
+index d70b2c80..f8c1f34c 100644
+--- a/modules/mod-playerbots/src/Ai/Base/ActionContext.h
++++ b/modules/mod-playerbots/src/Ai/Base/ActionContext.h
+@@ -100,6 +100,7 @@ public:
+         creators["flee"] = &ActionContext::flee;
+         creators["flee with pet"] = &ActionContext::flee_with_pet;
+         creators["pvp tactical retreat"] = &ActionContext::pvp_tactical_retreat;
++        creators["pvp tactical battleground engage"] = &ActionContext::pvp_tactical_battleground_engage;
+         creators["pvp tactical pressure hunter"] = &ActionContext::pvp_tactical_pressure_hunter;
+         creators["pvp tactical melee flank"] = &ActionContext::pvp_tactical_melee_flank;
+         creators["pvp tactical emergency escape"] = &ActionContext::pvp_tactical_emergency_escape;
+@@ -333,6 +334,10 @@ private:
+         return new PvpTacticalPressureHunterAction(botAI);
+     }
+     static Action* pvp_tactical_melee_flank(PlayerbotAI* botAI) { return new PvpTacticalMeleeFlankAction(botAI); }
++    static Action* pvp_tactical_battleground_engage(PlayerbotAI* botAI)
++    {
++        return new PvpTacticalBattlegroundEngageAction(botAI);
++    }
+     static Action* pvp_tactical_emergency_escape(PlayerbotAI* botAI)
+     {
+         return new PvpTacticalEmergencyEscapeAction(botAI);
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/BattleGroundTactics.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/BattleGroundTactics.cpp
+index f16f9721..7c7c4b8d 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/BattleGroundTactics.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/BattleGroundTactics.cpp
+@@ -27,6 +27,7 @@
+ #include "PathGenerator.h"
+ #include "Playerbots.h"
+ #include "PositionValue.h"
++#include "PvpTacticalValue.h"
+ #include "PvpTriggers.h"
+ #include "ServerFacade.h"
+ #include "Vehicle.h"
+@@ -1575,6 +1576,16 @@ bool BGTactics::Execute(Event /*event*/)
+         return false;
+     }
+ 
++    // Objective travel, flag-carrier escort and battleground buff pickup all
++    // write to MotionMaster. Suspend every one of those writers while the PvP
++    // engagement owns combat movement; read-only objective refreshes may keep
++    // running so travel can resume with a current objective after combat.
++    if (IsPvpBattlegroundCombatOwned(botAI) &&
++        (getName() == "move to start" || getName() == "move to objective" ||
++         getName() == "reset objective force" || getName() == "protect fc" ||
++         getName() == "use buff"))
++        return false;
++
+     if (bg->GetStatus() == STATUS_IN_PROGRESS)
+         botAI->ChangeStrategy("-buff", BOT_STATE_NON_COMBAT);
+ 
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/CheckMountStateAction.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/CheckMountStateAction.cpp
+index 74faf8cd..f097a5b8 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/CheckMountStateAction.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/CheckMountStateAction.cpp
+@@ -12,6 +12,7 @@
+ #include "DBCStores.h"
+ #include "Event.h"
+ #include "PlayerbotAI.h"
++#include "PvpTacticalValue.h"
+ #include "PlayerbotAIConfig.h"
+ #include "Playerbots.h"
+ #include "ServerFacade.h"
+@@ -78,6 +79,19 @@ bool CheckMountStateAction::Execute(Event /*event*/)
+     }
+     ClearStaleFlightFlags();
+ 
++    // Battleground combat owns movement from the first engage target until
++    // pressure is gone. Never let the travel mount controller restart or keep
++    // a mount during that ownership window.
++    if (bot->InBattleground() && IsPvpBattlegroundCombatOwned(botAI))
++    {
++        if (bot->IsMounted())
++        {
++            Dismount();
++            return true;
++        }
++        return false;
++    }
++
+     // Determine if there are no attackers
+     bool noAttackers = !AI_VALUE2(bool, "combat", "self target") || !AI_VALUE(uint8, "attacker count");
+     bool enemy = AI_VALUE(Unit*, "enemy player target");
+@@ -153,6 +167,8 @@ bool CheckMountStateAction::isUseful()
+     if (botAI->IsInVehicle() || bot->isDead() || bot->HasUnitState(UNIT_STATE_IN_FLIGHT) ||
+         !bot->IsOutdoors() || bot->InArena())
+         return false;
++    if (bot->InBattleground() && IsPvpBattlegroundCombatOwned(botAI) && !bot->IsMounted())
++        return false;
+ 
+     master = GetMaster();
+ 
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp
+index 657da9ab..b16ef372 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp
+@@ -1871,7 +1871,7 @@ bool PvpTacticalRetreatAction::Execute(Event /*event*/)
+     PvpTacticalState& state = GetPvpTacticalState(botAI);
+     Unit* primaryTarget = ResolvePvpThreatTarget(botAI);
+     Unit* target = state.rangeMotion == PvpRangeMotion::Advance ? primaryTarget : ResolvePvpMovementThreat(botAI);
+-    if (!primaryTarget || !target || !botAI->IsRanged(bot, true) ||
++    if (!primaryTarget || !target || !botAI->IsRanged(bot, true) || bot->IsMounted() ||
+         state.rangeMotion == PvpRangeMotion::Hold)
+         return false;
+ 
+@@ -1887,7 +1887,40 @@ bool PvpTacticalRetreatAction::Execute(Event /*event*/)
+     // Keep the existing long spline alive between AI ticks. Instant slows,
+     // roots, traps and other control can execute while this movement continues.
+     if (IsPvpMovementActive(botAI, bot, PvpMovementOwner::Retreat))
+-        return false;
++    {
++        // Preserve a long spline while the threat remains in roughly the same
++        // direction. A Charge, Shadowstep, Grip or side swap can move the
++        // pressure source behind the bot; only a large heading change is
++        // allowed to replace the active path.
++        if (state.hasThreatAngle)
++        {
++            float const currentThreatAngle = target->GetAngle(bot);
++            float const headingDelta = std::abs(std::remainder(
++                currentThreatAngle - state.threatAngleAtIssue, float(2.0 * M_PI)));
++            float destinationRisk = 0.0f;
++            if (state.hasMovementDestination)
++            {
++                float const currentTravelAngle = std::atan2(
++                    state.movementDestinationY - bot->GetPositionY(),
++                    state.movementDestinationX - bot->GetPositionX());
++                destinationRisk = std::abs(std::remainder(
++                    currentTravelAngle - currentThreatAngle, float(2.0 * M_PI)));
++            }
++            bool const worldHeadingChanged = !bot->duel && headingDelta > float(M_PI / 3.0);
++            bool const duelPathBecameUnsafe = bot->duel && state.hasMovementDestination &&
++                destinationRisk > float(M_PI * 2.0 / 3.0) &&
++                getMSTime() - state.movementIssuedAtMs >= 300;
++            if (worldHeadingChanged || duelPathBecameUnsafe)
++            {
++                CancelPvpMovement(botAI, PvpMovementOwner::Retreat);
++                DebugPvpTactical(botAI, "retreat-heading-replan", target);
++            }
++            else
++                return false;
++        }
++        else
++            return false;
++    }
+ 
+     float const preferredDistance = GetPvpTacticalPreferredDistance(botAI, bot);
+     state.desiredDistance = preferredDistance;
+@@ -1905,7 +1938,13 @@ bool PvpTacticalRetreatAction::Execute(Event /*event*/)
+             ClearPvpMovement(botAI, PvpMovementOwner::Retreat);
+         else
+             DebugPvpTactical(botAI, event, target);
+-        return moved;
++        // Duel spacing and the BG danger band are cooperative: start the
++        // spline but leave this decision tick available to instant class
++        // pressure. Only a BG face-hug emergency consumes the action tick.
++        bool const cooperativeRangeMove = bot->duel ||
++            (bot->InBattleground() &&
++             state.battlegroundPressureBand == PvpBattlegroundPressureBand::Danger);
++        return moved && !cooperativeRangeMove;
+     };
+ 
+     if (state.rangeMotion == PvpRangeMotion::Advance)
+@@ -2113,7 +2152,7 @@ bool PvpTacticalPressureHunterAction::isUseful()
+ bool PvpTacticalRetreatAction::isUseful()
+ {
+     Unit* target = ResolvePvpMovementThreat(botAI);
+-    return sPlayerbotAIConfig.pvpTacticalEnabled && target && botAI->IsRanged(bot, true);
++    return sPlayerbotAIConfig.pvpTacticalEnabled && target && !bot->IsMounted() && botAI->IsRanged(bot, true);
+ }
+ 
+ bool PvpTacticalMeleeFlankAction::Execute(Event /*event*/)
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
+index 86985423..a092acb0 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
+@@ -2,6 +2,7 @@
+ #include "PvpTacticalActions.h"
+ #include "AiObjectContext.h"
+ #include "AiFactory.h"
++#include "Battleground.h"
+ #include "CharmInfo.h"
+ #include "CreatureAI.h"
+ #include "SpellAuras.h"
+@@ -1155,6 +1156,112 @@ bool ShouldHoldDuelAttackForOpener(PlayerbotAI* botAI, Player* opponent)
+            (IsFeralCat(botAI) && botAI->HasAura("prowl", bot));
+ }
+ 
++bool PvpTacticalBattlegroundEngageAction::isUseful()
++{
++    if (!sPlayerbotAIConfig.pvpTacticalEnabled || !sPlayerbotAIConfig.pvpTacticalBattleground ||
++        !IsPvpTacticalEligible(bot) || !bot->InBattleground())
++        return false;
++    PvpTacticalState& state = GetPvpTacticalState(botAI);
++    if (state.battlegroundEngagement == PvpBattlegroundEngagement::Travel &&
++        state.battlegroundReengageAtMs > getMSTime() && bot->getAttackers().empty())
++        return false;
++    return state.battlegroundEngagement != PvpBattlegroundEngagement::Travel ||
++           ResolvePvpBattlegroundEngageTarget(botAI, 50.0f);
++}
++
++bool PvpTacticalBattlegroundEngageAction::Execute(Event /*event*/)
++{
++    Battleground* battleground = bot->GetBattleground();
++    PvpTacticalState& state = GetPvpTacticalState(botAI);
++    if (!battleground || battleground->GetStatus() != STATUS_IN_PROGRESS)
++    {
++        state.battlegroundEngagement = PvpBattlegroundEngagement::Travel;
++        state.battlegroundPressureBand = PvpBattlegroundPressureBand::None;
++        state.battlegroundTargetGuid.Clear();
++        return false;
++    }
++
++    uint32 const now = getMSTime();
++    if (state.battlegroundEngagement == PvpBattlegroundEngagement::Travel &&
++        state.battlegroundReengageAtMs > now && bot->getAttackers().empty())
++        return false;
++    Unit* target = botAI->GetUnit(state.battlegroundTargetGuid);
++    auto validTarget = [&](Unit* candidate, float maxDistance)
++    {
++        return candidate && candidate->IsPlayer() && candidate->IsAlive() && candidate->IsInWorld() &&
++               candidate->GetMap() == bot->GetMap() && bot->IsHostileTo(candidate) &&
++               bot->IsValidAttackTarget(candidate) && bot->CanSeeOrDetect(candidate, false, true) &&
++               bot->IsWithinLOSInMap(candidate) && bot->GetDistance2d(candidate) <= maxDistance &&
++               !ShouldBlockPvpDuelInterference(bot, candidate);
++    };
++    if (!validTarget(target, state.battlegroundEngagement == PvpBattlegroundEngagement::Travel ? 50.0f : 65.0f))
++        target = ResolvePvpBattlegroundEngageTarget(
++            botAI, state.battlegroundEngagement == PvpBattlegroundEngagement::Travel ? 50.0f : 65.0f);
++
++    bool const underPressure = !bot->getAttackers().empty() ||
++        (target && (target->GetVictim() == bot || target->GetTarget() == bot->GetGUID()));
++    if (bot->IsInCombat() || underPressure)
++        state.battlegroundLastCombatAtMs = now;
++
++    if (state.battlegroundEngagement == PvpBattlegroundEngagement::Combat)
++    {
++        bool const engageGrace = state.battlegroundEngagedAtMs && now - state.battlegroundEngagedAtMs < 3000;
++        if (target && (bot->IsInCombat() || underPressure || engageGrace))
++        {
++            state.battlegroundTargetGuid = target->GetGUID();
++            Unit* current = context->GetValue<Unit*>("current target")->Get();
++            if (!current || !current->IsAlive() || !bot->IsHostileTo(current))
++            {
++                bot->SetSelection(target->GetGUID());
++                context->GetValue<Unit*>("current target")->Set(target);
++            }
++            return false;
++        }
++
++        if (bot->IsInCombat() || !bot->getAttackers().empty() ||
++            (state.battlegroundLastCombatAtMs && now - state.battlegroundLastCombatAtMs < 2500))
++            return false;
++
++        state.battlegroundEngagement = PvpBattlegroundEngagement::Travel;
++        state.battlegroundPressureBand = PvpBattlegroundPressureBand::None;
++        state.battlegroundTargetGuid.Clear();
++        state.battlegroundReengageAtMs = now + 5000;
++        state.rangeMotion = PvpRangeMotion::Hold;
++        if (state.movementOwner != PvpMovementOwner::None)
++            CancelPvpMovement(botAI);
++        DebugPvpTactical(botAI, "bg-travel-resume", nullptr);
++        return false;
++    }
++
++    if (!target)
++        return false;
++
++    state.battlegroundEngagement = PvpBattlegroundEngagement::Engage;
++    state.battlegroundTargetGuid = target->GetGUID();
++    state.battlegroundEngagedAtMs = now;
++
++    // The objective path is a travel concern. Clear it before removing the
++    // mount so the first combat movement cannot be overwritten by its stale
++    // waypoint on the next update.
++    CancelPvpMovement(botAI);
++    bool const dismounted = bot->IsMounted();
++    if (dismounted)
++        bot->RemoveAurasByType(SPELL_AURA_MOUNTED);
++    ShapeshiftForm const form = bot->GetShapeshiftForm();
++    if (form == FORM_TRAVEL || form == FORM_FLIGHT || form == FORM_FLIGHT_EPIC)
++        botAI->RemoveShapeshift();
++
++    bot->SetSelection(target->GetGUID());
++    context->GetValue<Unit*>("current target")->Set(target);
++    context->GetValue<GuidVector>("prioritized targets")->Set({ target->GetGUID() });
++    botAI->ChangeEngine(BOT_STATE_COMBAT);
++    bot->Attack(target, botAI->IsMelee(bot, true));
++    state.battlegroundEngagement = PvpBattlegroundEngagement::Combat;
++    state.battlegroundLastCombatAtMs = now;
++    DebugPvpTactical(botAI, dismounted ? "bg-engage-dismount" : "bg-engage", target);
++    return true;
++}
++
+ bool PvpTacticalEmergencyEscapeAction::isUseful()
+ {
+     if (!IsPvpTacticalContextEnabled(bot) || !botAI->IsRanged(bot, true) ||
+@@ -1403,6 +1510,8 @@ bool PvpTacticalTargetSwapAction::Execute(Event /*event*/)
+     state.trackedPrimaryTarget = target->GetGUID();
+     state.targetAcquiredAtMs = now;
+     state.targetGuid = target->GetGUID();
++    if (bot->InBattleground())
++        state.battlegroundTargetGuid = target->GetGUID();
+     DebugPvpTactical(botAI, "target-swap", target);
+     return true;
+ }
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.h b/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.h
+index 3dcedbca..a1137c8d 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.h
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.h
+@@ -5,6 +5,14 @@
+ 
+ class Player;
+ 
++class PvpTacticalBattlegroundEngageAction : public Action
++{
++public:
++    PvpTacticalBattlegroundEngageAction(PlayerbotAI* botAI) : Action(botAI, "pvp tactical battleground engage") {}
++    bool Execute(Event event) override;
++    bool isUseful() override;
++};
++
+ class PvpTacticalClassControlAction : public Action
+ {
+ public:
+diff --git a/modules/mod-playerbots/src/Ai/Base/Strategy/CombatStrategy.cpp b/modules/mod-playerbots/src/Ai/Base/Strategy/CombatStrategy.cpp
+index b67e876f..215629e7 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Strategy/CombatStrategy.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Strategy/CombatStrategy.cpp
+@@ -10,6 +10,9 @@
+ 
+ void CombatStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
+ {
++    triggers.push_back(new TriggerNode(
++        "pvp tactical battleground engage",
++        { NextAction("pvp tactical battleground engage", PvpPriority::Emergency + 2) }));
+     triggers.push_back(
+         new TriggerNode(
+             "enemy out of spell",
+@@ -52,7 +55,9 @@ void CombatStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
+         )
+     );
+     triggers.push_back(new TriggerNode(
+-        "pvp tactical ranged too close", { NextAction("pvp tactical retreat", PvpPriority::Position + 4) }));
++        "pvp tactical ranged too close", { NextAction("pvp tactical retreat", PvpPriority::Defensive + 3) }));
++    triggers.push_back(new TriggerNode(
++        "pvp tactical battleground danger", { NextAction("pvp tactical retreat", PvpPriority::Emergency + 1) }));
+     triggers.push_back(
+         new TriggerNode("pvp tactical target too far", { NextAction("drop target", ACTION_HIGH + 1) }));
+     // Long-range classes now share one stable range band. The former
+diff --git a/modules/mod-playerbots/src/Ai/Base/Strategy/NonCombatStrategy.cpp b/modules/mod-playerbots/src/Ai/Base/Strategy/NonCombatStrategy.cpp
+index ca21d8c8..01e6f1a7 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Strategy/NonCombatStrategy.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Strategy/NonCombatStrategy.cpp
+@@ -5,9 +5,13 @@
+  */
+ 
+ #include "NonCombatStrategy.h"
++#include "PvpTacticalValue.h"
+ 
+ void NonCombatStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
+ {
++    triggers.push_back(new TriggerNode(
++        "pvp tactical battleground engage",
++        { NextAction("pvp tactical battleground engage", PvpPriority::Emergency + 2) }));
+     triggers.push_back(new TriggerNode("random", { NextAction("clean quest log", 1.0f) }));
+     triggers.push_back(new TriggerNode("timer", { NextAction("check mount state", 1.0f) }));
+ }
+diff --git a/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.cpp b/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.cpp
+index 6cf5bf05..4262abe7 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.cpp
+@@ -11,6 +11,7 @@
+ #include "Playerbots.h"
+ #include "ServerFacade.h"
+ #include "SharedDefines.h"
++#include "Timer.h"
+ 
+ namespace
+ {
+@@ -36,6 +37,12 @@ float GetPvpTacticalPreferredDistance(PlayerbotAI* botAI, Player* bot)
+     return sPlayerbotAIConfig.pvpTacticalCasterPreferredDistance;
+ }
+ 
++bool IsPvpThreatPinned(Unit* target)
++{
++    return target && (target->HasUnitState(UNIT_STATE_ROOT) || target->HasRootAura() || target->isFrozen() ||
++                      target->HasAuraType(SPELL_AURA_MOD_STUN));
++}
++
+ }
+ 
+ bool EnemyTooCloseForSpellTrigger::IsActive()
+@@ -186,6 +193,37 @@ bool EnemyWithinMeleeTrigger::IsActive()
+     return target && bot->IsWithinMeleeRange(target);
+ }
+ 
++PvpTacticalBattlegroundEngageTrigger::PvpTacticalBattlegroundEngageTrigger(PlayerbotAI* botAI)
++    : Trigger(botAI, "pvp tactical battleground engage", sPlayerbotAIConfig.pvpTacticalDecisionInterval)
++{
++}
++
++bool PvpTacticalBattlegroundEngageTrigger::IsActive()
++{
++    if (!sPlayerbotAIConfig.pvpTacticalEnabled || !sPlayerbotAIConfig.pvpTacticalBattleground ||
++        !IsPvpTacticalEligible(bot) || !bot->InBattleground())
++        return false;
++    PvpTacticalState& state = GetPvpTacticalState(botAI);
++    if (state.battlegroundEngagement == PvpBattlegroundEngagement::Travel &&
++        state.battlegroundReengageAtMs > getMSTime() && bot->getAttackers().empty())
++        return false;
++    return IsPvpBattlegroundCombatOwned(botAI) || ResolvePvpBattlegroundEngageTarget(botAI, 50.0f);
++}
++
++PvpTacticalBattlegroundDangerTrigger::PvpTacticalBattlegroundDangerTrigger(PlayerbotAI* botAI)
++    : Trigger(botAI, "pvp tactical battleground danger", sPlayerbotAIConfig.pvpTacticalDecisionInterval)
++{
++}
++
++bool PvpTacticalBattlegroundDangerTrigger::IsActive()
++{
++    if (!bot->InBattleground() || bot->IsMounted() || !IsPvpBattlegroundCombatOwned(botAI))
++        return false;
++    PvpTacticalState& state = GetPvpTacticalState(botAI);
++    return state.battlegroundPressureBand == PvpBattlegroundPressureBand::Danger &&
++           state.rangeMotion == PvpRangeMotion::Retreat;
++}
++
+ PvpTacticalRangedTooCloseTrigger::PvpTacticalRangedTooCloseTrigger(PlayerbotAI* botAI)
+     : Trigger(botAI, "pvp tactical ranged too close", sPlayerbotAIConfig.pvpTacticalDecisionInterval)
+ {
+@@ -200,6 +238,13 @@ bool PvpTacticalRangedTooCloseTrigger::IsActive()
+         CancelPvpMovement(botAI, PvpMovementOwner::Retreat);
+         return false;
+     }
++    if (bot->InBattleground() && bot->IsMounted())
++    {
++        state.rangeMotion = PvpRangeMotion::Hold;
++        state.battlegroundPressureBand = PvpBattlegroundPressureBand::None;
++        CancelPvpMovement(botAI, PvpMovementOwner::Retreat);
++        return false;
++    }
+     Unit* primaryTarget = ResolvePvpThreatTarget(botAI);
+     if (!primaryTarget || !primaryTarget->IsPlayer())
+     {
+@@ -208,6 +253,70 @@ bool PvpTacticalRangedTooCloseTrigger::IsActive()
+         return false;
+     }
+ 
++    UpdatePvpTacticalState(botAI, primaryTarget);
++
++    float const enterDistance = GetPvpTacticalMinimumDistance(botAI, bot);
++    float preferredDistance = std::max(enterDistance + 2.0f, GetPvpTacticalPreferredDistance(botAI, bot));
++    if (IsPvpThreatPinned(primaryTarget))
++    {
++        float const reduction = bot->getClass() == CLASS_HUNTER ? 6.0f : 10.0f;
++        preferredDistance = std::max(enterDistance + 2.0f, preferredDistance - reduction);
++    }
++    state.desiredDistance = preferredDistance;
++
++    if (bot->InBattleground())
++    {
++        if (!IsPvpBattlegroundCombatOwned(botAI))
++        {
++            state.rangeMotion = PvpRangeMotion::Hold;
++            state.battlegroundPressureBand = PvpBattlegroundPressureBand::None;
++            CancelPvpMovement(botAI, PvpMovementOwner::Retreat);
++            return false;
++        }
++
++        Unit* activeThreat = ResolvePvpMovementThreat(botAI);
++        if (!activeThreat)
++        {
++            state.rangeMotion = PvpRangeMotion::Hold;
++            state.battlegroundPressureBand = PvpBattlegroundPressureBand::None;
++            CancelPvpMovement(botAI, PvpMovementOwner::Retreat);
++            return false;
++        }
++
++        float const closestDistance = bot->GetDistance2d(activeThreat);
++        float const emergencyDistance = bot->getClass() == CLASS_HUNTER ? 10.0f : 8.0f;
++        float const dangerDistance = bot->getClass() == CLASS_HUNTER ? 24.0f :
++                                     (botAI->IsHeal(bot) ? 18.0f : 16.0f);
++        preferredDistance = std::max(preferredDistance, dangerDistance + 2.0f);
++        if (IsPvpThreatPinned(activeThreat))
++            preferredDistance = std::max(dangerDistance + 2.0f, preferredDistance - 8.0f);
++        state.desiredDistance = preferredDistance;
++
++        PvpSnapshot const snapshot = GetPvpSnapshot(botAI);
++        bool const killPressureOverride = primaryTarget->GetHealthPct() <= 30.0f ||
++                                          snapshot.killWindowScore >= 0.72f;
++        PvpRangeMotion const previous = state.rangeMotion;
++        state.rangeMotion = SelectPvpBattlegroundRangeMotion(
++            previous, true, killPressureOverride, closestDistance,
++            emergencyDistance, dangerDistance, preferredDistance);
++
++        if (state.rangeMotion == PvpRangeMotion::Hold)
++        {
++            state.battlegroundPressureBand = PvpBattlegroundPressureBand::None;
++            if (previous != PvpRangeMotion::Hold)
++            {
++                CancelPvpMovement(botAI, PvpMovementOwner::Retreat);
++                DebugPvpTactical(botAI, killPressureOverride ? "bg-range-kill-pressure" : "bg-range-hold",
++                                 primaryTarget);
++            }
++            return false;
++        }
++
++        state.battlegroundPressureBand = ClassifyPvpBattlegroundPressureBand(
++            state.rangeMotion, closestDistance, emergencyDistance);
++        return state.battlegroundPressureBand == PvpBattlegroundPressureBand::Emergency;
++    }
++
+     // Keep the combat target for ability selection, but space from the closest
+     // hostile player. This prevents a second melee opponent from freely
+     // body-blocking a ranged bot that is targeting somebody else.
+@@ -230,12 +339,8 @@ bool PvpTacticalRangedTooCloseTrigger::IsActive()
+     }
+     Unit* target = closestThreat;
+ 
+-    float const enterDistance = GetPvpTacticalMinimumDistance(botAI, bot);
+-    float const preferredDistance = std::max(enterDistance + 2.0f, GetPvpTacticalPreferredDistance(botAI, bot));
+     float const maximumDistance = preferredDistance + 4.0f;
+     float const primaryDistance = bot->GetDistance2d(primaryTarget);
+-    state.desiredDistance = preferredDistance;
+-    UpdatePvpTacticalState(botAI, primaryTarget);
+ 
+     PvpRangeMotion const previous = state.rangeMotion;
+     state.rangeMotion = SelectPvpRangeMotion(previous, closestDistance, primaryDistance,
+@@ -267,7 +372,9 @@ bool PvpTacticalPlayerTargetTrigger::IsActive()
+ 
+     if (bot->duel && bot->duel->Opponent == target)
+         return true;
+-    if (bot->InArena() || bot->InBattleground())
++    if (bot->InBattleground())
++        return IsPvpBattlegroundCombatOwned(botAI) && bot->IsHostileTo(target);
++    if (bot->InArena())
+         return bot->IsHostileTo(target);
+     return sPlayerbotAIConfig.pvpTacticalOpenWorld && bot->IsInCombat() && bot->IsHostileTo(target);
+ }
+@@ -337,6 +444,8 @@ bool PvpTacticalMeleeFlankTrigger::IsActive()
+     if (!sPlayerbotAIConfig.pvpTacticalMeleeEnabled || !IsPvpTacticalContextEnabled(bot) ||
+         !IsPvpTacticalEligible(bot) || !botAI->IsMelee(bot, true))
+         return false;
++    if (bot->InBattleground() && !IsPvpBattlegroundCombatOwned(botAI))
++        return false;
+     Unit* target = ResolvePvpThreatTarget(botAI);
+     if (!target || !target->IsPlayer())
+         return false;
+diff --git a/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.h b/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.h
+index db31e08b..4baf4f3a 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.h
++++ b/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.h
+@@ -68,6 +68,20 @@ public:
+     bool IsActive() override;
+ };
+ 
++class PvpTacticalBattlegroundEngageTrigger : public Trigger
++{
++public:
++    PvpTacticalBattlegroundEngageTrigger(PlayerbotAI* botAI);
++    bool IsActive() override;
++};
++
++class PvpTacticalBattlegroundDangerTrigger : public Trigger
++{
++public:
++    PvpTacticalBattlegroundDangerTrigger(PlayerbotAI* botAI);
++    bool IsActive() override;
++};
++
+ class PvpTacticalTargetTooFarTrigger : public Trigger
+ {
+ public:
+diff --git a/modules/mod-playerbots/src/Ai/Base/TriggerContext.h b/modules/mod-playerbots/src/Ai/Base/TriggerContext.h
+index e810f5bf..b161c6b7 100644
+--- a/modules/mod-playerbots/src/Ai/Base/TriggerContext.h
++++ b/modules/mod-playerbots/src/Ai/Base/TriggerContext.h
+@@ -116,6 +116,8 @@ public:
+         creators["enemy is close"] = &TriggerContext::enemy_is_close;
+         creators["enemy within melee"] = &TriggerContext::enemy_within_melee;
+         creators["pvp tactical ranged too close"] = &TriggerContext::pvp_tactical_ranged_too_close;
++        creators["pvp tactical battleground engage"] = &TriggerContext::pvp_tactical_battleground_engage;
++        creators["pvp tactical battleground danger"] = &TriggerContext::pvp_tactical_battleground_danger;
+         creators["pvp tactical target too far"] = &TriggerContext::pvp_tactical_target_too_far;
+         creators["pvp tactical player target"] = &TriggerContext::pvp_tactical_player_target;
+         creators["pvp tactical pressure hunter"] = &TriggerContext::pvp_tactical_pressure_hunter;
+@@ -369,6 +371,14 @@ private:
+     {
+         return new PvpTacticalRangedTooCloseTrigger(botAI);
+     }
++    static Trigger* pvp_tactical_battleground_engage(PlayerbotAI* botAI)
++    {
++        return new PvpTacticalBattlegroundEngageTrigger(botAI);
++    }
++    static Trigger* pvp_tactical_battleground_danger(PlayerbotAI* botAI)
++    {
++        return new PvpTacticalBattlegroundDangerTrigger(botAI);
++    }
+     static Trigger* pvp_tactical_target_too_far(PlayerbotAI* botAI)
+     {
+         return new PvpTacticalTargetTooFarTrigger(botAI);
+diff --git a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp
+index f0061836..cdded526 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.cpp
+@@ -740,6 +740,14 @@ bool ShouldBlockPvpAreaDamage(bool areaDamage, bool breakableNearTarget, bool br
+     return areaDamage && (breakableNearTarget || breakableNearCaster);
+ }
+ 
++bool ShouldReleasePvpBattlegroundControl(PvpControlState control, bool primaryTarget,
++                                         bool alternativeTarget, bool healthyOrKillPressure,
++                                         bool hardCast, bool channeled, bool areaDamage)
++{
++    return control == PvpControlState::DamageBreakable && primaryTarget && !alternativeTarget &&
++           healthyOrKillPressure && hardCast && !channeled && !areaDamage;
++}
++
+ bool ShouldStartPvpControlWindowDamage(PvpControlState control, PvpCcUsage usage, bool duelPrimaryTarget,
+                                        bool setupComplete, bool hardCast, bool channeled, bool areaDamage,
+                                        uint32 expectedRemainingMs, uint32 expectedImpactMs)
+@@ -797,7 +805,37 @@ bool CanDamagePvpTarget(PlayerbotAI* botAI, Unit* target, SpellInfo const* spell
+     if (target->IsPlayer() && bot->IsHostileTo(target))
+     {
+         PvpControlState const control = GetPvpControlState(target);
+-        if (ShouldBlockPvpDamage(control, damagingAction) &&
++        bool releaseBattlegroundPrimary = false;
++        if (control == PvpControlState::DamageBreakable && damagingAction && bot->InBattleground() &&
++            IsPvpBattlegroundCombatOwned(botAI))
++        {
++            Unit* current = botAI->GetAiObjectContext()->GetValue<Unit*>("current target")->Get();
++            bool alternative = false;
++            for (ObjectGuid const& guid : botAI->GetAiObjectContext()->GetValue<GuidVector>("nearest enemy players")->Get())
++            {
++                Unit* candidate = botAI->GetUnit(guid);
++                if (!candidate || candidate == target || !candidate->IsPlayer() || !candidate->IsAlive() ||
++                    !bot->IsHostileTo(candidate) || !bot->CanSeeOrDetect(candidate, false, true) ||
++                    bot->GetDistance2d(candidate) > 40.0f ||
++                    GetPvpControlState(candidate) == PvpControlState::DamageBreakable ||
++                    GetPvpControlState(candidate) == PvpControlState::DamageImmune)
++                    continue;
++                alternative = true;
++                break;
++            }
++            uint32 const castMs = spellInfo && !spellInfo->IsChanneled() ?
++                uint32(std::max<int32>(0, spellInfo->CalcCastTime(bot))) : 0;
++            // Off-target crowd control remains protected. If this is the only
++            // practical BG target, a healthy bot may use a deliberate single-
++            // target hard cast to take the initiative. Autos, instant damage,
++            // channels and AoE may not throw the control away immediately.
++            releaseBattlegroundPrimary = ShouldReleasePvpBattlegroundControl(
++                control, current == target, alternative,
++                bot->GetHealthPct() >= 60.0f || target->GetHealthPct() <= 35.0f,
++                castMs >= 750, spellInfo && spellInfo->IsChanneled(),
++                spellInfo && IsPvpAreaOrChainSpell(spellInfo));
++        }
++        if (ShouldBlockPvpDamage(control, damagingAction) && !releaseBattlegroundPrimary &&
+             !CanPrecastPvpControlWindow(botAI, target, spellInfo))
+             return false;
+     }
+@@ -829,7 +867,10 @@ void PvpTacticalState::Reset()
+ {
+     mode = PvpTacticalMode::None;
+     movementOwner = PvpMovementOwner::None;
++    battlegroundEngagement = PvpBattlegroundEngagement::Travel;
++    battlegroundPressureBand = PvpBattlegroundPressureBand::None;
+     targetGuid.Clear();
++    battlegroundTargetGuid.Clear();
+     updatedAtMs = 0;
+     movementIssuedAtMs = 0;
+     movementProgressAtMs = 0;
+@@ -839,6 +880,9 @@ void PvpTacticalState::Reset()
+     rogueKidneyWindowUntilMs = 0;
+     lastMeleeFlankAtMs = 0;
+     lastWarriorChargeResetAtMs = 0;
++    battlegroundEngagedAtMs = 0;
++    battlegroundLastCombatAtMs = 0;
++    battlegroundReengageAtMs = 0;
+     lastAntiStealthProbeAtMs = 0;
+     duelOpenerStartedAtMs = 0;
+     targetAcquiredAtMs = 0;
+@@ -1017,6 +1061,52 @@ Unit* ResolvePvpThreatTarget(PlayerbotAI* botAI, float maxDistance)
+     return best;
+ }
+ 
++Unit* ResolvePvpBattlegroundEngageTarget(PlayerbotAI* botAI, float maxDistance)
++{
++    Player* bot = botAI ? botAI->GetBot() : nullptr;
++    if (!IsPvpTacticalEligible(bot) || !bot->InBattleground())
++        return nullptr;
++
++    Unit* best = nullptr;
++    float bestScore = -FLT_MAX;
++    std::set<ObjectGuid> seen;
++    auto consider = [&](Unit* candidate)
++    {
++        if (!candidate || !candidate->IsPlayer() || !candidate->IsAlive() || !candidate->IsInWorld() ||
++            candidate->GetMap() != bot->GetMap() || !bot->IsHostileTo(candidate) ||
++            !bot->IsValidAttackTarget(candidate) || !bot->CanSeeOrDetect(candidate, false, true) ||
++            !bot->IsWithinLOSInMap(candidate) || ShouldBlockPvpDuelInterference(bot, candidate))
++            return;
++        if (!seen.insert(candidate->GetGUID()).second)
++            return;
++        float const distance = bot->GetDistance2d(candidate);
++        if (maxDistance > 0.0f && distance > maxDistance)
++            return;
++
++        // Prefer an enemy already committing to this bot, then wounded and
++        // healing targets. Distance remains the stable tie breaker so mounted
++        // bots do not rapidly change their mind during the engage transition.
++        float score = 1.0f - distance / std::max(1.0f, maxDistance);
++        if (candidate->GetVictim() == bot || candidate->GetTarget() == bot->GetGUID())
++            score += 0.75f;
++        score += (100.0f - candidate->GetHealthPct()) / 200.0f;
++        if (PlayerbotAI::IsHeal(candidate->ToPlayer(), true))
++            score += 0.15f;
++        if (score > bestScore)
++        {
++            best = candidate;
++            bestScore = score;
++        }
++    };
++
++    consider(botAI->GetAiObjectContext()->GetValue<Unit*>("current target")->Get());
++    for (Unit* attacker : bot->getAttackers())
++        consider(attacker);
++    for (ObjectGuid const& guid : botAI->GetAiObjectContext()->GetValue<GuidVector>("nearest enemy players")->Get())
++        consider(botAI->GetUnit(guid));
++    return best;
++}
++
+ Unit* ResolvePvpHostilePet(PlayerbotAI* botAI, float maxDistance)
+ {
+     Player* bot = botAI ? botAI->GetBot() : nullptr;
+@@ -1065,6 +1155,49 @@ Unit* ResolvePvpHostilePet(PlayerbotAI* botAI, float maxDistance)
+ Unit* ResolvePvpMovementThreat(PlayerbotAI* botAI, float maxDistance)
+ {
+     Player* bot = botAI ? botAI->GetBot() : nullptr;
++    if (bot && bot->InBattleground())
++    {
++        Unit* best = nullptr;
++        float bestDistance = maxDistance > 0.0f ? maxDistance : FLT_MAX;
++        std::set<ObjectGuid> seen;
++        auto considerActivePlayer = [&](Unit* candidate)
++        {
++            if (!candidate || !candidate->IsPlayer() || !candidate->IsAlive() || !candidate->IsInWorld() ||
++                candidate->GetMap() != bot->GetMap() || !bot->IsHostileTo(candidate) ||
++                !bot->CanSeeOrDetect(candidate, false, true) ||
++                !seen.insert(candidate->GetGUID()).second)
++                return;
++            float const distance = bot->GetDistance2d(candidate);
++            float const emergencyDistance = bot->getClass() == CLASS_HUNTER ? 10.0f : 8.0f;
++            bool const activePressure = candidate->GetVictim() == bot ||
++                                        candidate->GetTarget() == bot->GetGUID() ||
++                                        distance <= emergencyDistance;
++            if (!activePressure || distance > bestDistance)
++                return;
++            best = candidate;
++            bestDistance = distance;
++        };
++
++        for (Unit* attacker : bot->getAttackers())
++            considerActivePlayer(attacker);
++        considerActivePlayer(botAI->GetAiObjectContext()->GetValue<Unit*>("current target")->Get());
++        for (ObjectGuid const& guid : botAI->GetAiObjectContext()->GetValue<GuidVector>("nearest enemy players")->Get())
++            considerActivePlayer(botAI->GetUnit(guid));
++
++        if (Unit* pet = ResolvePvpHostilePet(botAI, maxDistance))
++        {
++            float const distance = bot->GetDistance2d(pet);
++            PvpControlState const control = GetPvpControlState(pet);
++            bool const protectedPet = control == PvpControlState::DamageBreakable ||
++                                      control == PvpControlState::DamageImmune;
++            float const emergencyDistance = bot->getClass() == CLASS_HUNTER ? 10.0f : 8.0f;
++            if ((pet->GetVictim() == bot || distance <= emergencyDistance) &&
++                (!protectedPet || distance <= 5.0f) && distance < bestDistance)
++                best = pet;
++        }
++        return best;
++    }
++
+     Unit* player = ResolvePvpThreatTarget(botAI, maxDistance);
+     Unit* pet = ResolvePvpHostilePet(botAI, maxDistance);
+     if (!bot || !pet)
+@@ -1078,6 +1211,15 @@ Unit* ResolvePvpMovementThreat(PlayerbotAI* botAI, float maxDistance)
+     return !player || bot->GetDistance2d(pet) < bot->GetDistance2d(player) ? pet : player;
+ }
+ 
++bool IsPvpBattlegroundCombatOwned(PlayerbotAI* botAI)
++{
++    Player* bot = botAI ? botAI->GetBot() : nullptr;
++    if (!bot || !bot->IsAlive() || !bot->InBattleground())
++        return false;
++    PvpBattlegroundEngagement const state = GetPvpTacticalState(botAI).battlegroundEngagement;
++    return state == PvpBattlegroundEngagement::Engage || state == PvpBattlegroundEngagement::Combat;
++}
++
+ PvpTacticalState& GetPvpTacticalState(PlayerbotAI* botAI)
+ {
+     return botAI->GetAiObjectContext()->GetValue<PvpTacticalState&>("pvp tactical state")->Get();
+@@ -1295,8 +1437,15 @@ PvpSnapshot PvpSnapshotValue::Calculate()
+     Player* enemy = current->ToPlayer();
+     for (Unit* candidate : candidates)
+         if (Player* hostile = candidate->ToPlayer())
++        {
++            bool const activeBattlegroundInterruptThreat = !bot->InBattleground() || hostile == enemy ||
++                hostile->GetVictim() == bot || hostile->GetTarget() == bot->GetGUID() ||
++                bot->GetDistance2d(hostile) <= (bot->getClass() == CLASS_HUNTER ? 10.0f : 8.0f);
++            if (!activeBattlegroundInterruptThreat)
++                continue;
+             snapshot.enemyInterruptThreatScore = std::max(
+                 snapshot.enemyInterruptThreatScore, ScoreEnemyInterruptThreat(hostile, bot));
++        }
+     float const distance = bot->GetDistance2d(current);
+     snapshot.connectScore = std::clamp((distance - 5.0f) / 20.0f +
+                                            (snapshot.enemyCastHighValue ? 0.25f : 0.0f) +
+@@ -1380,6 +1529,28 @@ PvpRangeMotion SelectPvpRangeMotion(PvpRangeMotion current, float closestThreatD
+     return PvpRangeMotion::Hold;
+ }
+ 
++PvpRangeMotion SelectPvpBattlegroundRangeMotion(PvpRangeMotion current, bool activePressure,
++                                                bool killPressureOverride, float threatDistance,
++                                                float emergencyDistance, float dangerDistance,
++                                                float preferredDistance)
++{
++    if (!activePressure || (killPressureOverride && threatDistance > emergencyDistance))
++        return PvpRangeMotion::Hold;
++    if (current == PvpRangeMotion::Retreat)
++        return threatDistance < preferredDistance ? PvpRangeMotion::Retreat : PvpRangeMotion::Hold;
++    return threatDistance < dangerDistance ? PvpRangeMotion::Retreat : PvpRangeMotion::Hold;
++}
++
++PvpBattlegroundPressureBand ClassifyPvpBattlegroundPressureBand(PvpRangeMotion motion,
++                                                               float threatDistance,
++                                                               float emergencyDistance)
++{
++    if (motion != PvpRangeMotion::Retreat)
++        return PvpBattlegroundPressureBand::None;
++    return threatDistance <= emergencyDistance ? PvpBattlegroundPressureBand::Emergency :
++                                                 PvpBattlegroundPressureBand::Danger;
++}
++
+ void UpdatePvpTacticalState(PlayerbotAI* botAI, Unit* target)
+ {
+     PvpTacticalState& state = GetPvpTacticalState(botAI);
+@@ -1552,12 +1723,14 @@ void DebugPvpTactical(PlayerbotAI* botAI, std::string const& message, Unit* targ
+     state.lastDebugAtMs = now;
+     PvpSnapshot const snapshot = GetPvpSnapshot(botAI);
+     LOG_INFO("playerbots",
+-             "[PvPTactical] bot={} event={} mode={} intent={} archetype={} owner={} target={} dist={:.1f} hp={:.1f} "
++             "[PvPTactical] bot={} event={} mode={} intent={} archetype={} owner={} bgState={} bgBand={} "
++             "target={} dist={:.1f} hp={:.1f} "
+              "kill={:.2f} burst={:.2f} safety={:.2f} targetScore={:.2f}/{:.2f} control={} "
+              "ccUsage={} ccRemaining={} ccDot={} interrupt={:.2f} pressure={:.2f}/{:.2f} "
+              "petResponse={} petPressure={:.2f} petDist={:.1f}",
+              bot->GetName(), message, uint32(state.mode), uint32(snapshot.intent), uint32(snapshot.archetype),
+-             uint32(state.movementOwner), target ? target->GetName() : "none",
++             uint32(state.movementOwner), uint32(state.battlegroundEngagement),
++             uint32(state.battlegroundPressureBand), target ? target->GetName() : "none",
+              target ? bot->GetDistance2d(target) : 0.0f, bot->GetHealthPct(), snapshot.killWindowScore,
+              snapshot.incomingBurstScore, snapshot.castSafetyScore, snapshot.currentTargetScore,
+              snapshot.recommendedTargetScore, uint32(snapshot.targetControlState),
+diff --git a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h
+index 5589704d..6384336a 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h
++++ b/modules/mod-playerbots/src/Ai/Base/Value/PvpTacticalValue.h
+@@ -130,11 +130,28 @@ enum class PvpRangeMotion : uint8
+     Advance
+ };
+ 
++enum class PvpBattlegroundEngagement : uint8
++{
++    Travel,
++    Engage,
++    Combat
++};
++
++enum class PvpBattlegroundPressureBand : uint8
++{
++    None,
++    Danger,
++    Emergency
++};
++
+ struct PvpTacticalState
+ {
+     PvpTacticalMode mode = PvpTacticalMode::None;
+     PvpMovementOwner movementOwner = PvpMovementOwner::None;
++    PvpBattlegroundEngagement battlegroundEngagement = PvpBattlegroundEngagement::Travel;
++    PvpBattlegroundPressureBand battlegroundPressureBand = PvpBattlegroundPressureBand::None;
+     ObjectGuid targetGuid;
++    ObjectGuid battlegroundTargetGuid;
+     uint32 updatedAtMs = 0;
+     uint32 movementIssuedAtMs = 0;
+     uint32 movementProgressAtMs = 0;
+@@ -144,6 +161,9 @@ struct PvpTacticalState
+     uint32 rogueKidneyWindowUntilMs = 0;
+     uint32 lastMeleeFlankAtMs = 0;
+     uint32 lastWarriorChargeResetAtMs = 0;
++    uint32 battlegroundEngagedAtMs = 0;
++    uint32 battlegroundLastCombatAtMs = 0;
++    uint32 battlegroundReengageAtMs = 0;
+     uint32 lastAntiStealthProbeAtMs = 0;
+     uint32 duelOpenerStartedAtMs = 0;
+     uint32 targetAcquiredAtMs = 0;
+@@ -303,8 +323,10 @@ private:
+ PvpTacticalState& GetPvpTacticalState(PlayerbotAI* botAI);
+ PvpSnapshot GetPvpSnapshot(PlayerbotAI* botAI);
+ Unit* ResolvePvpThreatTarget(PlayerbotAI* botAI, float maxDistance = 0.0f);
++Unit* ResolvePvpBattlegroundEngageTarget(PlayerbotAI* botAI, float maxDistance = 50.0f);
+ Unit* ResolvePvpHostilePet(PlayerbotAI* botAI, float maxDistance = 0.0f);
+ Unit* ResolvePvpMovementThreat(PlayerbotAI* botAI, float maxDistance = 0.0f);
++bool IsPvpBattlegroundCombatOwned(PlayerbotAI* botAI);
+ Unit* ResolvePvpSupportTarget(PlayerbotAI* botAI, float minimumDanger = 0.55f);
+ Unit* ResolvePvpControlTarget(PlayerbotAI* botAI, Unit* primaryTarget = nullptr);
+ bool IsPvpTacticalEligible(Player* bot);
+@@ -330,6 +352,9 @@ PvpCastPurpose GetPvpCastPurpose(SpellInfo const* spellInfo);
+ bool IsPvpDamageSpell(SpellInfo const* spellInfo);
+ bool ShouldBlockPvpDamage(PvpControlState control, bool damagingAction);
+ bool ShouldBlockPvpAreaDamage(bool areaDamage, bool breakableNearTarget, bool breakableNearCaster);
++bool ShouldReleasePvpBattlegroundControl(PvpControlState control, bool primaryTarget,
++                                         bool alternativeTarget, bool healthyOrKillPressure,
++                                         bool hardCast, bool channeled, bool areaDamage);
+ bool ShouldStartPvpControlWindowDamage(PvpControlState control, PvpCcUsage usage, bool duelPrimaryTarget,
+                                        bool setupComplete, bool hardCast, bool channeled, bool areaDamage,
+                                        uint32 expectedRemainingMs, uint32 expectedImpactMs);
+@@ -339,6 +364,13 @@ bool HasBreakablePvpControlNearby(PlayerbotAI* botAI, Unit* center, float radius
+ PvpRangeMotion SelectPvpRangeMotion(PvpRangeMotion current, float closestThreatDistance,
+                                     float primaryTargetDistance, float minimumDistance,
+                                     float preferredDistance, float maximumDistance);
++PvpRangeMotion SelectPvpBattlegroundRangeMotion(PvpRangeMotion current, bool activePressure,
++                                                bool killPressureOverride, float threatDistance,
++                                                float emergencyDistance, float dangerDistance,
++                                                float preferredDistance);
++PvpBattlegroundPressureBand ClassifyPvpBattlegroundPressureBand(PvpRangeMotion motion,
++                                                               float threatDistance,
++                                                               float emergencyDistance);
+ void UpdatePvpTacticalState(PlayerbotAI* botAI, Unit* target);
+ void ClaimPvpMovement(PlayerbotAI* botAI, PvpMovementOwner owner, Unit* target);
+ void SetPvpMovementDestination(PlayerbotAI* botAI, float x, float y);
+diff --git a/modules/mod-playerbots/t/PvpTacticalPolicyTests.cxx b/modules/mod-playerbots/t/PvpTacticalPolicyTests.cxx
+index fd9689c5..3808206a 100644
+--- a/modules/mod-playerbots/t/PvpTacticalPolicyTests.cxx
++++ b/modules/mod-playerbots/t/PvpTacticalPolicyTests.cxx
+@@ -188,6 +188,50 @@ TEST(PvpRangePolicy, RetreatAndAdvanceStayContinuousUntilPreferredDistance)
+               SelectPvpRangeMotion(PvpRangeMotion::Advance, 35.0f, 35.0f, 30.0f, 36.0f, 40.0f));
+ }
+ 
++TEST(PvpBattlegroundRangePolicy, OnlyActivePressureStartsDangerMovement)
++{
++    EXPECT_EQ(PvpRangeMotion::Hold,
++              SelectPvpBattlegroundRangeMotion(PvpRangeMotion::Hold, false, false,
++                                               12.0f, 8.0f, 16.0f, 32.0f));
++    EXPECT_EQ(PvpRangeMotion::Retreat,
++              SelectPvpBattlegroundRangeMotion(PvpRangeMotion::Hold, true, false,
++                                               12.0f, 8.0f, 16.0f, 32.0f));
++    EXPECT_EQ(PvpBattlegroundPressureBand::Danger,
++              ClassifyPvpBattlegroundPressureBand(PvpRangeMotion::Retreat, 12.0f, 8.0f));
++}
++
++TEST(PvpBattlegroundRangePolicy, EmergencyPersistsButKillPressureOverridesOrdinaryDanger)
++{
++    EXPECT_EQ(PvpRangeMotion::Retreat,
++              SelectPvpBattlegroundRangeMotion(PvpRangeMotion::Retreat, true, false,
++                                               20.0f, 8.0f, 16.0f, 32.0f));
++    EXPECT_EQ(PvpRangeMotion::Hold,
++              SelectPvpBattlegroundRangeMotion(PvpRangeMotion::Retreat, true, true,
++                                               20.0f, 8.0f, 16.0f, 32.0f));
++    EXPECT_EQ(PvpRangeMotion::Retreat,
++              SelectPvpBattlegroundRangeMotion(PvpRangeMotion::Retreat, true, true,
++                                               6.0f, 8.0f, 16.0f, 32.0f));
++    EXPECT_EQ(PvpBattlegroundPressureBand::Emergency,
++              ClassifyPvpBattlegroundPressureBand(PvpRangeMotion::Retreat, 6.0f, 8.0f));
++    EXPECT_EQ(PvpRangeMotion::Hold,
++              SelectPvpBattlegroundRangeMotion(PvpRangeMotion::Retreat, true, false,
++                                               32.0f, 8.0f, 16.0f, 32.0f));
++}
++
++TEST(PvpBattlegroundControlPolicy, OnlyDeliberateHardCastMayReleaseTheSolePrimaryTarget)
++{
++    EXPECT_TRUE(ShouldReleasePvpBattlegroundControl(
++        PvpControlState::DamageBreakable, true, false, true, true, false, false));
++    EXPECT_FALSE(ShouldReleasePvpBattlegroundControl(
++        PvpControlState::DamageBreakable, true, false, true, false, false, false));
++    EXPECT_FALSE(ShouldReleasePvpBattlegroundControl(
++        PvpControlState::DamageBreakable, true, true, true, true, false, false));
++    EXPECT_FALSE(ShouldReleasePvpBattlegroundControl(
++        PvpControlState::DamageBreakable, false, false, true, true, false, false));
++    EXPECT_FALSE(ShouldReleasePvpBattlegroundControl(
++        PvpControlState::DamageImmune, true, false, true, true, false, false));
++}
++
+ TEST(PvpControlWindowPolicy, UnsafeWaysToBreakControlStayBlocked)
+ {
+     EXPECT_FALSE(ShouldStartPvpControlWindowDamage(
+diff --git a/modules/mod-playerbots/t/PvpTacticalScenarioMatrix.md b/modules/mod-playerbots/t/PvpTacticalScenarioMatrix.md
+index 8a9817aa..307a4f5e 100644
+--- a/modules/mod-playerbots/t/PvpTacticalScenarioMatrix.md
++++ b/modules/mod-playerbots/t/PvpTacticalScenarioMatrix.md
+@@ -126,3 +126,30 @@ off-target outside the effect radius to guard against overly broad suppression.
+   active while both are healthy. The warrior may take one brief step to open
+   eight yards and Charge back; if the opponent follows, it must abandon the
+   reset within 0.9 seconds and resume ordinary melee instead of kiting.
++
++## Battleground engagement and movement ownership
++
++- Ride toward an objective with a visible hostile player entering 50 yards.
++  The bot must cancel the objective path, dismount immediately, select that
++  player and switch its AI engine to combat without riding into melee first.
++- Keep an unrelated hostile player nearby without targeting or attacking the
++  bot. It must not become a movement threat by proximity alone unless it enters
++  the eight-yard emergency radius. Its actively attacking pet still counts.
++- In the BG danger band, verify one continuous retreat spline while instant
++  attacks and class control continue in the same decision cycle. Only the
++  emergency band may consume the movement tick ahead of kill pressure.
++- Lower the primary target below 30% while pressure remains outside emergency
++  range. The bot must plant for the kill instead of continuing an ordinary
++  danger retreat.
++- While BG combat ownership is active, repeatedly trigger objective updates and
++  mount checks. Neither may replace the combat spline. After the target is gone
++  and combat has been clear for 2.5 seconds, objective travel and mounting must
++  resume.
++- Polymorph the only practical BG target while the mage is healthy. Off-target
++  crowd control remains protected, but the mage may begin a single-target hard
++  cast instead of waiting out the full aura. Auto attacks, instant damage,
++  channels and AoE must not throw the sheep away immediately.
++- During a long retreat, move the pressure source across the bot by more than
++  60 degrees. The old spline must be replaced once; smaller heading changes must
++  not cause repeated path rebuilds. Root the pursuer and verify a caster plants
++  at the reduced safe distance to begin hard casting.

@@ -1,0 +1,77 @@
+diff --git a/modules/mod-playerbots/src/Ai/Base/ActionContext.h b/modules/mod-playerbots/src/Ai/Base/ActionContext.h
+index f8c1f34c..db7049f5 100644
+--- a/modules/mod-playerbots/src/Ai/Base/ActionContext.h
++++ b/modules/mod-playerbots/src/Ai/Base/ActionContext.h
+@@ -280,6 +280,10 @@ public:
+ 
+         creators["toggle pet spell"] = &ActionContext::toggle_pet_spell;
+         creators["pet attack"] = &ActionContext::pet_attack;
++        // "pet attack" is also a chat command and the later chat context wins
++        // duplicate registrations. Tactical PvP must use a collision-free key
++        // so its target comes from the bot AI rather than the master's selection.
++        creators["pvp tactical pet attack"] = &ActionContext::pvp_tactical_pet_attack;
+         creators["set pet stance"] = &ActionContext::set_pet_stance;
+ 
+         creators["new rpg status update"] = &ActionContext::new_rpg_status_update;
+@@ -510,6 +514,10 @@ private:
+ 
+     static Action* toggle_pet_spell(PlayerbotAI* ai) { return new TogglePetSpellAutoCastAction(ai); }
+     static Action* pet_attack(PlayerbotAI* ai) { return new PetAttackAction(ai); }
++    static Action* pvp_tactical_pet_attack(PlayerbotAI* ai)
++    {
++        return new PetAttackAction(ai, "pvp tactical pet attack");
++    }
+     static Action* set_pet_stance(PlayerbotAI* ai) { return new SetPetStanceAction(ai); }
+ 
+     static Action* new_rpg_status_update(PlayerbotAI* ai) { return new NewRpgStatusUpdateAction(ai); }
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/PetsAction.h b/modules/mod-playerbots/src/Ai/Base/Actions/PetsAction.h
+index c0a617f0..40c84fba 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/PetsAction.h
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/PetsAction.h
+@@ -33,7 +33,7 @@ public:
+ class PetAttackAction : public Action
+ {
+ public:
+-    PetAttackAction(PlayerbotAI* ai) : Action(ai, "pet attack") {}
++    PetAttackAction(PlayerbotAI* ai, std::string const& name = "pet attack") : Action(ai, name) {}
+     virtual bool Execute(Event event) override;
+ };
+ 
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
+index 0a2625c1..c690602b 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/PvpTacticalActions.cpp
+@@ -532,7 +532,7 @@ bool TryPvpControlWindow(PlayerbotAI* botAI, Unit* target, PvpSnapshot const& sn
+         // Owner movement and pet pressure are independent. Once our setup is
+         // complete, immediately send the pet back in even if the player keeps
+         // moving and lets the normal single-target rotation break the aura.
+-        botAI->DoSpecificAction("pet attack", Event(), true);
++        botAI->DoSpecificAction("pvp tactical pet attack", Event(), true);
+     }
+     return false;
+ }
+diff --git a/modules/mod-playerbots/src/Ai/Base/Strategy/CombatStrategy.cpp b/modules/mod-playerbots/src/Ai/Base/Strategy/CombatStrategy.cpp
+index 0d388ac8..ae1e4a73 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Strategy/CombatStrategy.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Strategy/CombatStrategy.cpp
+@@ -70,7 +70,7 @@ void CombatStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
+                                                          NextAction("pvp tactical emergency escape", PvpPriority::Breakout - 2),
+                                                          NextAction("pvp tactical hostile pet", PvpPriority::Control + 4),
+                                                          NextAction("pvp tactical class control", PvpPriority::Control),
+-                                                         NextAction("pet attack", PvpPriority::Pressure + 3),
++                                                         NextAction("pvp tactical pet attack", PvpPriority::Pressure + 3),
+                                                          NextAction("pvp tactical target swap", PvpPriority::Pressure + 2) }));
+     // Pet pressure is explicit only while the tactical PvP target trigger is
+     // active. PetAttackAction still respects passive stance and the shared CC
+diff --git a/modules/mod-playerbots/t/PvpTacticalScenarioMatrix.md b/modules/mod-playerbots/t/PvpTacticalScenarioMatrix.md
+index 5f4e26ac..15d2ddb7 100644
+--- a/modules/mod-playerbots/t/PvpTacticalScenarioMatrix.md
++++ b/modules/mod-playerbots/t/PvpTacticalScenarioMatrix.md
+@@ -237,3 +237,7 @@ off-target outside the effect radius to guard against overly broad suppression.
+   advantage, it may create distance first, then leave form for Entangling Roots
+   and healing. Bear fallback with no tactical spell available must yield to the
+   ordinary bear rotation instead of consuming every decision tick.
++- Duel two hunters while both human masters have no selection or an unrelated
++  friendly unit selected. Tactical pet pressure must resolve the bot's current
++  duel opponent through `PetAttackAction`; it must never execute the colliding
++  `pet attack` chat command or emit `pet_invalid_target_error`.

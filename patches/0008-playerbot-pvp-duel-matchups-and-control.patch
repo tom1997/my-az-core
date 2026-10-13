@@ -1,0 +1,1022 @@
+diff --git a/modules/mod-playerbots/conf/playerbots.conf.dist b/modules/mod-playerbots/conf/playerbots.conf.dist
+index d75355a0e304194923b3af36ed4d76e0ab8aff88..23116cadee181e2f07c00d29cba7d589fc68848f 100644
+--- a/modules/mod-playerbots/conf/playerbots.conf.dist
++++ b/modules/mod-playerbots/conf/playerbots.conf.dist
+@@ -554,6 +554,15 @@ AiPlayerbot.PvPTactical.Hunter.PreferredDistance = 32.0
+ AiPlayerbot.PvPTactical.Caster.PreferredDistance = 26.0
+ AiPlayerbot.PvPTactical.Healer.PreferredDistance = 30.0
+ 
++# Ranged-versus-ranged combat does not use the full retreat distance. It only
++# creates enough room to escape a face-hug (especially the hunter dead zone).
++AiPlayerbot.PvPTactical.RangedOpponent.EmergencyDistance = 8.0
++AiPlayerbot.PvPTactical.RangedOpponent.PreferredDistance = 12.0
++
++# Core warns at 50 yards and restores in-bounds status at 40. Tactical duel
++# movement stays inside this radius around the duel flag.
++AiPlayerbot.PvPTactical.Duel.SafeRadius = 38.0
++
+ # Distance moved per retreat decision and maximum distance for pursuing a PvP target.
+ AiPlayerbot.PvPTactical.RetreatStep = 14.0
+ AiPlayerbot.PvPTactical.TargetLeashDistance = 55.0
+diff --git a/modules/mod-playerbots/src/Ai/Base/ActionContext.h b/modules/mod-playerbots/src/Ai/Base/ActionContext.h
+index 9d92cd9f0b67dac405bd2cafe965b9bd1c33280f..68b73c0e06463bb27c9ca16f1e646bcefeab9c61 100644
+--- a/modules/mod-playerbots/src/Ai/Base/ActionContext.h
++++ b/modules/mod-playerbots/src/Ai/Base/ActionContext.h
+@@ -99,6 +99,7 @@ public:
+         creators["flee"] = &ActionContext::flee;
+         creators["flee with pet"] = &ActionContext::flee_with_pet;
+         creators["pvp tactical retreat"] = &ActionContext::pvp_tactical_retreat;
++        creators["pvp tactical pressure hunter"] = &ActionContext::pvp_tactical_pressure_hunter;
+         creators["pvp tactical melee flank"] = &ActionContext::pvp_tactical_melee_flank;
+         creators["avoid aoe"] = &ActionContext::avoid_aoe;
+         creators["combat formation move"] = &ActionContext::combat_formation_move;
+@@ -319,6 +320,10 @@ private:
+     static Action* flee(PlayerbotAI* botAI) { return new FleeAction(botAI); }
+     static Action* flee_with_pet(PlayerbotAI* botAI) { return new FleeWithPetAction(botAI); }
+     static Action* pvp_tactical_retreat(PlayerbotAI* botAI) { return new PvpTacticalRetreatAction(botAI); }
++    static Action* pvp_tactical_pressure_hunter(PlayerbotAI* botAI)
++    {
++        return new PvpTacticalPressureHunterAction(botAI);
++    }
+     static Action* pvp_tactical_melee_flank(PlayerbotAI* botAI) { return new PvpTacticalMeleeFlankAction(botAI); }
+     static Action* avoid_aoe(PlayerbotAI* botAI) { return new AvoidAoeAction(botAI); }
+     static Action* combat_formation_move(PlayerbotAI* botAI) { return new CombatFormationMoveAction(botAI); }
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/AttackAction.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/AttackAction.cpp
+index 39aa8a355e42550c1c188538411561f5460e4346..d052b5cd63169f36d37cdf5d9589068263d236d8 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/AttackAction.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/AttackAction.cpp
+@@ -15,6 +15,37 @@
+ #include "ServerFacade.h"
+ #include "Unit.h"
+ #include "WaitForAttackStrategy.h"
++#include <cfloat>
++#include <cmath>
++
++namespace
++{
++bool IsFullyDamageImmune(Unit* unit)
++{
++    return unit && unit->IsImmunedToDamage(SPELL_SCHOOL_MASK_NORMAL) &&
++           unit->IsImmunedToDamage(SPELL_SCHOOL_MASK_MAGIC);
++}
++
++Unit* GetDuelSecondaryTarget(Player* bot, Player* opponent)
++{
++    Unit* best = nullptr;
++    float bestDistance = FLT_MAX;
++    for (Unit* controlled : opponent->m_Controlled)
++    {
++        if (!controlled || !controlled->IsInWorld() || !controlled->IsAlive() || controlled->IsFriendlyTo(bot) ||
++            IsFullyDamageImmune(controlled))
++            continue;
++
++        float const distance = bot->GetDistance2d(controlled);
++        if (distance <= 50.0f && distance < bestDistance)
++        {
++            best = controlled;
++            bestDistance = distance;
++        }
++    }
++    return best;
++}
++}
+ 
+ bool AttackAction::Execute(Event /*event*/)
+ {
+@@ -217,9 +248,80 @@ bool AttackAction::Attack(Unit* target, bool /*with_pet*/ /*true*/)
+     return true;
+ }
+ 
+-bool AttackDuelOpponentAction::isUseful() { return AI_VALUE(Unit*, "duel target"); }
++bool AttackDuelOpponentAction::isUseful()
++{
++    Player* opponent = AI_VALUE(Unit*, "duel target") ? AI_VALUE(Unit*, "duel target")->ToPlayer() : nullptr;
++    if (!opponent || !bot->duel)
++        return false;
++
++    if (bot->duel->State == DUEL_STATE_CHALLENGED)
++        return false;
+ 
+-bool AttackDuelOpponentAction::Execute(Event /*event*/) { return Attack(AI_VALUE(Unit*, "duel target")); }
++    if (bot->duel->State == DUEL_STATE_COUNTDOWN)
++        return true;
++
++    if (bot->duel->State != DUEL_STATE_IN_PROGRESS)
++        return false;
++
++    Unit* desired = IsFullyDamageImmune(opponent) ? GetDuelSecondaryTarget(bot, opponent) : opponent;
++    Unit* current = AI_VALUE(Unit*, "current target");
++    if (desired == opponent && current == opponent && botAI->HasAura("polymorph", opponent))
++        return false;
++    return !bot->IsInCombat() || current != desired;
++}
++
++bool AttackDuelOpponentAction::Execute(Event /*event*/)
++{
++    Player* opponent = AI_VALUE(Unit*, "duel target") ? AI_VALUE(Unit*, "duel target")->ToPlayer() : nullptr;
++    if (!opponent || !bot->duel)
++        return false;
++
++    if (bot->duel->State == DUEL_STATE_CHALLENGED)
++        return false;
++
++    if (bot->duel->State == DUEL_STATE_COUNTDOWN)
++    {
++        if (bot->getClass() == CLASS_ROGUE && !botAI->HasAura("stealth", bot) && botAI->CanCastSpell("stealth", bot))
++            return botAI->CastSpell("stealth", bot);
++
++        float desiredDistance = 10.0f;
++        if (bot->getClass() == CLASS_WARRIOR)
++            desiredDistance = 18.0f;
++        else if (bot->getClass() == CLASS_DEATH_KNIGHT)
++            desiredDistance = 20.0f;
++        else if (bot->getClass() == CLASS_HUNTER)
++            desiredDistance = 28.0f;
++        else if (botAI->IsRanged(bot, true) || botAI->IsHeal(bot))
++            desiredDistance = 25.0f;
++
++        float const distance = bot->GetDistance2d(opponent);
++        if (std::abs(distance - desiredDistance) <= 2.0f || bot->isMoving())
++            return true;
++
++        if (distance < desiredDistance)
++        {
++            float const step = std::min(6.0f, (desiredDistance - distance) * 0.5f);
++            return MoveAway(opponent, std::max(2.0f, step), false);
++        }
++
++        return MoveTo(opponent, desiredDistance, MovementPriority::MOVEMENT_COMBAT);
++    }
++
++    if (bot->duel->State != DUEL_STATE_IN_PROGRESS)
++        return false;
++
++    if (IsFullyDamageImmune(opponent))
++    {
++        if (Unit* secondary = GetDuelSecondaryTarget(bot, opponent))
++            return Attack(secondary);
++
++        bot->AttackStop();
++        botAI->PetFollow();
++        return true;
++    }
++
++    return Attack(opponent);
++}
+ 
+ bool MeleeAction::isUseful()
+ {
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp b/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp
+index d20e44a2f6b85ccf24b6c38161c3b229d87b03dc..c65f05b020d1ec8e7e8ffed07843f40087d5f703 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.cpp
+@@ -63,8 +63,12 @@ bool IsCombatPointMovementActive(PlayerbotAI* botAI, Player* bot)
+            last.priority >= MovementPriority::MOVEMENT_COMBAT;
+ }
+ 
+-float GetPvpTacticalPreferredDistance(PlayerbotAI* botAI, Player* bot)
++float GetPvpTacticalPreferredDistance(PlayerbotAI* botAI, Player* bot, Unit* target)
+ {
++    if (target && target->IsPlayer() && botAI->IsRanged(target->ToPlayer(), true))
++        return std::max(sPlayerbotAIConfig.pvpTacticalRangedOpponentEmergencyDistance + 2.0f,
++                        sPlayerbotAIConfig.pvpTacticalRangedOpponentPreferredDistance);
++
+     if (bot->getClass() == CLASS_HUNTER)
+         return std::max(sPlayerbotAIConfig.pvpTacticalHunterMinDistance + 2.0f,
+                         sPlayerbotAIConfig.pvpTacticalHunterPreferredDistance);
+@@ -1883,7 +1887,7 @@ bool PvpTacticalRetreatAction::Execute(Event /*event*/)
+         return false;
+ 
+     float const distance = bot->GetDistance2d(target);
+-    float const preferredDistance = GetPvpTacticalPreferredDistance(botAI, bot);
++    float const preferredDistance = GetPvpTacticalPreferredDistance(botAI, bot, target);
+     if (distance >= preferredDistance)
+         return false;
+ 
+@@ -1891,12 +1895,77 @@ bool PvpTacticalRetreatAction::Execute(Event /*event*/)
+     float const maxSegment = std::max(6.0f, sPlayerbotAIConfig.pvpTacticalRetreatStep);
+     float const step = std::min(maxSegment, std::max(2.0f, remainingDistance));
+ 
++    // During duels prefer a tangential route and reject destinations near the
++    // 50-yard loss boundary. This avoids winning the spacing exchange but
++    // losing the duel by running straight away from the flag.
++    if (bot->duel && bot->duel->Opponent == target)
++    {
++        GameObject* duelFlag = bot->GetMap()->GetGameObject(bot->GetGuidValue(PLAYER_DUEL_ARBITER));
++        if (duelFlag)
++        {
++            float const safeRadius = std::clamp(sPlayerbotAIConfig.pvpTacticalDuelSafeRadius, 20.0f, 39.0f);
++            float const awayAngle = target->GetAngle(bot);
++            std::vector<float> const offsets = { M_PI / 2.0f, -M_PI / 2.0f, M_PI / 3.0f, -M_PI / 3.0f,
++                                                  M_PI / 4.0f, -M_PI / 4.0f, 0.0f };
++            bool found = false;
++            Position best;
++            float bestScore = -FLT_MAX;
++
++            for (float const offset : offsets)
++            {
++                float x = bot->GetPositionX() + std::cos(awayAngle + offset) * step;
++                float y = bot->GetPositionY() + std::sin(awayAngle + offset) * step;
++                float z = bot->GetPositionZ();
++                if (!bot->GetMap()->CheckCollisionAndGetValidCoords(bot, bot->GetPositionX(), bot->GetPositionY(),
++                                                                     bot->GetPositionZ(), x, y, z))
++                    continue;
++
++                float const flagDistance = duelFlag->GetDistance2d(x, y);
++                if (flagDistance > safeRadius)
++                    continue;
++
++                float const targetDistance = target->GetDistance2d(x, y);
++                float const tangentPreference = std::abs(std::sin(offset)) * step * 0.75f;
++                float const score = targetDistance + tangentPreference + (safeRadius - flagDistance) * 0.35f;
++                if (!found || score > bestScore)
++                {
++                    found = true;
++                    bestScore = score;
++                    best.Relocate(x, y, z);
++                }
++            }
++
++            if (found)
++                return MoveTo(bot->GetMapId(), best.GetPositionX(), best.GetPositionY(), best.GetPositionZ(), false,
++                              false, false, true, MovementPriority::MOVEMENT_COMBAT);
++
++            return MoveTo(duelFlag, safeRadius - 5.0f, MovementPriority::MOVEMENT_COMBAT);
++        }
++    }
++
+     // Sprint out of a live melee contact first. Once clear, backpedal for the
+     // remaining segment so instant ranged abilities can keep facing the target.
+     bool const underMeleePressure = bot->IsWithinMeleeRange(target) && !target->HasRootAura() && !target->isFrozen();
+     return MoveAway(target, step, !underMeleePressure);
+ }
+ 
++bool PvpTacticalPressureHunterAction::Execute(Event /*event*/)
++{
++    Unit* target = AI_VALUE(Unit*, "current target");
++    if (!target || target->getClass() != CLASS_HUNTER || bot->getClass() != CLASS_MAGE ||
++        bot->IsNonMeleeSpellCast(false) || IsCombatPointMovementActive(botAI, bot))
++        return false;
++
++    return MoveTo(target, 9.0f, MovementPriority::MOVEMENT_COMBAT);
++}
++
++bool PvpTacticalPressureHunterAction::isUseful()
++{
++    Unit* target = AI_VALUE(Unit*, "current target");
++    return sPlayerbotAIConfig.pvpTacticalEnabled && target && target->IsPlayer() &&
++           target->getClass() == CLASS_HUNTER && bot->getClass() == CLASS_MAGE;
++}
++
+ bool PvpTacticalRetreatAction::isUseful()
+ {
+     Unit* target = AI_VALUE(Unit*, "current target");
+diff --git a/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.h b/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.h
+index 3b3f622c2c9d1a516557ca2adb2beb69833ad79c..fed10d0576d83b6df181b80862ddd903095e55c1 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.h
++++ b/modules/mod-playerbots/src/Ai/Base/Actions/MovementActions.h
+@@ -111,6 +111,16 @@ public:
+     bool isUseful() override;
+ };
+ 
++class PvpTacticalPressureHunterAction : public MovementAction
++{
++public:
++    PvpTacticalPressureHunterAction(PlayerbotAI* botAI)
++        : MovementAction(botAI, "pvp tactical pressure hunter") {}
++
++    bool Execute(Event event) override;
++    bool isUseful() override;
++};
++
+ class PvpTacticalMeleeFlankAction : public MovementAction
+ {
+ public:
+diff --git a/modules/mod-playerbots/src/Ai/Base/Strategy/CombatStrategy.cpp b/modules/mod-playerbots/src/Ai/Base/Strategy/CombatStrategy.cpp
+index 2979ce7625c8025c8a4e40029ab951fbb0478d03..11cf2e38173cb746f9c2e30554c9f710e2341e3f 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Strategy/CombatStrategy.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Strategy/CombatStrategy.cpp
+@@ -54,6 +54,8 @@ void CombatStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
+         "pvp tactical ranged too close", { NextAction("pvp tactical retreat", ACTION_NORMAL + 4) }));
+     triggers.push_back(
+         new TriggerNode("pvp tactical target too far", { NextAction("drop target", ACTION_HIGH + 1) }));
++    triggers.push_back(new TriggerNode(
++        "pvp tactical pressure hunter", { NextAction("pvp tactical pressure hunter", ACTION_NORMAL + 3) }));
+     triggers.push_back(
+         new TriggerNode("pvp tactical melee flank", { NextAction("pvp tactical melee flank", ACTION_NORMAL + 4) }));
+     // The pet-attack trigger is commented out because it was forcing the bot's pet to attack, overriding stay and follow commands.
+diff --git a/modules/mod-playerbots/src/Ai/Base/Strategy/DuelStrategy.cpp b/modules/mod-playerbots/src/Ai/Base/Strategy/DuelStrategy.cpp
+index cfd441ab46945d5a4edf157713718de31c163a3c..90862685a97bf0aa227986dfa2385fbc4c345bd6 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Strategy/DuelStrategy.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Strategy/DuelStrategy.cpp
+@@ -14,6 +14,8 @@ void DuelStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
+         new TriggerNode("duel requested", { NextAction("accept duel", relevance) }));
+     triggers.push_back(
+         new TriggerNode("no attackers", { NextAction("attack duel opponent", 70.0f) }));
++    triggers.push_back(
++        new TriggerNode("pvp tactical duel maintenance", { NextAction("attack duel opponent", 69.0f) }));
+ }
+ 
+ DuelStrategy::DuelStrategy(PlayerbotAI* botAI) : PassThroughStrategy(botAI) {}
+diff --git a/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.cpp b/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.cpp
+index fbfddb068105f330018b012e98a4f3697032fa82..297cec72b235c7dff955b9468eb8ab6389989236 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.cpp
++++ b/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.cpp
+@@ -51,6 +51,11 @@ float GetPvpTacticalPreferredDistance(PlayerbotAI* botAI, Player* bot)
+ 
+     return sPlayerbotAIConfig.pvpTacticalCasterPreferredDistance;
+ }
++
++bool IsRangedOpponent(PlayerbotAI* botAI, Unit* target)
++{
++    return target && target->IsPlayer() && botAI->IsRanged(target->ToPlayer(), true);
++}
+ }
+ 
+ bool EnemyTooCloseForSpellTrigger::IsActive()
+@@ -223,8 +228,12 @@ bool PvpTacticalRangedTooCloseTrigger::IsActive()
+         return false;
+     }
+ 
+-    float const enterDistance = GetPvpTacticalMinimumDistance(botAI, bot);
+-    float const preferredDistance = std::max(enterDistance + 2.0f, GetPvpTacticalPreferredDistance(botAI, bot));
++    bool const rangedOpponent = IsRangedOpponent(botAI, target);
++    float const enterDistance = rangedOpponent ? sPlayerbotAIConfig.pvpTacticalRangedOpponentEmergencyDistance
++                                               : GetPvpTacticalMinimumDistance(botAI, bot);
++    float const configuredPreferred = rangedOpponent ? sPlayerbotAIConfig.pvpTacticalRangedOpponentPreferredDistance
++                                                      : GetPvpTacticalPreferredDistance(botAI, bot);
++    float const preferredDistance = std::max(enterDistance + 2.0f, configuredPreferred);
+     float const distance = bot->GetDistance2d(target);
+ 
+     // Hysteresis turns retreat into a state instead of a series of tiny
+@@ -238,6 +247,54 @@ bool PvpTacticalRangedTooCloseTrigger::IsActive()
+     return retreating;
+ }
+ 
++PvpTacticalPlayerTargetTrigger::PvpTacticalPlayerTargetTrigger(PlayerbotAI* botAI)
++    : Trigger(botAI, "pvp tactical player target", sPlayerbotAIConfig.pvpTacticalDecisionInterval)
++{
++}
++
++bool PvpTacticalPlayerTargetTrigger::IsActive()
++{
++    Unit* target = AI_VALUE(Unit*, "current target");
++    if (!target || !target->IsPlayer() || !IsPvpTacticalContextEnabled(bot))
++        return false;
++
++    return target->GetVictim() == bot || (bot->duel && bot->duel->Opponent == target);
++}
++
++PvpTacticalPressureHunterTrigger::PvpTacticalPressureHunterTrigger(PlayerbotAI* botAI)
++    : Trigger(botAI, "pvp tactical pressure hunter", sPlayerbotAIConfig.pvpTacticalDecisionInterval)
++{
++}
++
++bool PvpTacticalPressureHunterTrigger::IsActive()
++{
++    Unit* target = AI_VALUE(Unit*, "current target");
++    if (!target || !target->IsPlayer() || target->getClass() != CLASS_HUNTER || bot->getClass() != CLASS_MAGE ||
++        !IsPvpTacticalContextEnabled(bot))
++        return false;
++
++    float const distance = bot->GetDistance2d(target);
++    if (distance < 12.0f || distance > 28.0f)
++        return false;
++
++    // Only take the hunter's dead-zone aggressively while the exchange is
++    // favorable; otherwise the mage keeps casting instead of walking into damage.
++    return target->GetHealthPct() <= 40.0f ||
++           (bot->GetHealthPct() >= 70.0f && bot->GetHealthPct() >= target->GetHealthPct() + 15.0f);
++}
++
++PvpTacticalDuelMaintenanceTrigger::PvpTacticalDuelMaintenanceTrigger(PlayerbotAI* botAI)
++    : Trigger(botAI, "pvp tactical duel maintenance", 300)
++{
++}
++
++bool PvpTacticalDuelMaintenanceTrigger::IsActive()
++{
++    return sPlayerbotAIConfig.pvpTacticalEnabled && sPlayerbotAIConfig.pvpTacticalDuel && bot->duel &&
++           bot->duel->Opponent &&
++           (bot->duel->State == DUEL_STATE_COUNTDOWN || bot->duel->State == DUEL_STATE_IN_PROGRESS);
++}
++
+ PvpTacticalTargetTooFarTrigger::PvpTacticalTargetTooFarTrigger(PlayerbotAI* botAI)
+     : Trigger(botAI, "pvp tactical target too far", sPlayerbotAIConfig.pvpTacticalDecisionInterval)
+ {
+diff --git a/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.h b/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.h
+index db333ddfb23f52b8ef82f6ec9920fc6d4be46ca3..30ad8303918c91b81384d1878731dce012ffdea2 100644
+--- a/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.h
++++ b/modules/mod-playerbots/src/Ai/Base/Trigger/RangeTriggers.h
+@@ -79,6 +79,27 @@ public:
+     bool IsActive() override;
+ };
+ 
++class PvpTacticalPlayerTargetTrigger : public Trigger
++{
++public:
++    PvpTacticalPlayerTargetTrigger(PlayerbotAI* botAI);
++    bool IsActive() override;
++};
++
++class PvpTacticalPressureHunterTrigger : public Trigger
++{
++public:
++    PvpTacticalPressureHunterTrigger(PlayerbotAI* botAI);
++    bool IsActive() override;
++};
++
++class PvpTacticalDuelMaintenanceTrigger : public Trigger
++{
++public:
++    PvpTacticalDuelMaintenanceTrigger(PlayerbotAI* botAI);
++    bool IsActive() override;
++};
++
+ class PvpTacticalMeleeFlankTrigger : public Trigger
+ {
+ public:
+diff --git a/modules/mod-playerbots/src/Ai/Base/TriggerContext.h b/modules/mod-playerbots/src/Ai/Base/TriggerContext.h
+index 02df6c741236e7c8062f915c855517e46bc95eef..e810f5bf4f5978fed8d205dad94028513a91fca1 100644
+--- a/modules/mod-playerbots/src/Ai/Base/TriggerContext.h
++++ b/modules/mod-playerbots/src/Ai/Base/TriggerContext.h
+@@ -117,6 +117,9 @@ public:
+         creators["enemy within melee"] = &TriggerContext::enemy_within_melee;
+         creators["pvp tactical ranged too close"] = &TriggerContext::pvp_tactical_ranged_too_close;
+         creators["pvp tactical target too far"] = &TriggerContext::pvp_tactical_target_too_far;
++        creators["pvp tactical player target"] = &TriggerContext::pvp_tactical_player_target;
++        creators["pvp tactical pressure hunter"] = &TriggerContext::pvp_tactical_pressure_hunter;
++        creators["pvp tactical duel maintenance"] = &TriggerContext::pvp_tactical_duel_maintenance;
+         creators["pvp tactical melee flank"] = &TriggerContext::pvp_tactical_melee_flank;
+         creators["party member to heal out of spell range"] = &TriggerContext::party_member_to_heal_out_of_spell_range;
+ 
+@@ -370,6 +373,18 @@ private:
+     {
+         return new PvpTacticalTargetTooFarTrigger(botAI);
+     }
++    static Trigger* pvp_tactical_player_target(PlayerbotAI* botAI)
++    {
++        return new PvpTacticalPlayerTargetTrigger(botAI);
++    }
++    static Trigger* pvp_tactical_pressure_hunter(PlayerbotAI* botAI)
++    {
++        return new PvpTacticalPressureHunterTrigger(botAI);
++    }
++    static Trigger* pvp_tactical_duel_maintenance(PlayerbotAI* botAI)
++    {
++        return new PvpTacticalDuelMaintenanceTrigger(botAI);
++    }
+     static Trigger* pvp_tactical_melee_flank(PlayerbotAI* botAI)
+     {
+         return new PvpTacticalMeleeFlankTrigger(botAI);
+diff --git a/modules/mod-playerbots/src/Ai/Class/Dk/DKActions.cpp b/modules/mod-playerbots/src/Ai/Class/Dk/DKActions.cpp
+index 259a2d51b9fa34182eeb215c81b713d7a71c6c22..d6fd49166d72ad2883c66eee5413f1dd0e14eaf0 100644
+--- a/modules/mod-playerbots/src/Ai/Class/Dk/DKActions.cpp
++++ b/modules/mod-playerbots/src/Ai/Class/Dk/DKActions.cpp
+@@ -100,3 +100,17 @@ Unit* CastHysteriaAction::GetTarget()
+ 
+     return nullptr;
+ }
++bool CastPvpDeathGripAction::isUseful()
++{
++    Unit* target = AI_VALUE(Unit*, "current target");
++    if (!target || !target->IsPlayer())
++        return false;
++
++    float const distance = bot->GetDistance2d(target);
++    return distance >= 8.0f && distance <= 30.0f && botAI->CanCastSpell("death grip", target);
++}
++
++bool CastPvpDeathGripAction::Execute(Event /*event*/)
++{
++    return botAI->CastSpell("death grip", AI_VALUE(Unit*, "current target"));
++}
+diff --git a/modules/mod-playerbots/src/Ai/Class/Dk/DKActions.h b/modules/mod-playerbots/src/Ai/Class/Dk/DKActions.h
+index 85d3fa702fa094a7fa33f8d10964e3a781fa754f..7e09c29a2fbb8ea97a7fb9d7897e8ee2422452b2 100644
+--- a/modules/mod-playerbots/src/Ai/Class/Dk/DKActions.h
++++ b/modules/mod-playerbots/src/Ai/Class/Dk/DKActions.h
+@@ -47,6 +47,14 @@ public:
+ BEGIN_RANGED_SPELL_ACTION(CastDeathGripAction, "death grip")
+ END_SPELL_ACTION()
+ 
++class CastPvpDeathGripAction : public CastSpellAction
++{
++public:
++    CastPvpDeathGripAction(PlayerbotAI* botAI) : CastSpellAction(botAI, "pvp death grip") {}
++    bool Execute(Event event) override;
++    bool isUseful() override;
++};
++
+ // Unholy presence
+ class CastUnholyMeleeSpellAction : public CastMeleeSpellAction
+ {
+diff --git a/modules/mod-playerbots/src/Ai/Class/Dk/DKAiObjectContext.cpp b/modules/mod-playerbots/src/Ai/Class/Dk/DKAiObjectContext.cpp
+index 6971f95ac1fcd48ac1794a35d68127caf5afad57..a31c0cb16a91379540cf11a0e287c79b32355430 100644
+--- a/modules/mod-playerbots/src/Ai/Class/Dk/DKAiObjectContext.cpp
++++ b/modules/mod-playerbots/src/Ai/Class/Dk/DKAiObjectContext.cpp
+@@ -154,6 +154,7 @@ public:
+         creators["plague strike"] = &DeathKnightAiObjectContextInternal::plague_strike;
+         creators["plague strike on attacker"] = &DeathKnightAiObjectContextInternal::plague_strike_on_attacker;
+         creators["death grip"] = &DeathKnightAiObjectContextInternal::death_grip;
++        creators["pvp death grip"] = &DeathKnightAiObjectContextInternal::pvp_death_grip;
+         creators["death coil"] = &DeathKnightAiObjectContextInternal::death_coil;
+         creators["death strike"] = &DeathKnightAiObjectContextInternal::death_strike;
+         creators["unholy blight"] = &DeathKnightAiObjectContextInternal::unholy_blight;
+@@ -210,6 +211,7 @@ private:
+     static Action* plague_strike(PlayerbotAI* botAI) { return new CastPlagueStrikeAction(botAI); }
+     static Action* plague_strike_on_attacker(PlayerbotAI* botAI) { return new CastPlagueStrikeOnAttackerAction(botAI); }
+     static Action* death_grip(PlayerbotAI* botAI) { return new CastDeathGripAction(botAI); }
++    static Action* pvp_death_grip(PlayerbotAI* botAI) { return new CastPvpDeathGripAction(botAI); }
+     static Action* death_coil(PlayerbotAI* botAI) { return new CastDeathCoilAction(botAI); }
+     static Action* death_strike(PlayerbotAI* botAI) { return new CastDeathStrikeAction(botAI); }
+     static Action* unholy_blight(PlayerbotAI* botAI) { return new CastUnholyBlightAction(botAI); }
+diff --git a/modules/mod-playerbots/src/Ai/Class/Dk/Strategy/GenericDKStrategy.cpp b/modules/mod-playerbots/src/Ai/Class/Dk/Strategy/GenericDKStrategy.cpp
+index 9d545d795dc16e7614292ddb391a16533abb8cc4..d5cb664e22da209579aa4372ade2f7aee1172956 100644
+--- a/modules/mod-playerbots/src/Ai/Class/Dk/Strategy/GenericDKStrategy.cpp
++++ b/modules/mod-playerbots/src/Ai/Class/Dk/Strategy/GenericDKStrategy.cpp
+@@ -80,4 +80,5 @@ void GenericDKStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
+             }
+         )
+     );
++    triggers.push_back(new TriggerNode("pvp tactical player target", { NextAction("pvp death grip", 45.0f) }));
+ }
+diff --git a/modules/mod-playerbots/src/Ai/Class/Hunter/HunterActions.cpp b/modules/mod-playerbots/src/Ai/Class/Hunter/HunterActions.cpp
+index 09e2c7a993828b86a711d872c53a5e470d52a8dc..07a41eed3e5b2f834f93111b7b5215ac8a9c21c7 100644
+--- a/modules/mod-playerbots/src/Ai/Class/Hunter/HunterActions.cpp
++++ b/modules/mod-playerbots/src/Ai/Class/Hunter/HunterActions.cpp
+@@ -83,6 +83,32 @@ bool CastPvpFreezingTrapAction::isUseful()
+     return spellId && !bot->HasSpellCooldown(spellId) && botAI->CanCastSpell("freezing trap", bot);
+ }
+ 
++bool CastPvpConcussiveShotAction::Execute(Event /*event*/)
++{
++    return botAI->CastSpell("concussive shot", AI_VALUE(Unit*, "current target"));
++}
++
++bool CastPvpConcussiveShotAction::isUseful()
++{
++    Unit* target = AI_VALUE(Unit*, "current target");
++    if (!target || !target->IsPlayer() || botAI->HasAura("concussive shot", target))
++        return false;
++
++    return botAI->CanCastSpell("concussive shot", target);
++}
++
++bool CancelPvpFeignDeathAction::Execute(Event /*event*/)
++{
++    botAI->RemoveAura("feign death");
++    bot->SetStandState(UNIT_STAND_STATE_STAND);
++    return true;
++}
++
++bool CancelPvpFeignDeathAction::isUseful()
++{
++    return botAI->HasAura("feign death", bot);
++}
++
+ bool FeedPetAction::Execute(Event /*event*/)
+ {
+     if (Pet* pet = bot->GetPet(); pet && pet->getPetType() == HUNTER_PET &&
+diff --git a/modules/mod-playerbots/src/Ai/Class/Hunter/HunterActions.h b/modules/mod-playerbots/src/Ai/Class/Hunter/HunterActions.h
+index bf7596d5a7b1c4c74fb97d14d40e7c353f5b7800..6aa627d1de696078da0abd13f2f0a7e384c18686 100644
+--- a/modules/mod-playerbots/src/Ai/Class/Hunter/HunterActions.h
++++ b/modules/mod-playerbots/src/Ai/Class/Hunter/HunterActions.h
+@@ -139,6 +139,22 @@ public:
+     bool isUseful() override;
+ };
+ 
++class CastPvpConcussiveShotAction : public CastSpellAction
++{
++public:
++    CastPvpConcussiveShotAction(PlayerbotAI* botAI) : CastSpellAction(botAI, "pvp concussive shot") {}
++    bool Execute(Event event) override;
++    bool isUseful() override;
++};
++
++class CancelPvpFeignDeathAction : public Action
++{
++public:
++    CancelPvpFeignDeathAction(PlayerbotAI* botAI) : Action(botAI, "cancel pvp feign death") {}
++    bool Execute(Event event) override;
++    bool isUseful() override;
++};
++
+ class CastWyvernStingAction : public CastDebuffSpellAction
+ {
+ public:
+diff --git a/modules/mod-playerbots/src/Ai/Class/Hunter/HunterAiObjectContext.cpp b/modules/mod-playerbots/src/Ai/Class/Hunter/HunterAiObjectContext.cpp
+index 34d25d7652e9625f7cbb8017886c531499c5a139..d235bbad2175093a4db543993d2864a47ba2469f 100644
+--- a/modules/mod-playerbots/src/Ai/Class/Hunter/HunterAiObjectContext.cpp
++++ b/modules/mod-playerbots/src/Ai/Class/Hunter/HunterAiObjectContext.cpp
+@@ -162,6 +162,8 @@ public:
+         creators["black arrow"] = &HunterAiObjectContextInternal::black_arrow;
+         creators["freezing trap"] = &HunterAiObjectContextInternal::freezing_trap;
+         creators["pvp freezing trap"] = &HunterAiObjectContextInternal::pvp_freezing_trap;
++        creators["pvp concussive shot"] = &HunterAiObjectContextInternal::pvp_concussive_shot;
++        creators["cancel pvp feign death"] = &HunterAiObjectContextInternal::cancel_pvp_feign_death;
+         creators["rapid fire"] = &HunterAiObjectContextInternal::rapid_fire;
+         creators["boost"] = &HunterAiObjectContextInternal::rapid_fire;
+         creators["deterrence"] = &HunterAiObjectContextInternal::deterrence;
+@@ -228,6 +230,8 @@ private:
+     static Action* black_arrow(PlayerbotAI* botAI) { return new CastBlackArrowAction(botAI); }
+     static Action* freezing_trap(PlayerbotAI* botAI) { return new CastFreezingTrap(botAI); }
+     static Action* pvp_freezing_trap(PlayerbotAI* botAI) { return new CastPvpFreezingTrapAction(botAI); }
++    static Action* pvp_concussive_shot(PlayerbotAI* botAI) { return new CastPvpConcussiveShotAction(botAI); }
++    static Action* cancel_pvp_feign_death(PlayerbotAI* botAI) { return new CancelPvpFeignDeathAction(botAI); }
+     static Action* rapid_fire(PlayerbotAI* botAI) { return new CastRapidFireAction(botAI); }
+     static Action* deterrence(PlayerbotAI* botAI) { return new CastDeterrenceAction(botAI); }
+     static Action* readiness(PlayerbotAI* botAI) { return new CastReadinessAction(botAI); }
+diff --git a/modules/mod-playerbots/src/Ai/Class/Hunter/Strategy/GenericHunterStrategy.cpp b/modules/mod-playerbots/src/Ai/Class/Hunter/Strategy/GenericHunterStrategy.cpp
+index cfb56bbba36109baecacb83402794b25863c518a..caf315d10c7771d40681b172fd0c139af0a5fe79 100644
+--- a/modules/mod-playerbots/src/Ai/Class/Hunter/Strategy/GenericHunterStrategy.cpp
++++ b/modules/mod-playerbots/src/Ai/Class/Hunter/Strategy/GenericHunterStrategy.cpp
+@@ -84,6 +84,10 @@ void GenericHunterStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
+ 
+     triggers.push_back(new TriggerNode("enemy too close for auto shot", { NextAction("disengage", 35.0f),
+                                                                           NextAction("flee", 34.0f) }));
++    triggers.push_back(new TriggerNode("pvp tactical duel maintenance",
++                                       { NextAction("cancel pvp feign death", 90.0f) }));
++    triggers.push_back(new TriggerNode("pvp tactical player target",
++                                       { NextAction("pvp concussive shot", 46.0f) }));
+ }
+ 
+ // ===== AoE Strategy, 2/3+ enemies =====
+diff --git a/modules/mod-playerbots/src/Ai/Class/Mage/MageActions.cpp b/modules/mod-playerbots/src/Ai/Class/Mage/MageActions.cpp
+index 4a54e86bec5bf60ed41bd99fc612a4ccfc9fa338..29d2206238bfcaac8a7c9e95575744ad47f876c5 100644
+--- a/modules/mod-playerbots/src/Ai/Class/Mage/MageActions.cpp
++++ b/modules/mod-playerbots/src/Ai/Class/Mage/MageActions.cpp
+@@ -5,11 +5,14 @@
+  */
+ 
+ #include "MageActions.h"
++#include "LastMovementValue.h"
++#include "MotionMaster.h"
+ #include "PlayerbotAIConfig.h"
+ #include "Playerbots.h"
+ #include "ServerFacade.h"
+ #include "SharedDefines.h"
+ #include "UseItemAction.h"
++#include "Timer.h"
+ #include <cmath>
+ 
+ std::vector<NextAction> CastMoltenArmorAction::getAlternatives()
+@@ -157,3 +160,106 @@ bool CastBlinkBackAction::Execute(Event event)
+     bot->SetOrientation(bot->GetAngle(target) + M_PI);
+     return CastSpellAction::Execute(event);
+ }
++
++bool CastBlinkBackAction::isUseful()
++{
++    Unit* target = AI_VALUE(Unit*, "current target");
++    if (target && target->IsPlayer() && sPlayerbotAIConfig.pvpTacticalEnabled && bot->duel &&
++        bot->duel->Opponent == target && bot->GetDistance2d(target) > 8.0f)
++        return false;
++
++    return CastSpellAction::isUseful();
++}
++
++namespace
++{
++void StopMageForPvpCast(PlayerbotAI* botAI, Player* bot)
++{
++    bot->GetMotionMaster()->Clear(false);
++    bot->StopMoving();
++    botAI->GetAiObjectContext()->GetValue<LastMovement&>("last movement")->Get().clear();
++}
++}
++
++bool CastPvpPolymorphAction::isUseful()
++{
++    Unit* target = AI_VALUE(Unit*, "current target");
++    if (!target || !target->IsPlayer() || botAI->HasAura("polymorph", target) ||
++        target->IsImmunedToDamage(SPELL_SCHOOL_MASK_MAGIC))
++        return false;
++
++    float const distance = bot->GetDistance2d(target);
++    if (distance < 8.0f || distance > 30.0f || bot->GetHealthPct() > 60.0f)
++        return false;
++
++    uint32 const spellId = AI_VALUE2(uint32, "spell id", "polymorph");
++    return spellId && !bot->HasSpellCooldown(spellId) && (!lastCastMs || getMSTime() - lastCastMs >= 18000);
++}
++
++bool CastPvpPolymorphAction::Execute(Event /*event*/)
++{
++    Unit* target = AI_VALUE(Unit*, "current target");
++    if (!target)
++        return false;
++
++    if (bot->isMoving())
++    {
++        StopMageForPvpCast(botAI, bot);
++        return true;
++    }
++
++    if (!botAI->CastSpell("polymorph", target))
++        return false;
++
++    lastCastMs = getMSTime();
++    return true;
++}
++
++bool CastPvpMageSlowAction::isUseful()
++{
++    Unit* target = AI_VALUE(Unit*, "current target");
++    if (!target || !target->IsPlayer() || botAI->HasAura("polymorph", target) ||
++        botAI->HasAura("slow", target) || botAI->HasAura("frostbolt", target) ||
++        botAI->HasAura("cone of cold", target))
++        return false;
++
++    return bot->GetDistance2d(target) <= 35.0f;
++}
++
++bool CastPvpMageSlowAction::Execute(Event /*event*/)
++{
++    Unit* target = AI_VALUE(Unit*, "current target");
++    if (!target)
++        return false;
++
++    if (bot->GetDistance2d(target) <= 10.0f && botAI->CanCastSpell("cone of cold", target))
++        return botAI->CastSpell("cone of cold", target);
++
++    if (botAI->CanCastSpell("slow", target))
++        return botAI->CastSpell("slow", target);
++
++    uint32 const frostboltId = AI_VALUE2(uint32, "spell id", "frostbolt");
++    if (!frostboltId || bot->HasSpellCooldown(frostboltId))
++        return false;
++
++    if (bot->isMoving())
++    {
++        StopMageForPvpCast(botAI, bot);
++        return true;
++    }
++
++    return botAI->CastSpell("frostbolt", target);
++}
++
++bool HoldPvpPolymorphAction::isUseful()
++{
++    Unit* target = AI_VALUE(Unit*, "current target");
++    return target && target->IsPlayer() && botAI->HasAura("polymorph", target);
++}
++
++bool HoldPvpPolymorphAction::Execute(Event /*event*/)
++{
++    bot->AttackStop();
++    botAI->PetFollow();
++    return true;
++}
+diff --git a/modules/mod-playerbots/src/Ai/Class/Mage/MageActions.h b/modules/mod-playerbots/src/Ai/Class/Mage/MageActions.h
+index 9961f7acfd7f821fb0b09d2253a5217d596f4c07..0fad7232937e0a79af03ea26499536eda3954a16 100644
+--- a/modules/mod-playerbots/src/Ai/Class/Mage/MageActions.h
++++ b/modules/mod-playerbots/src/Ai/Class/Mage/MageActions.h
+@@ -141,6 +141,7 @@ class CastBlinkBackAction : public CastSpellAction
+ public:
+     CastBlinkBackAction(PlayerbotAI* botAI) : CastSpellAction(botAI, "blink") {}
+     bool Execute(Event event) override;
++    bool isUseful() override;
+ };
+ 
+ class CastManaShieldAction : public CastBuffSpellAction
+@@ -225,6 +226,33 @@ public:
+     CastPolymorphAction(PlayerbotAI* botAI) : CastCrowdControlSpellAction(botAI, "polymorph") {}
+ };
+ 
++class CastPvpPolymorphAction : public CastSpellAction
++{
++public:
++    CastPvpPolymorphAction(PlayerbotAI* botAI) : CastSpellAction(botAI, "pvp polymorph") {}
++    bool Execute(Event event) override;
++    bool isUseful() override;
++
++private:
++    uint32 lastCastMs = 0;
++};
++
++class CastPvpMageSlowAction : public CastSpellAction
++{
++public:
++    CastPvpMageSlowAction(PlayerbotAI* botAI) : CastSpellAction(botAI, "pvp mage slow") {}
++    bool Execute(Event event) override;
++    bool isUseful() override;
++};
++
++class HoldPvpPolymorphAction : public Action
++{
++public:
++    HoldPvpPolymorphAction(PlayerbotAI* botAI) : Action(botAI, "hold pvp polymorph") {}
++    bool Execute(Event event) override;
++    bool isUseful() override;
++};
++
+ class CastSpellstealAction : public CastSpellAction
+ {
+ public:
+diff --git a/modules/mod-playerbots/src/Ai/Class/Mage/MageAiObjectContext.cpp b/modules/mod-playerbots/src/Ai/Class/Mage/MageAiObjectContext.cpp
+index 1f2eaf3cd9e327313e8e002f8b9b70df5eb4f849..52c973138f41fc467bc0e5665613e19ed6fa37a4 100644
+--- a/modules/mod-playerbots/src/Ai/Class/Mage/MageAiObjectContext.cpp
++++ b/modules/mod-playerbots/src/Ai/Class/Mage/MageAiObjectContext.cpp
+@@ -218,6 +218,9 @@ public:
+         creators["combustion"] = &MageAiObjectContextInternal::combustion;
+         creators["ice block"] = &MageAiObjectContextInternal::ice_block;
+         creators["polymorph"] = &MageAiObjectContextInternal::polymorph;
++        creators["pvp polymorph"] = &MageAiObjectContextInternal::pvp_polymorph;
++        creators["pvp mage slow"] = &MageAiObjectContextInternal::pvp_mage_slow;
++        creators["hold pvp polymorph"] = &MageAiObjectContextInternal::hold_pvp_polymorph;
+         creators["spellsteal"] = &MageAiObjectContextInternal::spellsteal;
+         creators["living bomb"] = &MageAiObjectContextInternal::living_bomb;
+         creators["living bomb on attackers"] = &MageAiObjectContextInternal::living_bomb_on_attackers;
+@@ -284,6 +287,9 @@ private:
+     static Action* combustion(PlayerbotAI* botAI) { return new CastCombustionAction(botAI); }
+     static Action* ice_block(PlayerbotAI* botAI) { return new CastIceBlockAction(botAI); }
+     static Action* polymorph(PlayerbotAI* botAI) { return new CastPolymorphAction(botAI); }
++    static Action* pvp_polymorph(PlayerbotAI* botAI) { return new CastPvpPolymorphAction(botAI); }
++    static Action* pvp_mage_slow(PlayerbotAI* botAI) { return new CastPvpMageSlowAction(botAI); }
++    static Action* hold_pvp_polymorph(PlayerbotAI* botAI) { return new HoldPvpPolymorphAction(botAI); }
+     static Action* spellsteal(PlayerbotAI* botAI) { return new CastSpellstealAction(botAI); }
+     static Action* living_bomb(PlayerbotAI* botAI) { return new CastLivingBombAction(botAI); }
+     static Action* living_bomb_on_attackers(PlayerbotAI* botAI) { return new CastLivingBombOnAttackersAction(botAI); }
+diff --git a/modules/mod-playerbots/src/Ai/Class/Mage/Strategy/GenericMageStrategy.cpp b/modules/mod-playerbots/src/Ai/Class/Mage/Strategy/GenericMageStrategy.cpp
+index c08fa964a7385c2632438e24ded77f50d46c2d31..c930ea905ae0ea84d2a303bdfb33403250865aed 100644
+--- a/modules/mod-playerbots/src/Ai/Class/Mage/Strategy/GenericMageStrategy.cpp
++++ b/modules/mod-playerbots/src/Ai/Class/Mage/Strategy/GenericMageStrategy.cpp
+@@ -103,6 +103,10 @@ void GenericMageStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
+     triggers.push_back(new TriggerNode("frost ward", { NextAction("frost ward", 90.0f) }));
+     triggers.push_back(new TriggerNode("enemy is close and no firestarter strategy", { NextAction("frost nova", 50.0f) }));
+     triggers.push_back(new TriggerNode("enemy too close for spell and no firestarter strategy", { NextAction("blink back", 35.0f) }));
++    triggers.push_back(new TriggerNode("pvp tactical player target",
++                                       { NextAction("hold pvp polymorph", 60.0f),
++                                         NextAction("pvp polymorph", 48.0f),
++                                         NextAction("pvp mage slow", 47.0f) }));
+ 
+     // Mana Threshold Triggers
+     Player* bot = botAI->GetBot();
+diff --git a/modules/mod-playerbots/src/Ai/Class/Rogue/Action/RogueActions.cpp b/modules/mod-playerbots/src/Ai/Class/Rogue/Action/RogueActions.cpp
+index cbcda8ce45ef05b7dfcd55580d243c4c0c806778..e1486c9251aa5c76dccf113efca505c505a168ee 100644
+--- a/modules/mod-playerbots/src/Ai/Class/Rogue/Action/RogueActions.cpp
++++ b/modules/mod-playerbots/src/Ai/Class/Rogue/Action/RogueActions.cpp
+@@ -42,6 +42,11 @@ bool UnstealthAction::Execute(Event /*event*/)
+     return true;
+ }
+ 
++bool UnstealthAction::isUseful()
++{
++    return !bot->duel || bot->duel->State == DUEL_STATE_IN_PROGRESS;
++}
++
+ bool CheckStealthAction::Execute(Event /*event*/)
+ {
+     if (botAI->HasAura("stealth", bot))
+diff --git a/modules/mod-playerbots/src/Ai/Class/Rogue/Action/RogueActions.h b/modules/mod-playerbots/src/Ai/Class/Rogue/Action/RogueActions.h
+index ea326651ea0663c66bca0ad180184053a9fa34b2..36bef4508615a2f611ebadc39b25c4a7d65a47c8 100644
+--- a/modules/mod-playerbots/src/Ai/Class/Rogue/Action/RogueActions.h
++++ b/modules/mod-playerbots/src/Ai/Class/Rogue/Action/RogueActions.h
+@@ -56,6 +56,7 @@ public:
+     UnstealthAction(PlayerbotAI* botAI) : Action(botAI, "unstealth") {}
+ 
+     bool Execute(Event event) override;
++    bool isUseful() override;
+ };
+ 
+ class CheckStealthAction : public Action
+diff --git a/modules/mod-playerbots/src/Ai/Class/Warlock/Strategy/GenericWarlockStrategy.cpp b/modules/mod-playerbots/src/Ai/Class/Warlock/Strategy/GenericWarlockStrategy.cpp
+index 31e65419911f8fcc0e3aa33d9433b111e7117e10..c89a10a43f568e7a2b647de8656ef6b09af98a63 100644
+--- a/modules/mod-playerbots/src/Ai/Class/Warlock/Strategy/GenericWarlockStrategy.cpp
++++ b/modules/mod-playerbots/src/Ai/Class/Warlock/Strategy/GenericWarlockStrategy.cpp
+@@ -88,6 +88,7 @@ void GenericWarlockStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
+             }
+         )
+     );
++    triggers.push_back(new TriggerNode("pvp tactical player target", { NextAction("pvp fear", 48.0f) }));
+ }
+ 
+ // ===== AoE Strategy, 3+ enemies =====
+diff --git a/modules/mod-playerbots/src/Ai/Class/Warlock/WarlockActions.cpp b/modules/mod-playerbots/src/Ai/Class/Warlock/WarlockActions.cpp
+index 2587c0286d804f6ff1a573c676553524dd79dc65..9a05dfa41c224cd5a0a3a200be3f5d28109dabd1 100644
+--- a/modules/mod-playerbots/src/Ai/Class/Warlock/WarlockActions.cpp
++++ b/modules/mod-playerbots/src/Ai/Class/Warlock/WarlockActions.cpp
+@@ -7,6 +7,8 @@
+ #include "WarlockActions.h"
+ #include "Event.h"
+ #include "Item.h"
++#include "LastMovementValue.h"
++#include "MotionMaster.h"
+ #include "ObjectGuid.h"
+ #include "Player.h"
+ #include "PlayerbotAI.h"
+@@ -21,6 +23,41 @@
+ 
+ const int ITEM_SOUL_SHARD = 6265;
+ 
++bool CastPvpFearAction::isUseful()
++{
++    Unit* target = AI_VALUE(Unit*, "current target");
++    if (!target || !target->IsPlayer() || botAI->HasAura("fear", target) ||
++        target->IsImmunedToDamage(SPELL_SCHOOL_MASK_MAGIC))
++        return false;
++
++    if (bot->GetDistance2d(target) > 30.0f || (bot->GetHealthPct() > 65.0f && bot->GetDistance2d(target) > 15.0f))
++        return false;
++
++    uint32 const spellId = AI_VALUE2(uint32, "spell id", "fear");
++    return spellId && !bot->HasSpellCooldown(spellId) && (!lastCastMs || getMSTime() - lastCastMs >= 18000);
++}
++
++bool CastPvpFearAction::Execute(Event /*event*/)
++{
++    Unit* target = AI_VALUE(Unit*, "current target");
++    if (!target)
++        return false;
++
++    if (bot->isMoving())
++    {
++        bot->GetMotionMaster()->Clear(false);
++        bot->StopMoving();
++        botAI->GetAiObjectContext()->GetValue<LastMovement&>("last movement")->Get().clear();
++        return true;
++    }
++
++    if (!botAI->CastSpell("fear", target))
++        return false;
++
++    lastCastMs = getMSTime();
++    return true;
++}
++
+ // Checks if the bot has less than 26 soul shards, and if so, allows casting Drain Soul
+ bool CastDrainSoulAction::isUseful() { return AI_VALUE2(uint32, "item count", "soul shard") < 26; }
+ 
+diff --git a/modules/mod-playerbots/src/Ai/Class/Warlock/WarlockActions.h b/modules/mod-playerbots/src/Ai/Class/Warlock/WarlockActions.h
+index 3278550020f557c554cd79aed3d867c17db54087..94426023a8e6ccb45e804178434adcd05851ab5b 100644
+--- a/modules/mod-playerbots/src/Ai/Class/Warlock/WarlockActions.h
++++ b/modules/mod-playerbots/src/Ai/Class/Warlock/WarlockActions.h
+@@ -183,6 +183,17 @@ public:
+     bool isPossible() override;
+ };
+ 
++class CastPvpFearAction : public CastSpellAction
++{
++public:
++    CastPvpFearAction(PlayerbotAI* botAI) : CastSpellAction(botAI, "pvp fear") {}
++    bool Execute(Event event) override;
++    bool isUseful() override;
++
++private:
++    uint32 lastCastMs = 0;
++};
++
+ class CastSpellLockAction : public CastSpellAction
+ {
+ public:
+diff --git a/modules/mod-playerbots/src/Ai/Class/Warlock/WarlockAiObjectContext.cpp b/modules/mod-playerbots/src/Ai/Class/Warlock/WarlockAiObjectContext.cpp
+index 74e4a15ea8a276ed52fb2686ccb3de19d1701991..c7ab2c558f5007deabe655ace3a57677083824a1 100644
+--- a/modules/mod-playerbots/src/Ai/Class/Warlock/WarlockAiObjectContext.cpp
++++ b/modules/mod-playerbots/src/Ai/Class/Warlock/WarlockAiObjectContext.cpp
+@@ -274,6 +274,7 @@ public:
+         creators["drain life"] = &WarlockAiObjectContextInternal::drain_life;
+         creators["banish on cc"] = &WarlockAiObjectContextInternal::banish_on_cc;
+         creators["fear on cc"] = &WarlockAiObjectContextInternal::fear_on_cc;
++        creators["pvp fear"] = &WarlockAiObjectContextInternal::pvp_fear;
+         creators["spell lock"] = &WarlockAiObjectContextInternal::spell_lock;
+         creators["devour magic purge"] = &WarlockAiObjectContextInternal::devour_magic_purge;
+         creators["devour magic cleanse"] = &WarlockAiObjectContextInternal::devour_magic_cleanse;
+@@ -347,6 +348,7 @@ private:
+     static Action* drain_life(PlayerbotAI* botAI) { return new CastDrainLifeAction(botAI); }
+     static Action* banish_on_cc(PlayerbotAI* botAI) { return new CastBanishOnCcAction(botAI); }
+     static Action* fear_on_cc(PlayerbotAI* botAI) { return new CastFearOnCcAction(botAI); }
++    static Action* pvp_fear(PlayerbotAI* botAI) { return new CastPvpFearAction(botAI); }
+     static Action* spell_lock(PlayerbotAI* botAI) { return new CastSpellLockAction(botAI); }
+     static Action* devour_magic_purge(PlayerbotAI* botAI) { return new CastDevourMagicPurgeAction(botAI); }
+     static Action* devour_magic_cleanse(PlayerbotAI* botAI) { return new CastDevourMagicCleanseAction(botAI); }
+diff --git a/modules/mod-playerbots/src/PlayerbotAIConfig.cpp b/modules/mod-playerbots/src/PlayerbotAIConfig.cpp
+index 633df7a4d3885bf5f6015b4c6ed137e94631acdf..ba9dab8c764674aa77da3c693755b8e061b5b752 100644
+--- a/modules/mod-playerbots/src/PlayerbotAIConfig.cpp
++++ b/modules/mod-playerbots/src/PlayerbotAIConfig.cpp
+@@ -142,6 +142,12 @@ bool PlayerbotAIConfig::Initialize()
+         sConfigMgr->GetOption<float>("AiPlayerbot.PvPTactical.Caster.PreferredDistance", 26.0f);
+     pvpTacticalHealerPreferredDistance =
+         sConfigMgr->GetOption<float>("AiPlayerbot.PvPTactical.Healer.PreferredDistance", 30.0f);
++    pvpTacticalRangedOpponentEmergencyDistance =
++        sConfigMgr->GetOption<float>("AiPlayerbot.PvPTactical.RangedOpponent.EmergencyDistance", 8.0f);
++    pvpTacticalRangedOpponentPreferredDistance =
++        sConfigMgr->GetOption<float>("AiPlayerbot.PvPTactical.RangedOpponent.PreferredDistance", 12.0f);
++    pvpTacticalDuelSafeRadius =
++        sConfigMgr->GetOption<float>("AiPlayerbot.PvPTactical.Duel.SafeRadius", 38.0f);
+     pvpTacticalRetreatStep = sConfigMgr->GetOption<float>("AiPlayerbot.PvPTactical.RetreatStep", 14.0f);
+     pvpTacticalTargetLeashDistance =
+         sConfigMgr->GetOption<float>("AiPlayerbot.PvPTactical.TargetLeashDistance", 55.0f);
+diff --git a/modules/mod-playerbots/src/PlayerbotAIConfig.h b/modules/mod-playerbots/src/PlayerbotAIConfig.h
+index 9125fd8f1291ed662c6b9ba41bb398f81303a3f7..9ea7e0102a01e58d38499778c99246b36d68afc1 100644
+--- a/modules/mod-playerbots/src/PlayerbotAIConfig.h
++++ b/modules/mod-playerbots/src/PlayerbotAIConfig.h
+@@ -137,6 +137,9 @@ public:
+     float pvpTacticalHunterPreferredDistance;
+     float pvpTacticalCasterPreferredDistance;
+     float pvpTacticalHealerPreferredDistance;
++    float pvpTacticalRangedOpponentEmergencyDistance;
++    float pvpTacticalRangedOpponentPreferredDistance;
++    float pvpTacticalDuelSafeRadius;
+     float pvpTacticalRetreatStep;
+     float pvpTacticalTargetLeashDistance;
+     bool pvpTacticalMeleeEnabled;
